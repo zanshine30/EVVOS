@@ -75,7 +75,7 @@ export default function HomeScreen({ navigation }) {
               <Text style={styles.statLabel}>Today's Cases</Text>
             </View>
 
-            <View style={styles.statCard}>
+            <View style={[styles.statCard, styles.statYellowBorder]}>
               <Text style={styles.statValue}>3h 20m</Text>
               <Text style={styles.statLabel}>Recording Time</Text>
             </View>
@@ -239,6 +239,7 @@ const styles = StyleSheet.create({
   },
   statGreenBorder: { borderColor: "rgba(61,220,132,0.45)" },
   statRedBorder: { borderColor: "rgba(255,80,80,0.40)" },
+  statYellowBorder: { borderColor: "rgba(248, 187, 5, 0.4)" },
   statValue: { color: "white", fontSize: 16, fontWeight: "700" },
   statLabel: { color: "rgba(255,255,255,0.55)", fontSize: 11, marginTop: 6 },
 
