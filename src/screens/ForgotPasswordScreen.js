@@ -25,8 +25,7 @@ export default function ForgotPasswordScreen({ navigation }) {
       return;
     }
 
-    // TODO: connect to backend/Firebase reset password email
-    // For UI flow demo (as in your mockup), we proceed to Create New Password
+ 
     Alert.alert("Link Sent", "A reset link has been sent to your email.", [
       {
         text: "OK",
@@ -47,7 +46,7 @@ export default function ForgotPasswordScreen({ navigation }) {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          {/* Header logo */}
+       
           <View style={styles.header}>
             <Image
               source={require("../../assets/logo.png")}
@@ -60,7 +59,6 @@ export default function ForgotPasswordScreen({ navigation }) {
             </Text>
           </View>
 
-          {/* Card */}
           <View style={styles.card}>
             {/* Card top bar */}
             <View style={styles.cardTop}>

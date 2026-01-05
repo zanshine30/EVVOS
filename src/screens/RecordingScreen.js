@@ -12,11 +12,16 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-export default function RecordingScreen({ navigation }) {
+export default function RecordingScreen({ navigation, route }) {
   const [seconds, setSeconds] = useState(5);
 
-  // ✅ modals
-  const [emergencyOpen, setEmergencyOpen] = useState(false);
+  
+  const [emergencyConfirmOpen, setEmergencyConfirmOpen] = useState(false);
+
+ 
+  const [backupNotifyOpen, setBackupNotifyOpen] = useState(false);
+
+
   const [stopOpen, setStopOpen] = useState(false);
 
   useEffect(() => {
@@ -30,27 +35,50 @@ export default function RecordingScreen({ navigation }) {
     return `${mm}:${ss}`;
   }, [seconds]);
 
+  
+  const backupData = useMemo(() => {
+    const incoming = route?.params?.backupData;
+    if (incoming) return incoming;
+
+    return {
+      enforcer: "Juan Bartolome",
+      location: "Llano Rd., Caloocan City",
+      time: "8:21 pm",
+      responders: 4,
+      coords: { latitude: 14.7566, longitude: 121.0447 },
+    };
+  }, [route?.params?.backupData]);
+
   const handleSnapshot = () => console.log("Snapshot (simulation)");
   const handleMark = () => console.log("Mark (simulation)");
 
-  // ✅ Emergency popup (open)
-  const handleEmergency = () => setEmergencyOpen(true);
+ 
+  const handleEmergency = () => setEmergencyConfirmOpen(true);
 
-  // ✅ Stop popup (open)
+  
   const handleStop = () => setStopOpen(true);
 
-  // ✅ Confirm Emergency
+  
   const confirmEmergency = () => {
-    console.log("Emergency Backup CONFIRMED (simulation)");
-    setEmergencyOpen(false);
+    setEmergencyConfirmOpen(false);
+    setBackupNotifyOpen(true);
   };
 
-  // ✅ Confirm Stop -> go IncidentSummary
+  
+  const acceptBackupRequest = () => {
+    setBackupNotifyOpen(false);
+    navigation.navigate("EmergencyBackup", { backupData });
+  };
+
+  
+  const declineBackupRequest = () => {
+    setBackupNotifyOpen(false);
+  };
+
+  
   const confirmStop = () => {
     console.log("Stop Recording CONFIRMED (simulation)");
     setStopOpen(false);
-
-    // go to IncidentSummary (no GO_BACK issues)
     navigation.navigate("IncidentSummary");
   };
 
@@ -74,12 +102,10 @@ export default function RecordingScreen({ navigation }) {
           showsVerticalScrollIndicator={false}
           alwaysBounceVertical={false}
         >
-          {/* Top title (no back button) */}
           <View style={styles.topHeader}>
             <Text style={styles.headerTitle}>Enforcer Dashboard</Text>
           </View>
 
-          {/* Info row (3 equal columns) */}
           <View style={styles.infoRow}>
             <View style={[styles.infoCol, styles.infoLeft]}>
               <Text style={styles.infoText}>ID: 4521</Text>
@@ -102,10 +128,8 @@ export default function RecordingScreen({ navigation }) {
             </View>
           </View>
 
-          {/* Divider under info row */}
           <View style={styles.divider} />
 
-          {/* Big Recording Button */}
           <View style={styles.recordWrap}>
             <View style={styles.recordOuter}>
               <View style={styles.recordInner}>
@@ -116,7 +140,6 @@ export default function RecordingScreen({ navigation }) {
             </View>
           </View>
 
-          {/* Waveform row */}
           <View style={styles.waveRow}>
             <View style={styles.micIcon}>
               <Ionicons name="mic" size={18} color="#17F39A" />
@@ -129,7 +152,6 @@ export default function RecordingScreen({ navigation }) {
             </View>
           </View>
 
-          {/* Live Transcript */}
           <View style={styles.transcriptCard}>
             <View style={styles.transcriptHeader}>
               <View style={styles.transLeft}>
@@ -151,7 +173,6 @@ export default function RecordingScreen({ navigation }) {
             </View>
           </View>
 
-          {/* Snapshot */}
           <TouchableOpacity
             style={styles.snapshotBtn}
             activeOpacity={0.85}
@@ -163,7 +184,6 @@ export default function RecordingScreen({ navigation }) {
             <Text style={styles.snapshotText}>Snapshot</Text>
           </TouchableOpacity>
 
-          {/* Emergency Backup */}
           <TouchableOpacity
             style={styles.emergencyBtn}
             activeOpacity={0.9}
@@ -173,7 +193,6 @@ export default function RecordingScreen({ navigation }) {
             <Text style={styles.emergencyText}>Emergency Backup</Text>
           </TouchableOpacity>
 
-          {/* Bottom controls */}
           <View style={styles.bottomRow}>
             <TouchableOpacity
               style={styles.markBtn}
@@ -198,20 +217,21 @@ export default function RecordingScreen({ navigation }) {
             </TouchableOpacity>
           </View>
 
-          {/* ===================== */}
-          {/* ✅ EMERGENCY MODAL */}
-          {/* ===================== */}
+        
           <Modal
-            visible={emergencyOpen}
+            visible={emergencyConfirmOpen}
             transparent
             animationType="fade"
-            onRequestClose={() => setEmergencyOpen(false)}
+            onRequestClose={() => setEmergencyConfirmOpen(false)}
           >
             <Pressable
               style={styles.modalBackdrop}
-              onPress={() => setEmergencyOpen(false)}
+              onPress={() => setEmergencyConfirmOpen(false)}
             >
-              <Pressable style={[styles.modalCard, styles.modalRedBorder]} onPress={() => {}}>
+              <Pressable
+                style={[styles.modalCard, styles.modalRedBorder]}
+                onPress={() => {}}
+              >
                 <View style={styles.modalHeaderRow}>
                   <View style={styles.modalHeaderLeft}>
                     <Ionicons name="warning-outline" size={18} color="#FF4A4A" />
@@ -228,7 +248,7 @@ export default function RecordingScreen({ navigation }) {
                   <TouchableOpacity
                     style={[styles.modalBtn, styles.modalBtnCancel]}
                     activeOpacity={0.9}
-                    onPress={() => setEmergencyOpen(false)}
+                    onPress={() => setEmergencyConfirmOpen(false)}
                   >
                     <Text style={styles.modalBtnCancelText}>Cancel</Text>
                   </TouchableOpacity>
@@ -245,9 +265,57 @@ export default function RecordingScreen({ navigation }) {
             </Pressable>
           </Modal>
 
-          {/* ===================== */}
-          {/* ✅ STOP CONFIRM MODAL */}
-          {/* ===================== */}
+         
+          <Modal
+            visible={backupNotifyOpen}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setBackupNotifyOpen(false)}
+          >
+            <Pressable style={styles.popupBackdrop} onPress={declineBackupRequest}>
+              <Pressable style={styles.popupCard} onPress={() => {}}>
+                <View style={styles.popupHeader}>
+                  <Ionicons name="warning-outline" size={18} color="#FF4A4A" />
+                  <Text style={styles.popupTitle}>Emergency Backup Request</Text>
+                </View>
+
+                <View style={{ marginTop: 8 }}>
+                  <Text style={styles.popupLine}>
+                    Enforcer: <Text style={styles.popupValue}>{backupData.enforcer}</Text>
+                  </Text>
+                  <Text style={styles.popupLine}>
+                    Location: <Text style={styles.popupValue}>{backupData.location}</Text>
+                  </Text>
+                  <Text style={styles.popupLine}>
+                    Time: <Text style={styles.popupValue}>{backupData.time}</Text>
+                  </Text>
+                  <Text style={styles.popupLine}>
+                    No. of Responders/:{" "}
+                    <Text style={styles.popupValue}>{backupData.responders}</Text>
+                  </Text>
+                </View>
+
+                <View style={styles.popupBtnRow}>
+                  <TouchableOpacity
+                    style={[styles.popupBtn, styles.popupAccept]}
+                    activeOpacity={0.9}
+                    onPress={acceptBackupRequest}
+                  >
+                    <Text style={styles.popupAcceptText}>Accept</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={[styles.popupBtn, styles.popupDecline]}
+                    activeOpacity={0.9}
+                    onPress={declineBackupRequest}
+                  >
+                    <Text style={styles.popupDeclineText}>Decline</Text>
+                  </TouchableOpacity>
+                </View>
+              </Pressable>
+            </Pressable>
+          </Modal>
+
           <Modal
             visible={stopOpen}
             transparent
@@ -258,7 +326,10 @@ export default function RecordingScreen({ navigation }) {
               style={styles.modalBackdrop}
               onPress={() => setStopOpen(false)}
             >
-              <Pressable style={[styles.modalCard, styles.modalOrangeBorder]} onPress={() => {}}>
+              <Pressable
+                style={[styles.modalCard, styles.modalOrangeBorder]}
+                onPress={() => {}}
+              >
                 <View style={styles.modalHeaderRow}>
                   <View style={styles.modalHeaderLeft}>
                     <View style={styles.orangeDot} />
@@ -338,26 +409,26 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
 
-  recordWrap: { alignItems: "center", marginTop: 6, marginBottom: 14 },
+  recordWrap: { alignItems: "center", marginTop: 18, marginBottom: 20 },
   recordOuter: {
-    width: 190,
-    height: 190,
+    width: 200,
+    height: 200,
     borderRadius: 999,
     backgroundColor: "#C70000",
     alignItems: "center",
     justifyContent: "center",
   },
   recordInner: {
-    width: 148,
-    height: 148,
+    width: 150,
+    height: 150,
     borderRadius: 999,
     backgroundColor: "#B10000",
     alignItems: "center",
     justifyContent: "center",
   },
   stopSquare: {
-    width: 34,
-    height: 34,
+    width: 40,
+    height: 40,
     borderRadius: 8,
     backgroundColor: "rgba(255,255,255,0.85)",
     marginBottom: 10,
@@ -377,8 +448,8 @@ const styles = StyleSheet.create({
 
   waveRow: { flexDirection: "row", alignItems: "center", marginBottom: 14 },
   micIcon: {
-    width: 34,
-    height: 34,
+    width: 40,
+    height: 40,
     borderRadius: 12,
     backgroundColor: "rgba(0,0,0,0.18)",
     alignItems: "center",
@@ -396,12 +467,13 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
   },
   bar: {
-    width: 4,
+    width: 3,
     borderRadius: 999,
     backgroundColor: "rgba(255,255,255,0.75)",
   },
 
   transcriptCard: {
+    height: 200,
     backgroundColor: "rgba(0,0,0,0.18)",
     borderRadius: 12,
     borderWidth: 1,
@@ -435,9 +507,9 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255,255,255,0.06)",
     borderRadius: 10,
     padding: 10,
-    minHeight: 84,
+    minHeight: 140,
   },
-  transText: { color: "rgba(255,255,255,0.70)", fontSize: 11, lineHeight: 16 },
+  transText: { color: "rgba(255,255,255,0.70)", fontSize: 12, lineHeight: 16 },
 
   snapshotBtn: {
     backgroundColor: "rgba(0,0,0,0.18)",
@@ -508,10 +580,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     marginLeft: 8,
   },
-
-  /* ========================= */
-  /* ✅ MODAL STYLES (Figma-ish) */
-  /* ========================= */
+  
   modalBackdrop: {
     flex: 1,
     backgroundColor: "rgba(0,0,0,0.55)",
@@ -554,7 +623,7 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.55)",
     fontSize: 11,
     lineHeight: 16,
-    marginBottom: 14,
+    marginBottom: 12,
   },
 
   modalBtnRow: { flexDirection: "row", gap: 12 },
@@ -576,14 +645,12 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
 
-  // emergency confirm = red
   modalBtnDanger: {
     backgroundColor: "#FF1E1E",
     borderColor: "rgba(255,30,30,0.55)",
   },
   modalBtnDangerText: { color: "white", fontSize: 12, fontWeight: "800" },
 
-  // stop confirm = orange
   modalBtnConfirm: {
     backgroundColor: "#F3B05A",
     borderColor: "rgba(243,176,90,0.55)",
@@ -593,4 +660,49 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "900",
   },
+
+  
+  popupBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    justifyContent: "flex-start",
+    paddingTop: 24,
+    paddingHorizontal: 18,
+  },
+  popupCard: {
+    width: "100%",
+    backgroundColor: "rgba(15,25,45,0.96)",
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 2,
+    borderColor: "rgba(234, 63, 63, 0.5)",
+  },
+  popupHeader: { flexDirection: "row", alignItems: "center", gap: 10 },
+  popupTitle: {
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  popupLine: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 11,
+    marginTop: 6,
+  },
+  popupValue: { color: "rgba(255,255,255,0.90)", fontWeight: "800" },
+  popupBtnRow: { flexDirection: "row", gap: 12, marginTop: 12 },
+  popupBtn: {
+    flex: 1,
+    height: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  popupAccept: { backgroundColor: "#3DDC84" },
+  popupDecline: { backgroundColor: "#FF1E1E" },
+  popupAcceptText: {
+    color: "rgba(15,25,45,0.95)",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+  popupDeclineText: { color: "white", fontSize: 12, fontWeight: "900" },
 });

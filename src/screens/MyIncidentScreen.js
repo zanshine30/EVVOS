@@ -12,10 +12,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function MyIncidentScreen({ navigation }) {
-  const [tab, setTab] = useState("All"); // All | Completed | Pending
+  const [tab, setTab] = useState("All"); 
   const [q, setQ] = useState("");
 
-  // ✅ simulation data only
   const incidents = useMemo(
     () => [
       {
@@ -63,7 +62,7 @@ export default function MyIncidentScreen({ navigation }) {
         ? incidents
         : tab === "Completed"
         ? incidents.filter((x) => x.status === "COMPLETED")
-        : []; // Pending = empty state (as per figma)
+        : []; 
 
     if (!query) return base;
 
@@ -92,7 +91,7 @@ export default function MyIncidentScreen({ navigation }) {
     >
       <SafeAreaView style={styles.safe}>
         <View style={styles.container}>
-          {/* Header */}
+       
           <View style={styles.header}>
             <TouchableOpacity
               onPress={() => navigation.goBack()}
@@ -112,7 +111,6 @@ export default function MyIncidentScreen({ navigation }) {
             </View>
           </View>
 
-          {/* Search */}
           <View style={styles.searchWrap}>
             <Ionicons
               name="search-outline"
@@ -128,7 +126,7 @@ export default function MyIncidentScreen({ navigation }) {
             />
           </View>
 
-          {/* Tabs */}
+         
           <View style={styles.tabsRow}>
             <Pill
               label="All"
@@ -150,10 +148,10 @@ export default function MyIncidentScreen({ navigation }) {
             />
           </View>
 
-          {/* Orange divider line (like figma) */}
+         
           <View style={styles.orangeLine} />
 
-          {/* List / Empty */}
+          
           <ScrollView
             contentContainerStyle={styles.scroll}
             showsVerticalScrollIndicator={false}
@@ -177,7 +175,7 @@ export default function MyIncidentScreen({ navigation }) {
                   style={styles.card}
                   onPress={() => navigation.navigate("IncidentDetails", { incident: item })}
                 >
-                  {/* top row */}
+                 
                   <View style={styles.cardTop}>
                     <View style={styles.statusPill}>
                       <Text style={styles.statusText}>{item.status}</Text>
@@ -205,7 +203,7 @@ export default function MyIncidentScreen({ navigation }) {
                   </Text>
                   <Text style={styles.ageText}>{item.age}</Text>
 
-                  {/* meta */}
+                  
                   <View style={styles.metaRow}>
                     <View style={styles.metaItem}>
                       <Ionicons
@@ -230,7 +228,6 @@ export default function MyIncidentScreen({ navigation }) {
                     </View>
                   </View>
 
-                  {/* transcript preview */}
                   <View style={styles.transBox}>
                     <Text style={styles.transLabel}>Transcript:</Text>
                     <Text style={styles.transText} numberOfLines={2}>

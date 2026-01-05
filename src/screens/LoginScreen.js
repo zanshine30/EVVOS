@@ -9,21 +9,22 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
-  Alert,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
+
+
+import { clearPaired } from "../utils/deviceStore";
 
 export default function LoginScreen({ navigation }) {
   const [badgeNumber, setBadgeNumber] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
-  // validation errors (frontend simulation only)
   const [badgeError, setBadgeError] = useState("");
   const [passError, setPassError] = useState("");
 
-  const handleSignIn = () => {
+  const handleSignIn = async () => {
     const badgeTrimmed = badgeNumber.trim();
     const passTrimmed = password.trim();
 
@@ -45,7 +46,14 @@ export default function LoginScreen({ navigation }) {
 
     if (hasError) return;
 
-    navigation.replace("Home");
+   
+    await clearPaired();
+
+    
+    navigation.reset({
+      index: 0,
+      routes: [{ name: "DeviceWelcome" }],
+    });
   };
 
   const handleForgotPassword = () => {
@@ -67,7 +75,6 @@ export default function LoginScreen({ navigation }) {
           contentContainerStyle={styles.scroll}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Logo + Title */}
           <View style={styles.header}>
             <Image
               source={require("../../assets/logo.png")}
@@ -80,16 +87,9 @@ export default function LoginScreen({ navigation }) {
             </Text>
           </View>
 
-          {/* Form */}
           <View style={styles.form}>
-            {/* Badge Number */}
             <Text style={styles.label}>Badge Number</Text>
-            <View
-              style={[
-                styles.inputWrap,
-                badgeError ? styles.inputWrapError : null,
-              ]}
-            >
+            <View style={[styles.inputWrap, badgeError ? styles.inputWrapError : null]}>
               <TextInput
                 value={badgeNumber}
                 onChangeText={(t) => {
@@ -99,7 +99,6 @@ export default function LoginScreen({ navigation }) {
                 placeholder="Enter badge number"
                 placeholderTextColor="rgba(255,255,255,0.45)"
                 style={styles.input}
-                keyboardType="default"
                 autoCapitalize="none"
                 autoCorrect={false}
                 returnKeyType="next"
@@ -107,14 +106,8 @@ export default function LoginScreen({ navigation }) {
             </View>
             {!!badgeError && <Text style={styles.errorText}>{badgeError}</Text>}
 
-            {/* Password */}
             <Text style={[styles.label, { marginTop: 14 }]}>Password</Text>
-            <View
-              style={[
-                styles.inputWrap,
-                passError ? styles.inputWrapError : null,
-              ]}
-            >
+            <View style={[styles.inputWrap, passError ? styles.inputWrapError : null]}>
               <TextInput
                 value={password}
                 onChangeText={(t) => {
@@ -152,7 +145,6 @@ export default function LoginScreen({ navigation }) {
               <Text style={styles.forgotText}>Forgot password?</Text>
             </TouchableOpacity>
 
-            {/* Sign In */}
             <TouchableOpacity
               onPress={handleSignIn}
               style={styles.signInBtn}
@@ -181,22 +173,9 @@ const styles = StyleSheet.create({
     paddingVertical: 28,
   },
 
-  header: {
-    alignItems: "center",
-    marginBottom: 22,
-  },
-  logo: {
-    width: 110,
-    height: 110,
-    marginBottom: 10,
-  },
-  title: {
-    color: "white",
-    fontSize: 26,
-    fontWeight: "700",
-    letterSpacing: 1.5,
-    marginTop: 2,
-  },
+  header: { alignItems: "center", marginBottom: 22 },
+  logo: { width: 110, height: 110, marginBottom: 10 },
+  title: { color: "white", fontSize: 26, fontWeight: "700", letterSpacing: 1.5, marginTop: 2 },
   subtitle: {
     color: "rgba(255,255,255,0.65)",
     fontSize: 12,
@@ -206,18 +185,8 @@ const styles = StyleSheet.create({
     lineHeight: 16,
   },
 
-  form: {
-    width: "100%",
-    maxWidth: 420,
-    alignSelf: "center",
-    marginTop: 6,
-  },
-
-  label: {
-    color: "rgba(255,255,255,0.7)",
-    fontSize: 12,
-    marginBottom: 8,
-  },
+  form: { width: "100%", maxWidth: 420, alignSelf: "center", marginTop: 6 },
+  label: { color: "rgba(255,255,255,0.7)", fontSize: 12, marginBottom: 8 },
 
   inputWrap: {
     backgroundColor: "rgba(255,255,255,0.10)",
@@ -228,11 +197,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "transparent",
   },
-  input: {
-    color: "white",
-    fontSize: 14,
-    paddingRight: 34, // space for eye icon
-  },
+  inputWrapError: { borderColor: "rgba(255, 120, 120, 0.95)" },
+
+  input: { color: "white", fontSize: 14, paddingRight: 34 },
   eyeBtn: {
     position: "absolute",
     right: 12,
@@ -242,21 +209,10 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
-  errorText: {
-    marginTop: 6,
-    color: "rgba(255, 120, 120, 0.95)",
-    fontSize: 11,
-  },
+  errorText: { marginTop: 6, color: "rgba(255, 120, 120, 0.95)", fontSize: 11 },
 
-  forgotWrap: {
-    alignSelf: "flex-end",
-    marginTop: 10,
-    marginBottom: 18,
-  },
-  forgotText: {
-    color: "rgba(255,255,255,0.65)",
-    fontSize: 12,
-  },
+  forgotWrap: { alignSelf: "flex-end", marginTop: 10, marginBottom: 18 },
+  forgotText: { color: "rgba(255,255,255,0.65)", fontSize: 12 },
 
   signInBtn: {
     backgroundColor: "#2E78E6",
@@ -265,16 +221,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  signInText: {
-    color: "white",
-    fontSize: 14,
-    fontWeight: "600",
-  },
+  signInText: { color: "white", fontSize: 14, fontWeight: "600" },
 
-  footer: {
-    marginTop: 18,
-    textAlign: "center",
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 11,
-  },
+  footer: { marginTop: 18, textAlign: "center", color: "rgba(255,255,255,0.55)", fontSize: 11 },
 });

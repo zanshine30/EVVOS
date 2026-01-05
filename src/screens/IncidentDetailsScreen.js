@@ -8,7 +8,7 @@ export default function IncidentDetailsScreen({ navigation, route }) {
   const incident = route?.params?.incident;
 
   const data = useMemo(() => {
-    // base fallback (so ALL fields exist)
+   
     const fallback = {
       id: "REC-2025-001",
       status: "COMPLETED",
@@ -24,15 +24,13 @@ export default function IncidentDetailsScreen({ navigation, route }) {
       tags: ["assault", "traffic-stop", "aggressive-subject", "backup-requested"],
     };
 
-    // merge incoming incident over fallback
     const merged = { ...fallback, ...(incident || {}) };
 
-    // ✅ GUARDS (prevents .map crash)
+   
     merged.markers = Array.isArray(merged.markers) ? merged.markers : [];
     merged.tags = Array.isArray(merged.tags) ? merged.tags : [];
 
-    // if you pass duration like "1:25", show it (optional formatting)
-    // keep whatever you pass, fallback already safe
+   
     return merged;
   }, [incident]);
 
@@ -45,7 +43,7 @@ export default function IncidentDetailsScreen({ navigation, route }) {
     >
       <SafeAreaView style={styles.safe}>
         <View style={styles.container}>
-          {/* Header */}
+      
           <View style={styles.header}>
             <TouchableOpacity
               onPress={() => navigation.goBack()}
@@ -64,7 +62,7 @@ export default function IncidentDetailsScreen({ navigation, route }) {
           <View style={styles.orangeLine} />
 
           <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-            {/* Status / Summary */}
+           
             <View style={[styles.card, styles.greenBorder]}>
               <View style={styles.statusPill}>
                 <Text style={styles.statusText}>{data.status}</Text>
@@ -77,7 +75,7 @@ export default function IncidentDetailsScreen({ navigation, route }) {
               </View>
             </View>
 
-            {/* Recording + Snapshot */}
+           
             <View style={styles.twoColRow}>
               <View style={[styles.smallCard, styles.orangeBorder]}>
                 <View style={styles.smallHeader}>
@@ -114,7 +112,7 @@ export default function IncidentDetailsScreen({ navigation, route }) {
               </View>
             </View>
 
-            {/* Transcript */}
+           
             <View style={[styles.card, styles.greenBorder]}>
               <View style={styles.sectionHeader}>
                 <View style={[styles.sectionIconBox, { backgroundColor: "rgba(61,220,132,0.14)" }]}>
@@ -129,7 +127,7 @@ export default function IncidentDetailsScreen({ navigation, route }) {
               </View>
             </View>
 
-            {/* Incident Markers */}
+          
             <View style={[styles.card, styles.orangeBorder]}>
               <View style={styles.sectionHeader}>
                 <View style={[styles.sectionIconBox, { backgroundColor: "rgba(255,176,32,0.14)" }]}>

@@ -8,13 +8,15 @@ import {
   TouchableOpacity,
   KeyboardAvoidingView,
   Platform,
+  Modal,
+  Pressable,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function IncidentSummaryScreen({ navigation }) {
-  // simulation data
+  
   const officerName = "Marcus Rodriguez";
   const badge = "#4521";
   const duration = "3m 42s";
@@ -23,6 +25,8 @@ export default function IncidentSummaryScreen({ navigation }) {
   const [driverName, setDriverName] = useState("");
   const [plateNumber, setPlateNumber] = useState("");
   const [location, setLocation] = useState("Camarin rd. Caloocan City");
+
+  const [closeOpen, setCloseOpen] = useState(false);
 
   const commonViolations = useMemo(
     () => [
@@ -40,7 +44,6 @@ export default function IncidentSummaryScreen({ navigation }) {
     []
   );
 
-  // ✅ keep ORDER like the screenshot (1., 2., 3...)
   const [selectedList, setSelectedList] = useState([]);
   const [customViolation, setCustomViolation] = useState("");
   const [customList, setCustomList] = useState([]);
@@ -98,7 +101,10 @@ export default function IncidentSummaryScreen({ navigation }) {
     navigation.popToTop();
   };
 
-  const handleClose = () => {
+  const handleClose = () => setCloseOpen(true);
+
+  const confirmClose = () => {
+    setCloseOpen(false);
     navigation.navigate("Home");
   };
 
@@ -117,11 +123,15 @@ export default function IncidentSummaryScreen({ navigation }) {
           behavior={Platform.OS === "ios" ? "padding" : undefined}
         >
           <View style={styles.container}>
-            {/* Header */}
+          
             <View style={styles.header}>
               <View style={styles.headerLeft}>
                 <View style={styles.headerIconBox}>
-                  <Ionicons name="document-text-outline" size={16} color="#FFB020" />
+                  <Ionicons
+                    name="document-text-outline"
+                    size={16}
+                    color="#FFB020"
+                  />
                 </View>
                 <View>
                   <Text style={styles.headerTitle}>Incident Summary</Text>
@@ -134,7 +144,11 @@ export default function IncidentSummaryScreen({ navigation }) {
                 activeOpacity={0.8}
                 style={styles.closeBtn}
               >
-                <Ionicons name="close" size={18} color="rgba(255,255,255,0.75)" />
+                <Ionicons
+                  name="close"
+                  size={18}
+                  color="rgba(255,255,255,0.75)"
+                />
               </TouchableOpacity>
             </View>
 
@@ -145,7 +159,7 @@ export default function IncidentSummaryScreen({ navigation }) {
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
             >
-              {/* ✅ Recording Completed (UPDATED to match screenshot) */}
+          
               <View style={[styles.card, styles.recordCard]}>
                 <View style={styles.recordHeader}>
                   <Ionicons name="checkmark-circle" size={16} color="#3DDC84" />
@@ -160,7 +174,7 @@ export default function IncidentSummaryScreen({ navigation }) {
                 </View>
               </View>
 
-              {/* Driver Details */}
+              
               <View style={[styles.card, styles.cardOrangeBorder]}>
                 <View style={styles.sectionHeader}>
                   <Ionicons name="person-outline" size={16} color="#FFB020" />
@@ -178,7 +192,9 @@ export default function IncidentSummaryScreen({ navigation }) {
                   />
                 </View>
 
-                <Text style={[styles.inputLabel, { marginTop: 10 }]}>Plate Number *</Text>
+                <Text style={[styles.inputLabel, { marginTop: 10 }]}>
+                  Plate Number *
+                </Text>
                 <View style={styles.inputWrap}>
                   <TextInput
                     value={plateNumber}
@@ -190,10 +206,16 @@ export default function IncidentSummaryScreen({ navigation }) {
                   />
                 </View>
 
-                <Text style={[styles.inputLabel, { marginTop: 10 }]}>Location</Text>
+                <Text style={[styles.inputLabel, { marginTop: 10 }]}>
+                  Location
+                </Text>
                 <View style={styles.inputWrap}>
                   <View style={styles.locationRow}>
-                    <Ionicons name="location-outline" size={16} color="rgba(255,255,255,0.55)" />
+                    <Ionicons
+                      name="location-outline"
+                      size={16}
+                      color="rgba(255,255,255,0.55)"
+                    />
                     <TextInput
                       value={location}
                       onChangeText={setLocation}
@@ -205,7 +227,6 @@ export default function IncidentSummaryScreen({ navigation }) {
                 </View>
               </View>
 
-              {/* Violations */}
               <View style={[styles.card, styles.cardRedBorder]}>
                 <View style={styles.sectionHeader}>
                   <Ionicons name="warning-outline" size={16} color="#FF4A4A" />
@@ -229,14 +250,20 @@ export default function IncidentSummaryScreen({ navigation }) {
                           activeOpacity={0.8}
                           style={styles.removeBtn}
                         >
-                          <Ionicons name="close" size={14} color="rgba(255,255,255,0.70)" />
+                          <Ionicons
+                            name="close"
+                            size={14}
+                            color="rgba(255,255,255,0.70)"
+                          />
                         </TouchableOpacity>
                       </View>
                     ))}
                   </View>
                 )}
 
-                <Text style={[styles.label, { marginTop: 12 }]}>Common Violations:</Text>
+                <Text style={[styles.label, { marginTop: 12 }]}>
+                  Common Violations:
+                </Text>
 
                 <View style={styles.commonGrid}>
                   {commonViolations.map((v) => {
@@ -248,7 +275,12 @@ export default function IncidentSummaryScreen({ navigation }) {
                         onPress={() => toggleViolation(v)}
                         style={[styles.commonBtn, on ? styles.commonBtnOn : null]}
                       >
-                        <Text style={[styles.commonBtnText, on ? styles.commonBtnTextOn : null]}>
+                        <Text
+                          style={[
+                            styles.commonBtnText,
+                            on ? styles.commonBtnTextOn : null,
+                          ]}
+                        >
                           {v}
                         </Text>
                       </TouchableOpacity>
@@ -256,7 +288,9 @@ export default function IncidentSummaryScreen({ navigation }) {
                   })}
                 </View>
 
-                <Text style={[styles.label, { marginTop: 12 }]}>Add Custom Violation</Text>
+                <Text style={[styles.label, { marginTop: 12 }]}>
+                  Add Custom Violation
+                </Text>
 
                 <View style={styles.customRow}>
                   <View style={[styles.inputWrap, { flex: 1, height: 42 }]}>
@@ -281,7 +315,7 @@ export default function IncidentSummaryScreen({ navigation }) {
                 </View>
               </View>
 
-              {/* Additional Notes */}
+              
               <View style={[styles.card, styles.cardOrangeBorder]}>
                 <View style={styles.sectionHeader}>
                   <Ionicons name="create-outline" size={16} color="#FFB020" />
@@ -301,7 +335,7 @@ export default function IncidentSummaryScreen({ navigation }) {
                 </View>
               </View>
 
-              {/* Recorded Transcript */}
+              
               <View style={[styles.card, styles.cardGreenBorder]}>
                 <View style={styles.sectionHeader}>
                   <Ionicons name="mic-outline" size={16} color="#3DDC84" />
@@ -316,16 +350,66 @@ export default function IncidentSummaryScreen({ navigation }) {
               <View style={{ height: 90 }} />
             </ScrollView>
 
-            {/* Sticky bottom action */}
+            
             <View style={styles.bottomBar}>
               <TouchableOpacity
                 style={styles.finalizeBtn}
                 activeOpacity={0.9}
                 onPress={handleFinalize}
               >
-                <Text style={styles.finalizeText}>Pre-Submitted → Finalize Submission</Text>
+                <Text style={styles.finalizeText}>Submit Report</Text>
               </TouchableOpacity>
             </View>
+
+       
+            <Modal
+              visible={closeOpen}
+              transparent
+              animationType="fade"
+              onRequestClose={() => setCloseOpen(false)}
+            >
+              <Pressable
+                style={styles.modalBackdrop}
+                onPress={() => setCloseOpen(false)}
+              >
+                <Pressable
+                  style={[styles.modalCard, styles.modalGreenBorder]}
+                  onPress={() => {}}
+                >
+                  <View style={styles.modalTopRow}>
+                    <View style={styles.modalIconCircle}>
+                      <Ionicons name="play" size={18} color="#3DDC84" />
+                    </View>
+                    <Text style={styles.modalTitleText}>
+                      Start recording again?
+                    </Text>
+                  </View>
+
+                  <Text style={styles.modalBodyText}>
+                    Your recording will be saved as pre-submitted. You'll be able
+                    to come back and finalize the submission later.
+                  </Text>
+
+                  <View style={styles.modalBtnRow}>
+                    <TouchableOpacity
+                      style={[styles.modalBtn, styles.modalBtnCancel]}
+                      activeOpacity={0.9}
+                      onPress={() => setCloseOpen(false)}
+                    >
+                      <Text style={styles.modalBtnCancelText}>Cancel</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.modalBtn, styles.modalBtnContinue]}
+                      activeOpacity={0.9}
+                      onPress={confirmClose}
+                    >
+                      <Text style={styles.modalBtnContinueText}>Continue</Text>
+                    </TouchableOpacity>
+                  </View>
+                </Pressable>
+              </Pressable>
+            </Modal>
           </View>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -333,7 +417,7 @@ export default function IncidentSummaryScreen({ navigation }) {
   );
 }
 
-/** ✅ Row component used inside "Recording Completed" card */
+
 function RecordRow({ label, value }) {
   return (
     <View style={styles.recordRow}>
@@ -369,7 +453,11 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     marginRight: 10,
   },
-  headerTitle: { color: "rgba(255,255,255,0.92)", fontSize: 13, fontWeight: "700" },
+  headerTitle: {
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 13,
+    fontWeight: "700",
+  },
   headerSub: { color: "rgba(255,255,255,0.45)", fontSize: 11, marginTop: 2 },
   closeBtn: {
     width: 30,
@@ -401,7 +489,6 @@ const styles = StyleSheet.create({
   cardOrangeBorder: { borderColor: "rgba(255,176,32,0.30)" },
   cardRedBorder: { borderColor: "rgba(255,80,80,0.35)" },
 
-  /** ✅ Recording card (matches screenshot layout) */
   recordCard: {
     borderColor: "rgba(61,220,132,0.40)",
     backgroundColor: "rgba(0,0,0,0.20)",
@@ -412,23 +499,14 @@ const styles = StyleSheet.create({
     gap: 8,
     marginBottom: 10,
   },
-  recordTitle: {
-    color: "#3DDC84",
-    fontSize: 12,
-    fontWeight: "800",
-  },
-  recordRows: {
-    gap: 8,
-  },
+  recordTitle: { color: "#3DDC84", fontSize: 12, fontWeight: "800" },
+  recordRows: { gap: 8 },
   recordRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
   },
-  recordLabel: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 11,
-  },
+  recordLabel: { color: "rgba(255,255,255,0.55)", fontSize: 11 },
   recordValue: {
     color: "rgba(255,255,255,0.88)",
     fontSize: 11,
@@ -446,9 +524,12 @@ const styles = StyleSheet.create({
   },
 
   label: { color: "rgba(255,255,255,0.55)", fontSize: 11 },
-  value: { color: "rgba(255,255,255,0.90)", fontSize: 11, marginTop: 3 },
 
-  inputLabel: { color: "rgba(255,255,255,0.65)", fontSize: 11, marginBottom: 6 },
+  inputLabel: {
+    color: "rgba(255,255,255,0.65)",
+    fontSize: 11,
+    marginBottom: 6,
+  },
   inputWrap: {
     backgroundColor: "rgba(255,255,255,0.06)",
     borderRadius: 10,
@@ -518,7 +599,12 @@ const styles = StyleSheet.create({
   commonBtnText: { color: "rgba(255,255,255,0.70)", fontSize: 11 },
   commonBtnTextOn: { color: "rgba(255,255,255,0.92)", fontWeight: "700" },
 
-  customRow: { flexDirection: "row", alignItems: "center", marginTop: 10, gap: 10 },
+  customRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 10,
+    gap: 10,
+  },
   addBtn: {
     height: 42,
     paddingHorizontal: 16,
@@ -547,7 +633,11 @@ const styles = StyleSheet.create({
     padding: 10,
     minHeight: 70,
   },
-  transcriptText: { color: "rgba(255,255,255,0.70)", fontSize: 11, lineHeight: 16 },
+  transcriptText: {
+    color: "rgba(255,255,255,0.70)",
+    fontSize: 11,
+    lineHeight: 16,
+  },
 
   bottomBar: {
     paddingHorizontal: 16,
@@ -564,5 +654,77 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
-  finalizeText: { color: "white", fontSize: 12, fontWeight: "800" },
-});
+  finalizeText: { color: "white", fontSize: 15, fontWeight: "700" },
+
+  
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 360,
+    backgroundColor: "rgba(15,25,45,0.96)",
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+  },
+  modalGreenBorder: { borderColor: "rgba(61,220,132,0.55)" },
+
+  modalTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 10,
+    gap: 10,
+  },
+  modalIconCircle: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    backgroundColor: "rgba(61,220,132,0.12)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  modalTitleText: {
+    color: "rgba(255,255,255,0.92)",
+    fontSize: 13,
+    fontWeight: "800",
+  },
+  modalBodyText: {
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 11,
+    lineHeight: 16,
+    marginBottom: 14,
+  },
+
+  modalBtnRow: { flexDirection: "row", gap: 12 },
+  modalBtn: {
+    flex: 1,
+    height: 42,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+  },
+  modalBtnCancel: {
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderColor: "rgba(255,255,255,0.16)",
+  },
+  modalBtnCancelText: {
+    color: "rgba(255,255,255,0.80)",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  modalBtnContinue: {
+    backgroundColor: "#1E9E5A",
+    borderColor: "rgba(30,158,90,0.55)",
+  },
+  modalBtnContinueText: {
+    color: "white",
+    fontSize: 12,
+    fontWeight: "900",
+  },
+}); 

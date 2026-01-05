@@ -11,6 +11,11 @@ import RecordingScreen from "./src/screens/RecordingScreen";
 import IncidentSummaryScreen from "./src/screens/IncidentSummaryScreen";
 import MyIncidentScreen from "./src/screens/MyIncidentScreen";
 import IncidentDetailsScreen from "./src/screens/IncidentDetailsScreen";
+import DeviceWelcomeScreen from "./src/screens/DeviceWelcomeScreen";
+import DevicePairingFlowScreen from "./src/screens/DevicePairingFlowScreen";
+import RequestBackupScreen from "./src/screens/RequestBackupScreen";
+import EmergencyBackupScreen from "./src/screens/EmergencyBackupScreen";
+
 const Stack = createNativeStackNavigator();
 
 export default function App() {
@@ -26,6 +31,10 @@ export default function App() {
         <Stack.Screen name="IncidentSummary" component={IncidentSummaryScreen} />
         <Stack.Screen name="MyIncident" component={MyIncidentScreen} />
         <Stack.Screen name="IncidentDetails" component={IncidentDetailsScreen} />
+        <Stack.Screen name="DeviceWelcome" component={DeviceWelcomeScreen} />
+        <Stack.Screen name="DevicePairingFlow" component={DevicePairingFlowScreen} />
+        <Stack.Screen name="RequestBackup" component={RequestBackupScreen} options={{ headerShown: false }} />
+        <Stack.Screen name="EmergencyBackup" component={EmergencyBackupScreen} options={{ headerShown: false }} />
       </Stack.Navigator>
     </NavigationContainer>
   );

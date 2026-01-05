@@ -1,8 +1,11 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
+
+
+import { clearPaired, getPaired } from "../utils/deviceStore";
 
 export default function HomeScreen({ navigation }) {
   const officerName = "Officer Marcus Rodriguez";
@@ -10,12 +13,33 @@ export default function HomeScreen({ navigation }) {
   const location = "Camarin Rd.";
   const time = "6:40 pm";
 
+  
+  const [paired, setPaired] = useState(false);
+
+  const loadPaired = async () => {
+    const p = await getPaired();
+    setPaired(!!p);
+  };
+
+  useEffect(() => {
+    loadPaired(); 
+    const unsub = navigation.addListener("focus", loadPaired); // refresh when coming back
+    return unsub;
+  }, [navigation]);
+
   const handleLogout = () => {
     navigation.reset({ index: 0, routes: [{ name: "Login" }] });
   };
 
   const handleStartRecording = () => {
     navigation.navigate("Recording");
+  };
+
+  
+  const handleDisconnect = async () => {
+    await clearPaired();
+    setPaired(false);
+    navigation.navigate("DeviceWelcome");
   };
 
   return (
@@ -31,7 +55,6 @@ export default function HomeScreen({ navigation }) {
           showsVerticalScrollIndicator={false}
           alwaysBounceVertical={false}
         >
-          {/* Officer Card */}
           <View style={styles.officerCard}>
             <View style={styles.officerTopRow}>
               <View style={styles.officerLeft}>
@@ -45,6 +68,7 @@ export default function HomeScreen({ navigation }) {
                 </View>
               </View>
 
+              
               <TouchableOpacity onPress={handleLogout} activeOpacity={0.75}>
                 <Ionicons name="log-out-outline" size={20} color="#FF4A4A" />
               </TouchableOpacity>
@@ -66,9 +90,24 @@ export default function HomeScreen({ navigation }) {
                 <Text style={styles.statusText}>{time}</Text>
               </View>
             </View>
+
+            
+            {paired ? (
+              <TouchableOpacity
+                style={styles.disconnectBtn}
+                activeOpacity={0.85}
+                onPress={handleDisconnect}
+              >
+                <Ionicons
+                  name="unlink-outline"
+                  size={16}
+                  color="rgba(255,255,255,0.85)"
+                />
+                <Text style={styles.disconnectText}>Disconnect Device</Text>
+              </TouchableOpacity>
+            ) : null}
           </View>
 
-          {/* Stats */}
           <View style={styles.statsRow}>
             <View style={[styles.statCard, styles.statGreenBorder]}>
               <Text style={styles.statValue}>10</Text>
@@ -86,7 +125,6 @@ export default function HomeScreen({ navigation }) {
             </View>
           </View>
 
-          {/* Start Recording (bigger like Figma) */}
           <TouchableOpacity
             style={styles.recordCard}
             activeOpacity={0.9}
@@ -102,8 +140,11 @@ export default function HomeScreen({ navigation }) {
             </View>
           </TouchableOpacity>
 
-          {/* My Incident */}
-          <TouchableOpacity style={styles.myIncidentCard} activeOpacity={0.85} onPress={() => navigation.navigate("MyIncident")}>
+          <TouchableOpacity
+            style={styles.myIncidentCard}
+            activeOpacity={0.85}
+            onPress={() => navigation.navigate("MyIncident")}
+          >
             <View style={styles.myIncidentIconBox}>
               <Ionicons
                 name="document-text-outline"
@@ -115,7 +156,6 @@ export default function HomeScreen({ navigation }) {
             <Text style={styles.myIncidentSub}>View History</Text>
           </TouchableOpacity>
 
-          {/* Recent Activity */}
           <View style={styles.activityCard}>
             <View style={styles.activityHeader}>
               <Ionicons
@@ -128,7 +168,6 @@ export default function HomeScreen({ navigation }) {
 
             <View style={styles.line} />
 
-            {/* Item 1 */}
             <View style={styles.activityItem}>
               <View style={[styles.activityDot, styles.dotSuccess]}>
                 <Ionicons name="checkmark" size={14} color="white" />
@@ -143,7 +182,6 @@ export default function HomeScreen({ navigation }) {
 
             <View style={styles.itemDivider} />
 
-            {/* Item 2 */}
             <View style={styles.activityItem}>
               <View style={[styles.activityDot, styles.dotWarn]}>
                 <Ionicons name="alert" size={14} color="white" />
@@ -156,7 +194,6 @@ export default function HomeScreen({ navigation }) {
 
             <View style={styles.itemDivider} />
 
-            {/* Item 3 */}
             <View style={styles.activityItem}>
               <View style={[styles.activityDot, styles.dotDanger]}>
                 <Ionicons name="warning" size={14} color="white" />
@@ -177,7 +214,6 @@ const styles = StyleSheet.create({
   gradient: { flex: 1 },
   safe: { flex: 1 },
 
-  // ✅ makes the whole screen scrollable and fills the screen to avoid dead space feel
   scroll: {
     flexGrow: 1,
     paddingHorizontal: 18,
@@ -216,7 +252,7 @@ const styles = StyleSheet.create({
   statusRow: {
     flexDirection: "row",
     justifyContent: "space-between",
-    marginTop: 10,
+    marginTop: 12,
   },
   statusItem: { flexDirection: "row", alignItems: "center", gap: 6 },
   dotGreen: {
@@ -226,6 +262,20 @@ const styles = StyleSheet.create({
     backgroundColor: "#3DDC84",
   },
   statusText: { color: "rgba(255,255,255,0.65)", fontSize: 11 },
+
+  disconnectBtn: {
+    marginTop: 12,
+    height: 40,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.12)",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+  },
+  disconnectText: { color: "rgba(255,255,255,0.85)", fontSize: 12, fontWeight: "700" },
 
   statsRow: { flexDirection: "row", gap: 10, marginTop: 12 },
   statCard: {
@@ -237,58 +287,57 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.10)",
   },
-  statGreenBorder: { borderColor: "rgba(61,220,132,0.45)" },
+  statGreenBorder: { borderColor: "rgba(53, 206, 124, 0.45)" },
   statRedBorder: { borderColor: "rgba(255,80,80,0.40)" },
   statYellowBorder: { borderColor: "rgba(248, 187, 5, 0.4)" },
   statValue: { color: "white", fontSize: 16, fontWeight: "700" },
   statLabel: { color: "rgba(255,255,255,0.55)", fontSize: 11, marginTop: 6 },
 
-  // ✅ Bigger Start Recording card (Figma-like)
   recordCard: {
-    marginTop: 30,
+    marginTop: 15,
     backgroundColor: "#FF1E1E",
-    borderRadius: 16,
+    borderRadius: 20,
     paddingHorizontal: 18,
     paddingVertical: 22,
     flexDirection: "row",
     alignItems: "center",
-    minHeight: 150,
+    minHeight: 170,
   },
   recordCircle: {
-    width: 58,
-    height: 58,
+    width: 65,
+    height: 65,
     borderRadius: 999,
     backgroundColor: "white",
     alignItems: "center",
     justifyContent: "center",
     marginRight: 14,
   },
-  recordTitle: { color: "white", fontSize: 18, fontWeight: "700" },
-  recordSub: { color: "rgba(255,255,255,0.85)", fontSize: 11, marginTop: 6 },
+  recordTitle: { color: "white", fontSize: 25, fontWeight: "700" },
+  recordSub: { color: "rgba(255,255,255,0.85)", fontSize: 14, marginTop: 6 },
 
   myIncidentCard: {
-    marginTop: 30,
+    marginTop: 15,
     backgroundColor: "rgba(0,0,0,0.18)",
-    borderRadius: 12,
+    borderRadius: 14,
     paddingVertical: 18,
     alignItems: "center",
     borderWidth: 1,
     borderColor: "#fab871",
   },
   myIncidentIconBox: {
-    width: 34,
-    height: 34,
+    width: 40,
+    height: 40,
     borderRadius: 10,
     backgroundColor: "rgba(255,255,255,0.08)",
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 8,
   },
-  myIncidentTitle: { color: "white", fontSize: 14, fontWeight: "600" },
+  myIncidentTitle: { color: "white", fontSize: 15, fontWeight: "600" },
   myIncidentSub: { color: "rgba(255,255,255,0.55)", fontSize: 11, marginTop: 3 },
 
   activityCard: {
-    marginTop: 20,
+    marginTop: 10,
     backgroundColor: "rgba(0,0,0,0.18)",
     borderRadius: 12,
     padding: 14,

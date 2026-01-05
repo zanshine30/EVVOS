@@ -34,7 +34,7 @@ export default function CreateNewPasswordScreen({ navigation }) {
       return;
     }
 
-    // TODO: send to backend to update password (token-based flow)
+  
     Alert.alert("Success", "Your password has been updated.", [
       {
         text: "OK",
@@ -55,7 +55,7 @@ export default function CreateNewPasswordScreen({ navigation }) {
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-          {/* Header logo */}
+         
           <View style={styles.header}>
             <Image
               source={require("../../assets/logo.png")}
@@ -68,7 +68,7 @@ export default function CreateNewPasswordScreen({ navigation }) {
             </Text>
           </View>
 
-          {/* Card */}
+        
           <View style={styles.card}>
             <View style={styles.cardTop}>
               <TouchableOpacity
