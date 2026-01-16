@@ -12,8 +12,10 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { setPaired } from "../utils/deviceStore";
+import { useAuth } from "../context/AuthContext";
 
 export default function DevicePairingFlowScreen({ navigation }) {
+  const { displayName, badge } = useAuth();
   const [step, setStep] = useState(1); // 1..6
   const [ssid, setSsid] = useState("");
   const [pw, setPw] = useState("");
@@ -198,8 +200,8 @@ export default function DevicePairingFlowScreen({ navigation }) {
           <View style={{ flexDirection: "row", alignItems: "center" }}>
             <Ionicons name="person-circle" size={26} color="#4DB5FF" />
             <View style={{ marginLeft: 8 }}>
-              <Text style={styles.officerName}>Officer Marcus Rodriguez</Text>
-              <Text style={styles.badge}>Badge #4521</Text>
+              <Text style={styles.officerName}>Officer {displayName}</Text>
+              <Text style={styles.badge}>{badge ? `Badge #${badge}` : ''}</Text>
             </View>
           </View>
 

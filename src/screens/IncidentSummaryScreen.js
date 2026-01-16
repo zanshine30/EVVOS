@@ -14,13 +14,15 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useAuth } from "../context/AuthContext";
 
 export default function IncidentSummaryScreen({ navigation }) {
+  const { displayName, badge } = useAuth();
   
-  const officerName = "Marcus Rodriguez";
-  const badge = "#4521";
+  const officerName = `Officer ${displayName}`;
+  const badgeText = badge ? `#${badge}` : '';
   const duration = "3m 42s";
-  const dateTime = "Dec 13, 2025, 07:20 PM";
+  const dateTime = new Date().toLocaleString();
 
   const [driverName, setDriverName] = useState("");
   const [plateNumber, setPlateNumber] = useState("");
@@ -170,7 +172,7 @@ export default function IncidentSummaryScreen({ navigation }) {
                   <RecordRow label="Duration:" value={duration} />
                   <RecordRow label="Date & Time:" value={dateTime} />
                   <RecordRow label="Officer:" value={officerName} />
-                  <RecordRow label="Badge:" value={badge} />
+                  <RecordRow label="Badge:" value={badgeText} />
                 </View>
               </View>
 

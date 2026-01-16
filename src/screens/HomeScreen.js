@@ -6,12 +6,14 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 
 import { clearPaired, getPaired } from "../utils/deviceStore";
+import { useAuth } from "../context/AuthContext";
 
 export default function HomeScreen({ navigation }) {
-  const officerName = "Officer Marcus Rodriguez";
-  const badge = "Badge #4521";
+  const { displayName, badge } = useAuth();
+  const officerName = `Officer ${displayName}`;
+  const badgeText = badge ? `Badge #${badge}` : '';
   const location = "Camarin Rd.";
-  const time = "6:40 pm";
+  const [time, setTime] = useState(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
 
   
   const [paired, setPaired] = useState(false);
@@ -26,6 +28,13 @@ export default function HomeScreen({ navigation }) {
     const unsub = navigation.addListener("focus", loadPaired); // refresh when coming back
     return unsub;
   }, [navigation]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    }, 60000); // update every minute
+    return () => clearInterval(interval);
+  }, []);
 
   const handleLogout = () => {
     navigation.reset({ index: 0, routes: [{ name: "Login" }] });
@@ -64,7 +73,7 @@ export default function HomeScreen({ navigation }) {
 
                 <View>
                   <Text style={styles.officerName}>{officerName}</Text>
-                  <Text style={styles.officerBadge}>{badge}</Text>
+                  <Text style={styles.officerBadge}>{badgeText}</Text>
                 </View>
               </View>
 

@@ -4,8 +4,10 @@ import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { clearPaired, getPaired } from "../utils/deviceStore";
+import { useAuth } from "../context/AuthContext";
 
 export default function DeviceWelcomeScreen({ navigation }) {
+  const { displayName, badge } = useAuth();
   const [paired, setPairedState] = useState(false);
   const [loading, setLoading] = useState(true);
 
@@ -48,8 +50,8 @@ export default function DeviceWelcomeScreen({ navigation }) {
           <View style={{ flexDirection: "row", alignItems: "center" }}>
             <Ionicons name="person-circle" size={26} color="#4DB5FF" />
             <View style={{ marginLeft: 8 }}>
-              <Text style={styles.officerName}>Officer Marcus Rodriguez</Text>
-              <Text style={styles.badge}>Badge #4521</Text>
+              <Text style={styles.officerName}>Officer {displayName}</Text>
+              <Text style={styles.badge}>{badge ? `Badge #${badge}` : ''}</Text>
             </View>
           </View>
 
