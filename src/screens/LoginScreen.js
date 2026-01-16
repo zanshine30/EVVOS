@@ -15,8 +15,10 @@ import { Ionicons } from "@expo/vector-icons";
 
 
 import { clearPaired } from "../utils/deviceStore";
+import { useAuth } from "../context/AuthContext";
 
 export default function LoginScreen({ navigation }) {
+  const { loginByBadge } = useAuth();
   const [badgeNumber, setBadgeNumber] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -46,14 +48,23 @@ export default function LoginScreen({ navigation }) {
 
     if (hasError) return;
 
-   
-    await clearPaired();
+    try {
+      const result = await loginByBadge(badgeTrimmed, passTrimmed);
+      if (!result.success) {
+        setPassError(result.error);
+        return;
+      }
 
-    
-    navigation.reset({
-      index: 0,
-      routes: [{ name: "DeviceWelcome" }],
-    });
+      // Successfully logged in
+      await clearPaired();
+
+      navigation.reset({
+        index: 0,
+        routes: [{ name: "DeviceWelcome" }],
+      });
+    } catch (err) {
+      setPassError("An error occurred. Please try again.");
+    }
   };
 
   const handleForgotPassword = () => {
