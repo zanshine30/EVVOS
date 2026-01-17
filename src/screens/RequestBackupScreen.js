@@ -1,21 +1,23 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useContext } from "react";
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { AuthContext } from '../context/AuthContext';
 
 export default function RequestBackupScreen({ navigation }) {
   const [responders] = useState(4);
+  const { profile } = useContext(AuthContext);
 
   const backupData = useMemo(
     () => ({
-      enforcer: "Juan Bartolome",
+      enforcer: profile?.display_name || "Juan Bartolome",
       location: "Llano Rd., Caloocan City",
       time: "8:21 pm",
       responders,
       coords: { latitude: 14.7566, longitude: 121.0447 },
     }),
-    [responders]
+    [responders, profile?.display_name]
   );
 
   const handleConfirm = () => {

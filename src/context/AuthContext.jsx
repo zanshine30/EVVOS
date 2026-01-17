@@ -1,6 +1,7 @@
 import React, { createContext, useState, useEffect, useCallback } from "react";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import supabase from "../lib/supabase";
+import * as Notifications from 'expo-notifications';
 
 export const AuthContext = createContext();
 
@@ -56,6 +57,11 @@ export function AuthProvider({ children }) {
                     const savedEmail = await AsyncStorage.getItem("evvos_remember_email");
                     if (savedEmail) setRememberMe(true);
                 }
+
+                // Register for push notifications
+                if (sessionObj?.user?.id) {
+                    registerForPushNotificationsAsync(sessionObj.user.id);
+                }
             } catch (err) {
                 console.error("Failed to initialize auth:", err);
             } finally {
@@ -78,6 +84,7 @@ export function AuthProvider({ children }) {
                         if (!rpcErr && Array.isArray(rpcData) && rpcData.length > 0) {
                             setProfile(rpcData[0]);
                             setBadge(rpcData[0].badge);
+                            registerForPushNotificationsAsync(session.user.id);
                         } else {
                             const { data: p, error: pErr } = await supabase
                                 .from("users")
@@ -87,6 +94,7 @@ export function AuthProvider({ children }) {
                             if (!pErr) {
                                 setProfile(p ?? null);
                                 setBadge(p?.badge ?? null);
+                                if (p) registerForPushNotificationsAsync(session.user.id);
                             }
                         }
                     } catch (e) {
@@ -111,6 +119,18 @@ export function AuthProvider({ children }) {
             sub?.subscription?.unsubscribe?.();
         };
     }, []);
+
+    const registerForPushNotificationsAsync = async (userId) => {
+        if (!userId) return;
+        try {
+            const { status } = await Notifications.requestPermissionsAsync();
+            if (status !== 'granted') return;
+            const token = (await Notifications.getExpoPushTokenAsync()).data;
+            await supabase.from('users').update({ push_token: token }).eq('auth_user_id', userId);
+        } catch (err) {
+            console.warn('Push notification setup failed:', err);
+        }
+    };
 
     const login = useCallback(async (email, password, shouldRemember = false) => {
         try {

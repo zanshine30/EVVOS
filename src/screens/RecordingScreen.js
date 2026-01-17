@@ -11,6 +11,9 @@ import {
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useContext } from 'react';
+import { AuthContext } from '../context/AuthContext';
+import supabase from '../lib/supabase';
 
 export default function RecordingScreen({ navigation, route }) {
   const [seconds, setSeconds] = useState(0);
@@ -19,36 +22,38 @@ export default function RecordingScreen({ navigation, route }) {
   
   const [emergencyConfirmOpen, setEmergencyConfirmOpen] = useState(false);
 
- 
-  const [backupNotifyOpen, setBackupNotifyOpen] = useState(false);
-
 
   const [stopOpen, setStopOpen] = useState(false);
+
+  const { profile } = useContext(AuthContext);
+  const [backupData, setBackupData] = useState(null);
+  const [emergencyTriggered, setEmergencyTriggered] = useState(false);
+  const [currentRequestId, setCurrentRequestId] = useState(null);
 
   useEffect(() => {
     const t = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, []);
 
-  const timeText = useMemo(() => {
-    const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
-    const ss = String(seconds % 60).padStart(2, "0");
-    return `${mm}:${ss}`;
-  }, [seconds]);
-
   
-  const backupData = useMemo(() => {
+  const backupDataMemo = useMemo(() => {
     const incoming = route?.params?.backupData;
     if (incoming) return incoming;
 
     return {
-      enforcer: "Juan Bartolome",
+      enforcer: profile?.display_name || "Juan Bartolome",
       location: "Llano Rd., Caloocan City",
       time: "8:21 pm",
       responders: 4,
       coords: { latitude: 14.7566, longitude: 121.0447 },
     };
-  }, [route?.params?.backupData]);
+  }, [route?.params?.backupData, profile?.display_name]);
+
+  const timeText = useMemo(() => {
+    const mm = String(Math.floor(seconds / 60)).padStart(2, "0");
+    const ss = String(seconds % 60).padStart(2, "0");
+    return `${mm}:${ss}`;
+  }, [seconds]);
 
   const handleSnapshot = () => {
     setSnapshotCount((prev) => prev + 1);
@@ -67,15 +72,71 @@ export default function RecordingScreen({ navigation, route }) {
   const handleStop = () => setStopOpen(true);
 
   
-  const confirmEmergency = () => {
+  const confirmEmergency = async () => {
     setEmergencyConfirmOpen(false);
-    setBackupNotifyOpen(true);
+    const badge = profile?.badge || '4521';
+    const random = Math.floor(Math.random() * 100).toString().padStart(2, '0');
+    const request_id = `REQ${badge}${random}`;
+    const enforcer = profile?.display_name || 'Juan Bartolome';
+    const location = 'Camarin Rd.';
+    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const responders = 0;
+    const coords = { latitude: 14.7566, longitude: 121.0447 };
+    try {
+      const { error } = await supabase.from('emergency_backups').insert({
+        request_id,
+        enforcer,
+        location,
+        time,
+        responders
+      });
+      if (error) throw error;
+
+      // Send push notifications to other users
+      const { data: users } = await supabase
+        .from('users')
+        .select('push_token')
+        .neq('auth_user_id', profile?.auth_user_id);
+      const tokens = users?.map(u => u.push_token).filter(t => t) || [];
+      if (tokens.length > 0) {
+        await fetch('https://exp.host/--/api/v2/push/send', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            to: tokens,
+            title: 'Emergency Backup Alert',
+            body: `${enforcer} needs immediate backup at ${location}`,
+            data: { request_id, type: 'emergency_backup' },
+          }),
+        });
+      }
+
+      alert('Emergency backup request sent to nearby units.');
+      setEmergencyTriggered(true);
+      setCurrentRequestId(request_id);
+    } catch (err) {
+      console.error('Failed to send emergency backup:', err);
+      alert('Failed to send request. Please try again.');
+    }
   };
 
-  
-  const acceptBackupRequest = () => {
-    setBackupNotifyOpen(false);
-    navigation.navigate("EmergencyBackup", { backupData });
+  const resolveEmergency = async () => {
+    if (!currentRequestId) return;
+    try {
+      const { error } = await supabase
+        .from('emergency_backups')
+        .update({ status: 'RESOLVED' })
+        .eq('request_id', currentRequestId);
+      if (error) throw error;
+      setEmergencyTriggered(false);
+      setCurrentRequestId(null);
+      alert('Emergency resolved.');
+    } catch (err) {
+      console.error('Failed to resolve emergency:', err);
+      alert('Failed to resolve. Try again.');
+    }
   };
 
   
@@ -116,7 +177,7 @@ export default function RecordingScreen({ navigation, route }) {
 
           <View style={styles.infoRow}>
             <View style={[styles.infoCol, styles.infoLeft]}>
-              <Text style={styles.infoText}>ID: 4521</Text>
+              <Text style={styles.infoText}>ID: {profile?.badge || '4521'}</Text>
             </View>
 
             <View style={[styles.infoCol, styles.infoCenter]}>
@@ -194,12 +255,12 @@ export default function RecordingScreen({ navigation, route }) {
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={styles.emergencyBtn}
+            style={[styles.emergencyBtn, emergencyTriggered && styles.emergencyBtnResolved]}
             activeOpacity={0.9}
-            onPress={handleEmergency}
+            onPress={emergencyTriggered ? resolveEmergency : handleEmergency}
           >
-            <Ionicons name="warning-outline" size={16} color="white" />
-            <Text style={styles.emergencyText}>Emergency Backup</Text>
+            <Ionicons name={emergencyTriggered ? "checkmark-circle-outline" : "warning-outline"} size={16} color="white" />
+            <Text style={styles.emergencyText}>{emergencyTriggered ? "Resolved" : "Emergency Backup"}</Text>
           </TouchableOpacity>
 
           <View style={styles.bottomRow}>
@@ -216,7 +277,7 @@ export default function RecordingScreen({ navigation, route }) {
             <TouchableOpacity
               style={styles.stopBtn}
               activeOpacity={0.9}
-              onPress={handleStop}
+              onPress={emergencyTriggered ? () => alert('Resolve the emergency first before stopping the recording.') : handleStop}
             >
               <Ionicons
                 name="stop-circle-outline"
@@ -269,57 +330,6 @@ export default function RecordingScreen({ navigation, route }) {
                     onPress={confirmEmergency}
                   >
                     <Text style={styles.modalBtnDangerText}>Confirm</Text>
-                  </TouchableOpacity>
-                </View>
-              </Pressable>
-            </Pressable>
-          </Modal>
-
-         
-          <Modal
-            visible={backupNotifyOpen}
-            transparent
-            animationType="fade"
-            onRequestClose={() => setBackupNotifyOpen(false)}
-          >
-            <Pressable style={styles.popupBackdrop} onPress={declineBackupRequest}>
-              <Pressable style={styles.popupCard} onPress={() => {}}>
-                <View style={styles.popupHeader}>
-                  <Ionicons name="warning-outline" size={18} color="#FF4A4A" />
-                  <Text style={styles.popupTitle}>Emergency Backup Request</Text>
-                </View>
-
-                <View style={{ marginTop: 8 }}>
-                  <Text style={styles.popupLine}>
-                    Enforcer: <Text style={styles.popupValue}>{backupData.enforcer}</Text>
-                  </Text>
-                  <Text style={styles.popupLine}>
-                    Location: <Text style={styles.popupValue}>{backupData.location}</Text>
-                  </Text>
-                  <Text style={styles.popupLine}>
-                    Time: <Text style={styles.popupValue}>{backupData.time}</Text>
-                  </Text>
-                  <Text style={styles.popupLine}>
-                    No. of Responders/:{" "}
-                    <Text style={styles.popupValue}>{backupData.responders}</Text>
-                  </Text>
-                </View>
-
-                <View style={styles.popupBtnRow}>
-                  <TouchableOpacity
-                    style={[styles.popupBtn, styles.popupAccept]}
-                    activeOpacity={0.9}
-                    onPress={acceptBackupRequest}
-                  >
-                    <Text style={styles.popupAcceptText}>Accept</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.popupBtn, styles.popupDecline]}
-                    activeOpacity={0.9}
-                    onPress={declineBackupRequest}
-                  >
-                    <Text style={styles.popupDeclineText}>Decline</Text>
                   </TouchableOpacity>
                 </View>
               </Pressable>
@@ -557,6 +567,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 12,
+  },
+  emergencyBtnResolved: {
+    backgroundColor: "#3DDC84",
   },
   emergencyText: {
     color: "white",

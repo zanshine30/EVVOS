@@ -1,19 +1,40 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import MapView, { Marker } from "react-native-maps";
 import { SafeAreaView } from "react-native-safe-area-context";
+import supabase from '../lib/supabase';
 
 export default function EmergencyBackupScreen({ navigation, route }) {
-  const data = useMemo(() => route?.params?.backupData, [route?.params?.backupData]);
+  const [backupData, setBackupData] = useState(route?.params?.backupData);
   const [status, setStatus] = useState("En Route"); // "On Scene"
 
-  const coords = data?.coords || { latitude: 14.7566, longitude: 121.0447 };
-  const name = data?.enforcer ?? "Juan Bartolome";
-  const location = data?.location ?? "Llano Rd., Caloocan City";
-  const time = data?.time ?? "8:21 pm";
-  const responders = data?.responders ?? 4;
+  useEffect(() => {
+    if (route?.params?.request_id && !backupData) {
+      const fetchData = async () => {
+        const { data, error } = await supabase.from('emergency_backups').select('*').eq('request_id', route.params.request_id).single();
+        if (!error && data) {
+          setBackupData({
+            enforcer: data.enforcer,
+            location: data.location,
+            time: data.time,
+            responders: data.responders,
+            coords: { latitude: 14.7566, longitude: 121.0447 },
+            request_id: data.request_id
+          });
+        }
+      };
+      fetchData();
+    }
+  }, [route?.params?.request_id, backupData]);
+
+  const coords = backupData?.coords || { latitude: 14.7566, longitude: 121.0447 };
+  const name = backupData?.enforcer ?? "Juan Bartolome";
+  const location = backupData?.location ?? "Llano Rd., Caloocan City";
+  const time = backupData?.time ?? "8:21 pm";
+  const responders = backupData?.responders ?? 4;
+  const requestId = backupData?.request_id;
 
   return (
     <LinearGradient
@@ -115,12 +136,19 @@ export default function EmergencyBackupScreen({ navigation, route }) {
             <TouchableOpacity
               style={[styles.bottomBtn, styles.resolved]}
               activeOpacity={0.9}
-              onPress={() =>
+              onPress={async () => {
+                if (requestId) {
+                  try {
+                    await supabase.from('emergency_backups').update({ status: 'RESOLVED' }).eq('request_id', requestId);
+                  } catch (err) {
+                    console.error('Failed to update status:', err);
+                  }
+                }
                 navigation.reset({
                   index: 0,
                   routes: [{ name: "Home" }], // ✅ goes back to Home screen
-                })
-              }
+                });
+              }}
             >
               <Text style={styles.bottomTextDark}>RESOLVED</Text>
             </TouchableOpacity>
