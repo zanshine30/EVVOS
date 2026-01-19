@@ -93,25 +93,21 @@ export default function RecordingScreen({ navigation, route }) {
       if (error) throw error;
 
       // Send push notifications to other users
-      const { data: users } = await supabase
-        .from('users')
-        .select('push_token')
-        .neq('auth_user_id', profile?.auth_user_id);
-      const tokens = users?.map(u => u.push_token).filter(t => t) || [];
-      if (tokens.length > 0) {
-        await fetch('https://exp.host/--/api/v2/push/send', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            to: tokens,
-            title: 'Emergency Backup Alert',
-            body: `${enforcer} needs immediate backup at ${location}`,
-            data: { request_id, type: 'emergency_backup' },
-          }),
-        });
-      }
+      const sessionData = await supabase.auth.getSession();
+      const session = sessionData.data.session;
+      await fetch('https://zekbonbxwccgsfagrrph.supabase.co/functions/v1/send-emergency-notification', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({
+          request_id,
+          enforcer,
+          location,
+          time,
+        }),
+      });
 
       alert('Emergency backup request sent to nearby units.');
       setEmergencyTriggered(true);

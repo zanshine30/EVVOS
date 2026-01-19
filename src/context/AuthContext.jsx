@@ -2,6 +2,7 @@ import React, { createContext, useState, useEffect, useCallback } from "react";
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import supabase from "../lib/supabase";
 import * as Notifications from 'expo-notifications';
+import messaging from '@react-native-firebase/messaging';
 
 export const AuthContext = createContext();
 
@@ -19,7 +20,8 @@ export function AuthProvider({ children }) {
 
         const init = async () => {
             try {
-                const { data } = await supabase.auth.getSession();
+                const temp = await supabase.auth.getSession();
+                const data = temp.data;
                 const sessionObj = data?.session ?? null;
                 if (!mounted) return;
 
@@ -122,13 +124,37 @@ export function AuthProvider({ children }) {
 
     const registerForPushNotificationsAsync = async (userId) => {
         if (!userId) return;
+        console.log('Registering push notifications for user:', userId);
         try {
+            // Request permissions for both Expo and Firebase
             const { status } = await Notifications.requestPermissionsAsync();
-            if (status !== 'granted') return;
-            const token = (await Notifications.getExpoPushTokenAsync()).data;
-            await supabase.from('users').update({ push_token: token }).eq('auth_user_id', userId);
+            console.log('Notification permission status:', status);
+            if (status !== 'granted') {
+                console.log('Permission not granted, skipping push token registration');
+                return;
+            }
+
+            // Also request Firebase messaging permission
+            const authStatus = await messaging().requestPermission();
+            const enabled =
+                authStatus === messaging.AuthorizationStatus.AUTHORIZED ||
+                authStatus === messaging.AuthorizationStatus.PROVISIONAL;
+            if (!enabled) {
+                console.log('Firebase messaging permission not granted');
+                return;
+            }
+
+            // Get FCM token
+            const fcmToken = await messaging().getToken();
+            console.log('Retrieved FCM token:', fcmToken);
+            const { error } = await supabase.from('users').update({ push_token: fcmToken }).eq('auth_user_id', userId);
+            if (error) {
+                console.error('Error updating push_token in database:', error);
+            } else {
+                console.log('Push token updated successfully in database');
+            }
         } catch (err) {
-            console.warn('Push notification setup failed:', err);
+            console.error('Push notification setup failed:', err);
         }
     };
 
