@@ -7,6 +7,7 @@ import {
   ScrollView,
   Modal,
   Pressable,
+  BackHandler,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
@@ -33,6 +34,14 @@ export default function RecordingScreen({ navigation, route }) {
   useEffect(() => {
     const t = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleStop();
+      return true;
+    });
+    return () => backHandler.remove();
   }, []);
 
   

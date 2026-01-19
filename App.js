@@ -5,7 +5,7 @@ import { StatusBar } from "expo-status-bar";
 import * as Notifications from 'expo-notifications';
 import supabase from './src/lib/supabase';
 
-import { AuthProvider } from "./src/context/AuthContext";
+import { AuthProvider, useAuth } from "./src/context/AuthContext";
 
 import LoginScreen from "./src/screens/LoginScreen";
 import ForgotPasswordScreen from "./src/screens/ForgotPasswordScreen";
@@ -22,8 +22,15 @@ import EmergencyBackupScreen from "./src/screens/EmergencyBackupScreen";
 
 const Stack = createNativeStackNavigator();
 
-export default function App() {
+function AppNavigator() {
   const navigationRef = useRef();
+  const { recoveryMode } = useAuth();
+
+  useEffect(() => {
+    if (recoveryMode) {
+      navigationRef.current?.navigate('CreateNewPassword');
+    }
+  }, [recoveryMode]);
 
   useEffect(() => {
     // Define notification category with actions
@@ -94,24 +101,30 @@ export default function App() {
   }, []);
 
   return (
+    <NavigationContainer ref={navigationRef}>
+      <StatusBar style="light" />
+      <Stack.Navigator initialRouteName="Login" screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="Login" component={LoginScreen} />
+        <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
+        <Stack.Screen name="CreateNewPassword" component={CreateNewPasswordScreen} />
+        <Stack.Screen name="Home" component={HomeScreen} />
+        <Stack.Screen name="Recording" component={RecordingScreen} />
+        <Stack.Screen name="IncidentSummary" component={IncidentSummaryScreen} />
+        <Stack.Screen name="MyIncident" component={MyIncidentScreen} />
+        <Stack.Screen name="IncidentDetails" component={IncidentDetailsScreen} />
+        <Stack.Screen name="DeviceWelcome" component={DeviceWelcomeScreen} />
+        <Stack.Screen name="DevicePairingFlow" component={DevicePairingFlowScreen} />
+        <Stack.Screen name="RequestBackup" component={RequestBackupScreen} options={{ headerShown: false }} />
+        <Stack.Screen name="EmergencyBackup" component={EmergencyBackupScreen} options={{ headerShown: false }} />
+      </Stack.Navigator>
+    </NavigationContainer>
+  );
+}
+
+export default function App() {
+  return (
     <AuthProvider>
-      <NavigationContainer ref={navigationRef}>
-        <StatusBar style="light" />
-        <Stack.Navigator initialRouteName="Login" screenOptions={{ headerShown: false }}>
-          <Stack.Screen name="Login" component={LoginScreen} />
-          <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
-          <Stack.Screen name="CreateNewPassword" component={CreateNewPasswordScreen} />
-          <Stack.Screen name="Home" component={HomeScreen} />
-          <Stack.Screen name="Recording" component={RecordingScreen} />
-          <Stack.Screen name="IncidentSummary" component={IncidentSummaryScreen} />
-          <Stack.Screen name="MyIncident" component={MyIncidentScreen} />
-          <Stack.Screen name="IncidentDetails" component={IncidentDetailsScreen} />
-          <Stack.Screen name="DeviceWelcome" component={DeviceWelcomeScreen} />
-          <Stack.Screen name="DevicePairingFlow" component={DevicePairingFlowScreen} />
-          <Stack.Screen name="RequestBackup" component={RequestBackupScreen} options={{ headerShown: false }} />
-          <Stack.Screen name="EmergencyBackup" component={EmergencyBackupScreen} options={{ headerShown: false }} />
-        </Stack.Navigator>
-      </NavigationContainer>
+      <AppNavigator />
     </AuthProvider>
   );
 }

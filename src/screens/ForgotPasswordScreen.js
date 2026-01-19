@@ -13,11 +13,14 @@ import {
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
+import supabase from "../lib/supabase";
+import { useAuth } from "../context/AuthContext";
 
 export default function ForgotPasswordScreen({ navigation }) {
   const [email, setEmail] = useState("");
+  const { resetPasswordForEmail } = useAuth();
 
-  const handleSendLink = () => {
+  const handleSendLink = async () => {
     const trimmed = email.trim();
 
     if (!trimmed) {
@@ -25,13 +28,37 @@ export default function ForgotPasswordScreen({ navigation }) {
       return;
     }
 
- 
-    Alert.alert("Link Sent", "A reset link has been sent to your email.", [
-      {
-        text: "OK",
-        onPress: () => navigation.navigate("CreateNewPassword"),
-      },
-    ]);
+    // Check if email exists in users table
+    try {
+      const { data, error } = await supabase
+        .from('users')
+        .select('email')
+        .eq('email', trimmed)
+        .eq('role', 'enforcer')
+        .eq('status', 'active')
+        .single();
+
+      if (error || !data) {
+        Alert.alert("Email Not Found", "No account found with this email.");
+        return;
+      }
+
+      // Send reset email
+      const result = await resetPasswordForEmail(trimmed);
+      if (!result.success) {
+        Alert.alert("Error", result.error);
+        return;
+      }
+
+      Alert.alert("Link Sent", "A reset link has been sent to your email.", [
+        {
+          text: "OK",
+          onPress: () => navigation.goBack(),
+        },
+      ]);
+    } catch (err) {
+      Alert.alert("Error", "An error occurred. Please try again.");
+    }
   };
 
   return (

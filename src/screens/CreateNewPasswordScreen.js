@@ -13,6 +13,7 @@ import {
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
+import supabase from "../lib/supabase";
 
 export default function CreateNewPasswordScreen({ navigation }) {
   const [newPassword, setNewPassword] = useState("");
@@ -20,7 +21,7 @@ export default function CreateNewPasswordScreen({ navigation }) {
   const [showNew, setShowNew] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     if (!newPassword || !confirmPassword) {
       Alert.alert("Missing Fields", "Please fill in both password fields.");
       return;
@@ -34,13 +35,19 @@ export default function CreateNewPasswordScreen({ navigation }) {
       return;
     }
 
-  
-    Alert.alert("Success", "Your password has been updated.", [
-      {
-        text: "OK",
-        onPress: () => navigation.reset({ index: 0, routes: [{ name: "Login" }] }),
-      },
-    ]);
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+
+      Alert.alert("Success", "Your password has been updated.", [
+        {
+          text: "OK",
+          onPress: () => navigation.reset({ index: 0, routes: [{ name: "Login" }] }),
+        },
+      ]);
+    } catch (err) {
+      Alert.alert("Error", "Failed to update password. Please try again.");
+    }
   };
 
   return (

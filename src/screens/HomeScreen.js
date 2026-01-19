@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -37,7 +37,21 @@ export default function HomeScreen({ navigation }) {
   }, []);
 
   const handleLogout = () => {
-    navigation.reset({ index: 0, routes: [{ name: "Login" }] });
+    Alert.alert(
+      "Logout",
+      "Are you sure you want to logout?",
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Logout",
+          style: "destructive",
+          onPress: () => navigation.reset({ index: 0, routes: [{ name: "Login" }] }),
+        },
+      ]
+    );
   };
 
   const handleStartRecording = () => {

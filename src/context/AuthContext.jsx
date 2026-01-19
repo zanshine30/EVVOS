@@ -13,6 +13,7 @@ export function AuthProvider({ children }) {
     const [badge, setBadge] = useState(null);
     const [loading, setLoading] = useState(true);
     const [rememberMe, setRememberMe] = useState(false);
+    const [recoveryMode, setRecoveryMode] = useState(false);
 
     // Load session + profile
     useEffect(() => {
@@ -75,8 +76,15 @@ export function AuthProvider({ children }) {
 
         // subscribe to auth changes
         const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+            console.log('Auth state change:', event, session?.user?.id);
             setSession(session ?? null);
             setUser(session?.user ?? null);
+
+            if (event === 'PASSWORD_RECOVERY') {
+                setRecoveryMode(true);
+            } else {
+                setRecoveryMode(false);
+            }
 
             // when signed in, fetch profile (RPC preferred)
             if (session?.user?.id) {
@@ -243,6 +251,18 @@ export function AuthProvider({ children }) {
         }
     }, [login]);
 
+    const resetPasswordForEmail = useCallback(async (email) => {
+        try {
+            const { error } = await supabase.auth.resetPasswordForEmail(email, {
+                redirectTo: 'evvos://reset-password',
+            });
+            if (error) throw error;
+            return { success: true };
+        } catch (err) {
+            return { success: false, error: err.message };
+        }
+    }, []);
+
     // convenience fields
     const displayName = (profile?.display_name ?? `${profile?.first_name ?? ""} ${profile?.last_name ?? ""}`.trim()) || (user?.email?.split("@")[0] ?? "User");
     const role = profile?.role ?? "user";
@@ -266,9 +286,11 @@ export function AuthProvider({ children }) {
         avatarInitials,
         loading,
         rememberMe,
+        recoveryMode,
         login,
         loginByBadge,
         logout,
+        resetPasswordForEmail,
         isAuthenticated: !!session,
     };
 
