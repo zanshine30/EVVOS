@@ -16,19 +16,20 @@
       "supportsTablet": true
     },
     "android": {
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.evvosspec.EVVOS"
+      "package": "com.evvos.EVVOS"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "extra": {
       "eas": {
-        "projectId": "b7a11b5f-a830-401d-8f89-b63e2b14d0bc"
+        "projectId": "fbff723f-d97d-4d29-81dd-6af14b87860d"
       }
     }
   }

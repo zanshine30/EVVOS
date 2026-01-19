@@ -1,21 +1,21 @@
 {
   "project_info": {
-    "project_number": "220097683727",
-    "project_id": "evvos-b38d6",
-    "storage_bucket": "evvos-b38d6.firebasestorage.app"
+    "project_number": "943799219526",
+    "project_id": "evvos-aaf3e",
+    "storage_bucket": "evvos-aaf3e.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:220097683727:android:e378a7973b615e1ae39e7a",
+        "mobilesdk_app_id": "1:943799219526:android:9bea21682967b2e01ca147",
         "android_client_info": {
-          "package_name": "com.evvosspec.EVVOS"
+          "package_name": "com.evvos.EVVOS"
         }
       },
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyAHPo2rYM5_lOKl7PHann6GMlV7oz6n4oY"
+          "current_key": "AIzaSyAepAqZzC95FIBLmMo1Wnwc0U6NvX7Cc4I"
         }
       ],
       "services": {
