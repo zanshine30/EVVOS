@@ -152,12 +152,14 @@ export default function LoginScreen({ navigation }) {
               <TextInput
                 value={badgeNumber}
                 onChangeText={(t) => {
-                  setBadgeNumber(t);
+                  const numericOnly = t.replace(/[^0-9]/g, '');
+                  setBadgeNumber(numericOnly);
                   if (badgeError) setBadgeError("");
                 }}
                 placeholder="Enter badge number"
                 placeholderTextColor="rgba(255,255,255,0.45)"
                 style={styles.input}
+                keyboardType="numeric"
                 autoCapitalize="none"
                 autoCorrect={false}
                 returnKeyType="next"

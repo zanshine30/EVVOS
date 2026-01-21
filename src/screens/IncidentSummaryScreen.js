@@ -11,7 +11,6 @@ import {
   Modal,
   Pressable,
   Alert,
-  BackHandler,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
@@ -63,14 +62,6 @@ export default function IncidentSummaryScreen({ navigation, route }) {
 
   const transcript =
     "Suspect vehicle license plate is Delta X-Ray Charlie 492. Proceeding with caution...";
-
-  useEffect(() => {
-    const backHandler = BackHandler.addEventListener('hardwareBackPress', () => {
-      handleClose();
-      return true;
-    });
-    return () => backHandler.remove();
-  }, []);
 
   const isSelected = (label) => selectedList.includes(label);
 

@@ -23,15 +23,16 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.evvosapp.EVVOS"
+      "package": "com.evvosdev.EVVOS"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "extra": {
       "eas": {
-        "projectId": "aca19e39-727d-4c03-9a11-78894a63b303"
+        "projectId": "a4f4a0b4-dc4f-44bf-8dc5-60c51b43d1d8"
       }
-    }
+    },
+    "owner": "evvosdev"
   }
 }

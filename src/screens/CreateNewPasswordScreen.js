@@ -17,7 +17,7 @@ import { Ionicons } from "@expo/vector-icons";
 import supabase from "../lib/supabase";
 
 export default function CreateNewPasswordScreen({ navigation, route }) {
-  const { email } = route.params || {};
+  const { email, sentTime } = route.params || {};
   const [resetToken, setResetToken] = useState("");
   const [badge, setBadge] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -25,10 +25,52 @@ export default function CreateNewPasswordScreen({ navigation, route }) {
   const [showNew, setShowNew] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [timeRemaining, setTimeRemaining] = useState(900); // 15 minutes in seconds
+  const [otpExpired, setOtpExpired] = useState(false);
+
+  // Timer effect
+  React.useEffect(() => {
+    const initialTime = sentTime ? Math.floor((900000 - (new Date().getTime() - sentTime)) / 1000) : 900;
+    setTimeRemaining(Math.max(0, initialTime));
+
+    const interval = setInterval(() => {
+      setTimeRemaining((prev) => {
+        if (prev <= 1) {
+          setOtpExpired(true);
+          clearInterval(interval);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [sentTime]);
+
+  const handleResendOtp = async () => {
+    if (!email) return;
+    setLoading(true);
+    try {
+      const { error } = await supabase.auth.signInWithOtp({ email });
+      if (error) throw error;
+      setOtpExpired(false);
+      setTimeRemaining(900);
+      setResetToken("");
+      Alert.alert("OTP Resent", "A new OTP has been sent to your email.");
+    } catch (err) {
+      Alert.alert("Error", err.message || "Failed to resend OTP.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleConfirm = async () => {
     if (!email) {
       Alert.alert("Error", "Email address not found. Please try the forgot password process again.");
+      return;
+    }
+    if (otpExpired) {
+      Alert.alert("OTP Expired", "Your OTP has expired. Please request a new one.");
       return;
     }
     const tokenTrimmed = resetToken.trim();
@@ -163,8 +205,13 @@ export default function CreateNewPasswordScreen({ navigation, route }) {
             <View style={styles.cardBody}>
               <Text style={styles.info}>Enter the 8-digit OTP from your email, verify your badge (digits only), and set a new password (8-16 characters with uppercase, lowercase, digit, and special character).</Text>
 
-              <Text style={[styles.label, { marginTop: 10 }]}>OTP</Text>
-              <View style={styles.inputWrap}>
+              <View style={styles.otpHeader}>
+                <Text style={[styles.label, { marginTop: 0, marginBottom: 0 }]}>OTP</Text>
+                <Text style={[styles.timerText, otpExpired && styles.timerExpired]}>
+                  {otpExpired ? "Expired" : `${Math.floor(timeRemaining / 60)}:${String(timeRemaining % 60).padStart(2, "0")}`}
+                </Text>
+              </View>
+              <View style={[styles.inputWrap, otpExpired && styles.inputWrapError]}>
                 <TextInput
                   value={resetToken}
                   onChangeText={setResetToken}
@@ -175,8 +222,14 @@ export default function CreateNewPasswordScreen({ navigation, route }) {
                   maxLength={8}
                   autoCapitalize="none"
                   autoCorrect={false}
+                  editable={!otpExpired}
                 />
               </View>
+              {otpExpired && (
+                <TouchableOpacity onPress={handleResendOtp} style={styles.resendBtn} activeOpacity={0.85} disabled={loading}>
+                  <Text style={styles.resendText}>{loading ? "Resending..." : "Resend OTP"}</Text>
+                </TouchableOpacity>
+              )}
 
               <Text style={[styles.label, { marginTop: 12 }]}>Badge Number</Text>
               <View style={styles.inputWrap}>
@@ -352,5 +405,38 @@ const styles = StyleSheet.create({
     textAlign: "center",
     color: "rgba(255,255,255,0.55)",
     fontSize: 11,
+  },
+  otpHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 10,
+    marginBottom: 8,
+  },
+  timerText: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  timerExpired: {
+    color: "rgba(255, 120, 120, 0.95)",
+  },
+  inputWrapError: {
+    borderWidth: 1,
+    borderColor: "rgba(255, 120, 120, 0.5)",
+  },
+  resendBtn: {
+    marginTop: 10,
+    backgroundColor: "rgba(255, 120, 120, 0.2)",
+    paddingVertical: 10,
+    borderRadius: 8,
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: "rgba(255, 120, 120, 0.4)",
+  },
+  resendText: {
+    color: "rgba(255, 120, 120, 0.95)",
+    fontSize: 12,
+    fontWeight: "600",
   },
 });

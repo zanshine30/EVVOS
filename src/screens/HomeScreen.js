@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -7,9 +7,37 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { clearPaired, getPaired } from "../utils/deviceStore";
 import { useAuth } from "../context/AuthContext";
+import supabase from "../lib/supabase";
+
+function parseDuration(dur) {
+  if (!dur) return 0;
+  const hours = dur.match(/(\d+)h/) ? parseInt(dur.match(/(\d+)h/)[1]) : 0;
+  const mins = dur.match(/(\d+)m/) ? parseInt(dur.match(/(\d+)m/)[1]) : 0;
+  return hours * 60 + mins;
+}
+
+function formatDuration(totalMins) {
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  return `${h}h ${m}m`;
+}
+
+function getAge(createdAt) {
+  const now = new Date();
+  const created = new Date(createdAt);
+  const diffMs = now - created;
+  const diffMins = Math.floor(diffMs / (1000 * 60));
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  return `${diffDays}d ago`;
+}
 
 export default function HomeScreen({ navigation }) {
-  const { displayName, badge } = useAuth();
+  const { displayName, badge, user } = useAuth();
+  const { logout } = useAuth();
   const officerName = `Officer ${displayName}`;
   const badgeText = badge ? `Badge #${badge}` : '';
   const location = "Camarin Rd.";
@@ -17,10 +45,100 @@ export default function HomeScreen({ navigation }) {
 
   
   const [paired, setPaired] = useState(false);
+  const [todayCases, setTodayCases] = useState(0);
+  const [recordingTime, setRecordingTime] = useState('0h 0m');
+  const [emergencies, setEmergencies] = useState(0);
+  const [recentActivities, setRecentActivities] = useState([]);
+  const [loadingPaired, setLoadingPaired] = useState(true);
 
   const loadPaired = async () => {
     const p = await getPaired();
-    setPaired(!!p);
+    if (!p) {
+      navigation.navigate('DevicePairingFlowScreen');
+      return;
+    }
+    setPaired(true);
+    setLoadingPaired(false);
+  };
+
+  const fetchStats = async () => {
+    if (!user?.id) return;
+
+    const activities = [];
+
+    // Today's cases: completed incidents in last 24 hours
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { count: cases } = await supabase
+      .from('incidents')
+      .select('id', { count: 'exact' })
+      .eq('officer_id', user.id)
+      .eq('status', 'COMPLETED')
+      .gte('created_at', yesterday);
+    setTodayCases(cases || 0);
+
+    // Recording time: sum of all durations
+    const { data: incs } = await supabase
+      .from('incidents')
+      .select('duration')
+      .eq('officer_id', user.id);
+    const totalMins = (incs || []).reduce((sum, i) => sum + parseDuration(i.duration || ''), 0);
+    setRecordingTime(formatDuration(totalMins));
+
+    // Emergencies: total emergency triggers
+    const { count: ems } = await supabase
+      .from('emergency_backups')
+      .select('id', { count: 'exact' })
+      .eq('auth_user_id', user.id);
+    setEmergencies(ems || 0);
+
+    // Recent activities
+    // 1. Latest completed incident
+    const { data: latestInc } = await supabase
+      .from('incidents')
+      .select('id, incident_id, violations, created_at')
+      .eq('officer_id', user.id)
+      .eq('status', 'COMPLETED')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (latestInc && latestInc.length > 0) {
+      const inc = latestInc[0];
+      const firstViolation = inc.violations && inc.violations.length > 0 ? inc.violations[0] : 'Incident';
+      const timeAgo = getAge(inc.created_at);
+      activities.push({
+        main: `${inc.incident_id || inc.id.slice(0, 8)} completed`,
+        sub: `${firstViolation} • ${timeAgo}`,
+        dotStyle: styles.dotSuccess,
+        icon: 'checkmark'
+      });
+    }
+
+    // 2. Backup requested (temporary hardcoded)
+    activities.push({
+      main: 'Backup requested',
+      sub: 'Camarin Rd. • 1 hour ago',
+      dotStyle: styles.dotWarn,
+      icon: 'alert'
+    });
+
+    // 3. Latest emergency alert sent
+    const { data: latestEm } = await supabase
+      .from('emergency_backups')
+      .select('location, created_at')
+      .eq('auth_user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (latestEm && latestEm.length > 0) {
+      const em = latestEm[0];
+      const timeAgo = getAge(em.created_at);
+      activities.push({
+        main: 'Emergency alert sent',
+        sub: `${em.location || 'Unknown'} • ${timeAgo}`,
+        dotStyle: styles.dotDanger,
+        icon: 'warning'
+      });
+    }
+
+    setRecentActivities(activities);
   };
 
   useEffect(() => {
@@ -36,6 +154,15 @@ export default function HomeScreen({ navigation }) {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    fetchStats();
+  }, [user]);
+
+  useEffect(() => {
+    const unsub = navigation.addListener("focus", fetchStats); // refetch stats on focus
+    return unsub;
+  }, [navigation]);
+
   const handleLogout = () => {
     Alert.alert(
       "Logout",
@@ -48,7 +175,10 @@ export default function HomeScreen({ navigation }) {
         {
           text: "Logout",
           style: "destructive",
-          onPress: () => navigation.reset({ index: 0, routes: [{ name: "Login" }] }),
+          onPress: async () => {
+            await logout();
+            navigation.reset({ index: 0, routes: [{ name: "Login" }] });
+          },
         },
       ]
     );
@@ -64,6 +194,26 @@ export default function HomeScreen({ navigation }) {
     setPaired(false);
     navigation.navigate("DeviceWelcome");
   };
+
+  if (loadingPaired) {
+    return (
+      <LinearGradient
+        colors={["#0B1A33", "#3D5F91"]}
+        start={{ x: 0.5, y: 0 }}
+        end={{ x: 0.5, y: 1 }}
+        style={styles.gradient}
+      >
+        <SafeAreaView style={styles.safe}>
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <ActivityIndicator size="large" color="#2E78E6" />
+            <Text style={{ marginTop: 16, color: '#fff', fontSize: 14 }}>
+              Loading...
+            </Text>
+          </View>
+        </SafeAreaView>
+      </LinearGradient>
+    );
+  }
 
   return (
     <LinearGradient
@@ -133,17 +283,17 @@ export default function HomeScreen({ navigation }) {
 
           <View style={styles.statsRow}>
             <View style={[styles.statCard, styles.statGreenBorder]}>
-              <Text style={styles.statValue}>10</Text>
+              <Text style={styles.statValue}>{todayCases}</Text>
               <Text style={styles.statLabel}>Today's Cases</Text>
             </View>
 
             <View style={[styles.statCard, styles.statYellowBorder]}>
-              <Text style={styles.statValue}>3h 20m</Text>
+              <Text style={styles.statValue}>{recordingTime}</Text>
               <Text style={styles.statLabel}>Recording Time</Text>
             </View>
 
             <View style={[styles.statCard, styles.statRedBorder]}>
-              <Text style={styles.statValue}>5</Text>
+              <Text style={styles.statValue}>{emergencies}</Text>
               <Text style={styles.statLabel}>Emergencies</Text>
             </View>
           </View>
@@ -191,41 +341,20 @@ export default function HomeScreen({ navigation }) {
 
             <View style={styles.line} />
 
-            <View style={styles.activityItem}>
-              <View style={[styles.activityDot, styles.dotSuccess]}>
-                <Ionicons name="checkmark" size={14} color="white" />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.activityMain}>Incident #23 completed</Text>
-                <Text style={styles.activitySub}>
-                  Traffic violation • 36 mins ago
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.itemDivider} />
-
-            <View style={styles.activityItem}>
-              <View style={[styles.activityDot, styles.dotWarn]}>
-                <Ionicons name="alert" size={14} color="white" />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.activityMain}>Backup requested</Text>
-                <Text style={styles.activitySub}>Camarin Rd. • 1 hour ago</Text>
-              </View>
-            </View>
-
-            <View style={styles.itemDivider} />
-
-            <View style={styles.activityItem}>
-              <View style={[styles.activityDot, styles.dotDanger]}>
-                <Ionicons name="warning" size={14} color="white" />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.activityMain}>Emergency alert sent</Text>
-                <Text style={styles.activitySub}>Highway patrol • 4 hours ago</Text>
-              </View>
-            </View>
+            {recentActivities.map((activity, index) => (
+              <React.Fragment key={index}>
+                <View style={styles.activityItem}>
+                  <View style={[styles.activityDot, activity.dotStyle]}>
+                    <Ionicons name={activity.icon} size={14} color="white" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.activityMain}>{activity.main}</Text>
+                    <Text style={styles.activitySub}>{activity.sub}</Text>
+                  </View>
+                </View>
+                {index < recentActivities.length - 1 && <View style={styles.itemDivider} />}
+              </React.Fragment>
+            ))}
           </View>
         </ScrollView>
       </SafeAreaView>

@@ -17,6 +17,7 @@ import supabase from "../lib/supabase";
 
 export default function ForgotPasswordScreen({ navigation }) {
   const [email, setEmail] = useState("");
+  const [loading, setLoading] = useState(false);
 
   const handleSendLink = async () => {
     const trimmed = email.trim();
@@ -26,8 +27,9 @@ export default function ForgotPasswordScreen({ navigation }) {
       return;
     }
 
-    // Check if email exists in users table
+    setLoading(true);
     try {
+      // Check if email exists in users table
       const { data, error } = await supabase
         .from('users')
         .select('email')
@@ -51,14 +53,16 @@ export default function ForgotPasswordScreen({ navigation }) {
         return;
       }
 
-      Alert.alert("OTP Sent", "An 8-digit OTP has been sent to your email.", [
+      Alert.alert("OTP Sent", "An 8-digit OTP has been sent to your email. OTP expires in 15 minutes.", [
         {
           text: "OK",
-          onPress: () => navigation.navigate("CreateNewPassword", { email: trimmed }),
+          onPress: () => navigation.navigate("CreateNewPassword", { email: trimmed, sentTime: new Date().getTime() }),
         },
       ]);
     } catch (err) {
       Alert.alert("Error", "An error occurred. Please try again.");
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -123,8 +127,8 @@ export default function ForgotPasswordScreen({ navigation }) {
                 Please enter your email to receive an 8-digit OTP.
               </Text>
 
-              <TouchableOpacity onPress={handleSendLink} style={styles.primaryBtn} activeOpacity={0.85}>
-                <Text style={styles.primaryText}>Send Token</Text>
+              <TouchableOpacity onPress={handleSendLink} style={[styles.primaryBtn, loading && styles.primaryBtnDisabled]} activeOpacity={0.85} disabled={loading}>
+                <Text style={styles.primaryText}>{loading ? "Sending..." : "Send Token"}</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -217,6 +221,9 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
+  },
+  primaryBtnDisabled: {
+    backgroundColor: "rgba(46, 120, 230, 0.5)",
   },
   primaryText: { color: "white", fontSize: 13, fontWeight: "600" },
 

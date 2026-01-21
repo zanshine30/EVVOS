@@ -23,6 +23,26 @@ import EmergencyBackupScreen from "./src/screens/EmergencyBackupScreen";
 
 const Stack = createNativeStackNavigator();
 
+// Loading Screen Component
+function LoadingScreen({ navigation }) {
+  const { loading, isAuthenticated } = useAuth();
+
+  useEffect(() => {
+    if (!loading) {
+      navigation.replace(isAuthenticated ? "Home" : "Login");
+    }
+  }, [loading, isAuthenticated, navigation]);
+
+  return (
+    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#0B1A33' }}>
+      <ActivityIndicator size="large" color="#2E78E6" />
+      <Text style={{ marginTop: 16, color: '#fff', fontSize: 14 }}>
+        Loading...
+      </Text>
+    </View>
+  );
+}
+
 // Deep linking configuration - kept for future use but not currently used for password reset
 const linking = {
   prefixes: ['evvos://'],
@@ -35,7 +55,7 @@ const linking = {
 
 function AppNavigator() {
   const navigationRef = useRef();
-  const { recoveryMode } = useAuth();
+  const { recoveryMode, isAuthenticated, loading } = useAuth();
 
   // Navigate to password reset screen when recovery mode is detected
   useEffect(() => {
@@ -116,7 +136,8 @@ function AppNavigator() {
   return (
     <NavigationContainer ref={navigationRef} linking={linking}>
       <StatusBar style="light" />
-      <Stack.Navigator initialRouteName="Login" screenOptions={{ headerShown: false }}>
+      <Stack.Navigator initialRouteName="Loading" screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="Loading" component={LoadingScreen} />
         <Stack.Screen name="Login" component={LoginScreen} />
         <Stack.Screen name="ForgotPassword" component={ForgotPasswordScreen} />
         <Stack.Screen name="CreateNewPassword" component={CreateNewPasswordScreen} />

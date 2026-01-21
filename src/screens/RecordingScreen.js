@@ -26,7 +26,7 @@ export default function RecordingScreen({ navigation, route }) {
 
   const [stopOpen, setStopOpen] = useState(false);
 
-  const { profile } = useContext(AuthContext);
+  const { profile, user } = useContext(AuthContext);
   const [backupData, setBackupData] = useState(null);
   const [emergencyTriggered, setEmergencyTriggered] = useState(false);
   const [currentRequestId, setCurrentRequestId] = useState(null);
@@ -97,7 +97,8 @@ export default function RecordingScreen({ navigation, route }) {
         enforcer,
         location,
         time,
-        responders
+        responders,
+        auth_user_id: user.id
       });
       if (error) throw error;
 

@@ -6,6 +6,8 @@ import messaging from '@react-native-firebase/messaging';
 
 export const AuthContext = createContext();
 
+const SESSION_KEY = 'evvos_session';
+
 export function AuthProvider({ children }) {
     const [user, setUser] = useState(null);
     const [session, setSession] = useState(null);
@@ -21,13 +23,37 @@ export function AuthProvider({ children }) {
 
         const init = async () => {
             try {
-                const temp = await supabase.auth.getSession();
-                const data = temp.data;
-                const sessionObj = data?.session ?? null;
-                if (!mounted) return;
-
-                setSession(sessionObj);
-                setUser(sessionObj?.user ?? null);
+                // Load stored session
+                const storedSession = await AsyncStorage.getItem(SESSION_KEY);
+                console.log('[Init] Loaded storedSession from AsyncStorage:', !!storedSession);
+                let sessionObj = null;
+                if (storedSession) {
+                    try {
+                        sessionObj = JSON.parse(storedSession);
+                        console.log('[Init] Parsed sessionObj, user ID:', sessionObj?.user?.id);
+                        // Set session in Supabase
+                        console.log('[Init] Calling supabase.auth.setSession...');
+                        await supabase.auth.setSession({
+                            access_token: sessionObj.access_token,
+                            refresh_token: sessionObj.refresh_token,
+                        });
+                        console.log('[Init] setSession completed');
+                        setSession(sessionObj);
+                        setUser(sessionObj?.user ?? null);
+                    } catch (e) {
+                        console.warn('Failed to parse stored session:', e);
+                        await AsyncStorage.removeItem(SESSION_KEY);
+                    }
+                } else {
+                    // No stored session, ensure Supabase is signed out
+                    console.log('[Init] No storedSession found in AsyncStorage, signing out...');
+                    try {
+                        await supabase.auth.signOut();
+                        console.log('[Init] Signed out from Supabase');
+                    } catch (e) {
+                        console.warn('[Init] Error during signOut:', e);
+                    }
+                }
 
                 // read profile (prefer RPC 'get_my_profile')
                 if (sessionObj?.user?.id) {
@@ -67,18 +93,30 @@ export function AuthProvider({ children }) {
                 }
             } catch (err) {
                 console.error("Failed to initialize auth:", err);
-            } finally {
-                if (mounted) setLoading(false);
             }
         };
 
         init();
 
         // subscribe to auth changes
-        const { data: sub } = supabase.auth.onAuthStateChange((event, session) => {
+        const { data: sub } = supabase.auth.onAuthStateChange(async (event, session) => {
             console.log('Auth state change:', event, session?.user?.id);
             setSession(session ?? null);
             setUser(session?.user ?? null);
+
+            // Set loading false on first auth state change
+            if (loading) setLoading(false);
+
+            // Store or remove session
+            if (session) {
+                console.log('[Auth Change] Storing session for user:', session?.user?.id);
+                await AsyncStorage.setItem(SESSION_KEY, JSON.stringify(session));
+                console.log('[Auth Change] Session stored in AsyncStorage');
+            } else {
+                console.log('[Auth Change] Removing stored session from AsyncStorage');
+                await AsyncStorage.removeItem(SESSION_KEY);
+                console.log('[Auth Change] Session removed from AsyncStorage');
+            }
 
             if (event === 'PASSWORD_RECOVERY') {
                 setRecoveryMode(true);
@@ -217,6 +255,7 @@ export function AuthProvider({ children }) {
             setUser(null);
             setProfile(null);
             setBadge(null);
+            await AsyncStorage.removeItem(SESSION_KEY);
             await AsyncStorage.removeItem("evvos_remember_email");
             setRememberMe(false);
             return { success: true };
