@@ -120,6 +120,30 @@ export default function IncidentDetailsScreen({ navigation, route }) {
       return;
     }
 
+    // Show confirmation for PENDING incidents being updated to COMPLETED
+    if (isPending) {
+      Alert.alert(
+        "Update Incident",
+        "Are you sure you want to finalize and submit this pending incident?",
+        [
+          {
+            text: "Cancel",
+            style: "cancel",
+          },
+          {
+            text: "Submit",
+            style: "default",
+            onPress: () => submitIncident(),
+          },
+        ]
+      );
+      return;
+    }
+
+    submitIncident();
+  };
+
+  const submitIncident = async () => {
     setSubmitting(true);
 
     const incidentData = {
@@ -149,8 +173,12 @@ export default function IncidentDetailsScreen({ navigation, route }) {
         console.error("Error updating incident:", error);
         Alert.alert("Error", "Failed to update incident. Please try again.");
       } else if (result?.success) {
-        Alert.alert("Success", "Incident updated successfully.");
-        navigation.goBack(); // Or refresh
+        Alert.alert("Success", "Incident updated successfully.", [
+          {
+            text: "OK",
+            onPress: () => navigation.goBack(),
+          },
+        ]);
       } else {
         Alert.alert("Error", "Failed to update incident. Please try again.");
       }

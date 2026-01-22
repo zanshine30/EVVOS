@@ -115,6 +115,7 @@ export default function IncidentSummaryScreen({ navigation, route }) {
 
     const incidentData = {
       officer_id: user.id,
+      badge,
       status: "COMPLETED",
       location,
       duration,
@@ -170,6 +171,7 @@ export default function IncidentSummaryScreen({ navigation, route }) {
 
     const incidentData = {
       officer_id: user.id,
+      badge,
       status: "PENDING",
       location,
       duration,

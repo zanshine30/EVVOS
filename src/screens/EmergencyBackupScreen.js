@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect } from "react";
-import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import MapView, { Marker } from "react-native-maps";
@@ -10,30 +10,51 @@ export default function EmergencyBackupScreen({ navigation, route }) {
   const [backupData, setBackupData] = useState(route?.params?.backupData);
   const [status, setStatus] = useState("En Route"); // "On Scene"
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [mounted, setMounted] = useState(true);
 
   useEffect(() => {
+    setMounted(true);
+    return () => setMounted(false);
+  }, []);
+
+  useEffect(() => {
+    if (!mounted) return;
+
     const requestId = route?.params?.request_id;
-    console.log('[EmergencyBackupScreen] Mounted with request_id:', requestId);
+    console.log('[EmergencyBackupScreen] ========================================');
+    console.log('[EmergencyBackupScreen] Screen mounted with request_id:', requestId);
+    console.log('[EmergencyBackupScreen] Route params:', route?.params);
     console.log('[EmergencyBackupScreen] Initial backupData:', backupData);
+    console.log('[EmergencyBackupScreen] ========================================');
     
     if (requestId) {
       setLoading(true);
+      setError(null);
       const fetchData = async () => {
         try {
-          console.log('[EmergencyBackupScreen] Fetching backup details for request_id:', requestId);
-          const { data, error } = await supabase
+          console.log('[EmergencyBackupScreen] 1️⃣  Fetching backup details for request_id:', requestId);
+          const { data, error: fetchError } = await supabase
             .from('emergency_backups')
             .select('*')
             .eq('request_id', requestId)
             .single();
           
-          if (error) {
-            console.error('[EmergencyBackupScreen] Error fetching data:', error);
+          if (!mounted) {
+            console.log('[EmergencyBackupScreen] Component unmounted, skipping state updates');
+            return;
+          }
+          
+          if (fetchError) {
+            console.error('[EmergencyBackupScreen] ❌ Error fetching data:', fetchError);
+            setError(fetchError.message);
+            Alert.alert('Error', 'Failed to load emergency backup details: ' + fetchError.message);
+            setLoading(false);
             return;
           }
           
           if (data) {
-            console.log('[EmergencyBackupScreen] ✅ Data fetched successfully:', {
+            console.log('[EmergencyBackupScreen] ✅ 2️⃣  Data fetched successfully:', {
               enforcer: data.enforcer,
               location: data.location,
               responders: data.responders,
@@ -49,19 +70,32 @@ export default function EmergencyBackupScreen({ navigation, route }) {
               request_id: data.request_id,
               status: data.status,
             });
+            setError(null);
           } else {
-            console.warn('[EmergencyBackupScreen] No data found for request_id:', requestId);
+            console.warn('[EmergencyBackupScreen] ⚠️  No data found for request_id:', requestId);
+            setError('No emergency backup found');
+            Alert.alert('Error', 'Emergency backup not found');
           }
         } catch (err) {
-          console.error('[EmergencyBackupScreen] Fetch error:', err);
+          console.error('[EmergencyBackupScreen] ❌ Fetch exception:', err);
+          if (mounted) {
+            setError(err.message);
+            Alert.alert('Error', 'Failed to load data: ' + err.message);
+          }
         } finally {
-          setLoading(false);
+          if (mounted) {
+            setLoading(false);
+          }
         }
       };
       
       fetchData();
+    } else {
+      console.warn('[EmergencyBackupScreen] ⚠️  No request_id provided in route params');
+      setError('No request ID provided');
+      setLoading(false);
     }
-  }, [route?.params?.request_id]);
+  }, [route?.params?.request_id, mounted]);
 
   const coords = backupData?.coords || { latitude: 14.7566, longitude: 121.0447 };
   const name = backupData?.enforcer ?? "Juan Bartolome";
@@ -115,6 +149,29 @@ export default function EmergencyBackupScreen({ navigation, route }) {
       style={styles.gradient}
     >
       <SafeAreaView style={styles.safe}>
+        {loading && !backupData && (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
+            <ActivityIndicator size="large" color="#2E78E6" />
+            <Text style={{ marginTop: 16, color: '#fff', fontSize: 14 }}>Loading emergency details...</Text>
+          </View>
+        )}
+        
+        {error && !backupData && (
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 20 }}>
+            <Ionicons name="alert-circle" size={48} color="#FF1E1E" />
+            <Text style={{ marginTop: 16, color: '#fff', fontSize: 14, textAlign: 'center' }}>
+              {error}
+            </Text>
+            <TouchableOpacity
+              style={{ marginTop: 20, backgroundColor: '#2E78E6', paddingHorizontal: 20, paddingVertical: 10, borderRadius: 8 }}
+              onPress={() => navigation.goBack()}
+            >
+              <Text style={{ color: 'white', fontWeight: 'bold' }}>Go Back</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+        
+        {backupData && (
         <View style={styles.container}>
           <View style={styles.topHeader}>
             <View style={styles.headerRow}>
@@ -159,16 +216,8 @@ export default function EmergencyBackupScreen({ navigation, route }) {
             </View>
 
             <View style={styles.mapWrap}>
-              <MapView
-                style={styles.map}
-                initialRegion={{
-                  ...coords,
-                  latitudeDelta: 0.01,
-                  longitudeDelta: 0.01,
-                }}
-              >
-                <Marker coordinate={coords} />
-              </MapView>
+              {/* Temporary black placeholder - MapView disabled until Google Maps API is configured */}
+              <View style={{ flex: 1, backgroundColor: '#000' }} />
             </View>
 
             <TouchableOpacity style={styles.viewLocationBtn} activeOpacity={0.9}>
@@ -239,6 +288,7 @@ export default function EmergencyBackupScreen({ navigation, route }) {
             </TouchableOpacity>
           </View>
         </View>
+        )}
       </SafeAreaView>
     </LinearGradient>
   );

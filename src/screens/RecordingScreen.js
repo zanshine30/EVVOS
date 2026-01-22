@@ -79,8 +79,11 @@ export default function RecordingScreen({ navigation, route }) {
     console.log('[RecordingScreen] User profile:', profile);
 
     const badge = profile?.badge || '4521';
-    const random = Math.floor(Math.random() * 100).toString().padStart(2, '0');
-    const request_id = `REQ${badge}${random}`;
+    // Generate unique request_id using year + badge last 4 + timestamp last 4
+    const year = new Date().getFullYear().toString().slice(-2); // Last 2 digits of year (e.g., 26 from 2026)
+    const badgeLast4 = badge.slice(-4); // Last 4 digits of badge (e.g., 6500)
+    const timestamp = Date.now().toString().slice(-4); // Last 4 digits of timestamp (e.g., 4253)
+    const request_id = `REQ${year}${badgeLast4}${timestamp}`;
     const enforcer = profile?.display_name || 'Juan Bartolome';
     const location = 'Camarin Rd.';
     const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -134,14 +137,28 @@ export default function RecordingScreen({ navigation, route }) {
 
       // Step 3: Send push notifications
       console.log('[RecordingScreen] Sending push notification...');
+      
+      // Validate user ID
+      if (!user?.id) {
+        throw new Error('User ID is not available. Cannot send emergency notifications.');
+      }
+      
       const notificationPayload = {
         request_id,
         enforcer,
         location,
         time,
-        triggered_by_user_id: user?.id,
+        triggered_by_user_id: user.id,
       };
-      console.log('[RecordingScreen] Notification payload:', notificationPayload);
+      
+      console.log('[RecordingScreen] ========================================');
+      console.log('[RecordingScreen] NOTIFICATION PAYLOAD:');
+      console.log('[RecordingScreen] Request ID:', request_id);
+      console.log('[RecordingScreen] Enforcer:', enforcer);
+      console.log('[RecordingScreen] Location:', location);
+      console.log('[RecordingScreen] Time:', time);
+      console.log('[RecordingScreen] Triggered by User ID:', user.id);
+      console.log('[RecordingScreen] ========================================');
 
       const supabaseAnonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpla2JvbmJ4d2NjZ3NmYWdycnBoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzOTQyOTUsImV4cCI6MjA4Mzk3MDI5NX0.0ss5U-uXryhWGf89ucndqNK8-Bzj_GRZ-4-Xap6ytHg";
 

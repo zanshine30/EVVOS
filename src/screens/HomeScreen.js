@@ -195,10 +195,26 @@ export default function HomeScreen({ navigation }) {
   };
 
   
-  const handleDisconnect = async () => {
-    await clearPaired();
-    setPaired(false);
-    navigation.navigate("DeviceWelcome");
+  const handleDisconnect = () => {
+    Alert.alert(
+      "Disconnect Device",
+      "Are you sure you want to disconnect your E.V.V.O.S device?",
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Disconnect",
+          style: "destructive",
+          onPress: async () => {
+            await clearPaired();
+            setPaired(false);
+            navigation.navigate("DeviceWelcome");
+          },
+        },
+      ]
+    );
   };
 
   if (loadingPaired) {

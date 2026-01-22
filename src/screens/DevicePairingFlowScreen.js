@@ -16,7 +16,7 @@ import { setPaired } from "../utils/deviceStore";
 import { useAuth } from "../context/AuthContext";
 
 export default function DevicePairingFlowScreen({ navigation }) {
-  const { displayName, badge } = useAuth();
+  const { displayName, badge, logout } = useAuth();
   const [step, setStep] = useState(1); // 1..6
   const [ssid, setSsid] = useState("");
   const [pw, setPw] = useState("");
@@ -85,6 +85,27 @@ export default function DevicePairingFlowScreen({ navigation }) {
           text: "Go Back",
           style: "destructive",
           onPress: () => navigation.goBack(),
+        },
+      ]
+    );
+  };
+
+  const handleLogout = () => {
+    Alert.alert(
+      "Logout",
+      "Are you sure you want to logout?",
+      [
+        {
+          text: "Cancel",
+          style: "cancel",
+        },
+        {
+          text: "Logout",
+          style: "destructive",
+          onPress: async () => {
+            await logout();
+            navigation.reset({ index: 0, routes: [{ name: "Login" }] });
+          },
         },
       ]
     );
@@ -224,9 +245,14 @@ export default function DevicePairingFlowScreen({ navigation }) {
             </View>
           </View>
 
-          <TouchableOpacity activeOpacity={0.9} onPress={handleGoBack}>
-            <Ionicons name="arrow-back" size={18} color="rgba(255,255,255,0.75)" />
-          </TouchableOpacity>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+            <TouchableOpacity activeOpacity={0.9} onPress={handleLogout}>
+              <Ionicons name="log-out-outline" size={18} color="rgba(255,255,255,0.75)" />
+            </TouchableOpacity>
+            <TouchableOpacity activeOpacity={0.9} onPress={handleGoBack}>
+              <Ionicons name="arrow-back" size={18} color="rgba(255,255,255,0.75)" />
+            </TouchableOpacity>
+          </View>
         </View>
 
         <ScrollView contentContainerStyle={styles.page} showsVerticalScrollIndicator={false}>
