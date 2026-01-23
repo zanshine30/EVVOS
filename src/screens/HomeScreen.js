@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, ActivityIndicator, Modal } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -7,6 +7,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { clearPaired, getPaired } from "../utils/deviceStore";
 import { useAuth } from "../context/AuthContext";
+import { useNotification } from "../context/NotificationContext";
 import supabase from "../lib/supabase";
 
 function parseDuration(dur) {
@@ -38,11 +39,16 @@ function getAge(createdAt) {
 export default function HomeScreen({ navigation }) {
   const { displayName, badge, user } = useAuth();
   const { logout } = useAuth();
+  const { pendingEmergency, clearEmergency } = useNotification();
   const officerName = `Officer ${displayName}`;
   const badgeText = badge ? `Badge #${badge}` : '';
   const location = "Camarin Rd.";
   const [time, setTime] = useState(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
 
+  // Backup request modal state
+  const [backupRequestModalOpen, setBackupRequestModalOpen] = useState(false);
+  const [backupRequestData, setBackupRequestData] = useState(null);
+  const [accepting, setAccepting] = useState(false);
   
   const [paired, setPaired] = useState(false);
   const [todayCases, setTodayCases] = useState(0);
@@ -169,6 +175,15 @@ export default function HomeScreen({ navigation }) {
     return unsub;
   }, [navigation]);
 
+  // Handle pending emergency from background notification
+  useEffect(() => {
+    if (pendingEmergency) {
+      console.log('[HomeScreen] Pending emergency detected:', pendingEmergency.request_id);
+      setBackupRequestData(pendingEmergency);
+      setBackupRequestModalOpen(true);
+    }
+  }, [pendingEmergency]);
+
   const handleLogout = () => {
     Alert.alert(
       "Logout",
@@ -215,6 +230,64 @@ export default function HomeScreen({ navigation }) {
         },
       ]
     );
+  };
+
+  const handleBackupRequestAccept = async () => {
+    if (!backupRequestData?.request_id) {
+      Alert.alert('Error', 'Request ID is missing');
+      return;
+    }
+
+    try {
+      setAccepting(true);
+      console.log('[HomeScreen] Accepting backup request:', backupRequestData.request_id);
+
+      // Fetch current responder count
+      const { data: current, error: fetchError } = await supabase
+        .from('emergency_backups')
+        .select('responders')
+        .eq('request_id', backupRequestData.request_id)
+        .single();
+
+      if (fetchError) throw new Error(`Failed to fetch responders: ${fetchError.message}`);
+      if (!current) throw new Error('Emergency backup record not found');
+
+      // Update responder count
+      const newResponderCount = (current.responders || 0) + 1;
+      console.log('[HomeScreen] Incrementing responders:', current.responders, '→', newResponderCount);
+
+      const { error: updateError } = await supabase
+        .from('emergency_backups')
+        .update({ responders: newResponderCount })
+        .eq('request_id', backupRequestData.request_id);
+
+      if (updateError) throw new Error(`Failed to update responders: ${updateError.message}`);
+
+      console.log('[HomeScreen] ✅ Backup request accepted');
+      
+      // Close modal
+      setBackupRequestModalOpen(false);
+      setBackupRequestData(null);
+      clearEmergency();
+
+      // Navigate to EmergencyBackup screen
+      await new Promise(resolve => setTimeout(resolve, 300));
+      navigation.navigate('EmergencyBackup', {
+        request_id: backupRequestData.request_id,
+      });
+    } catch (err) {
+      console.error('[HomeScreen] Error accepting backup request:', err);
+      Alert.alert('Error', err.message || 'Failed to accept backup request');
+    } finally {
+      setAccepting(false);
+    }
+  };
+
+  const handleBackupRequestDecline = () => {
+    console.log('[HomeScreen] Declining backup request');
+    setBackupRequestModalOpen(false);
+    setBackupRequestData(null);
+    clearEmergency();
   };
 
   if (loadingPaired) {
@@ -380,6 +453,90 @@ export default function HomeScreen({ navigation }) {
           </View>
         </ScrollView>
       </SafeAreaView>
+
+      <Modal visible={backupRequestModalOpen} transparent animationType="fade">
+        <View style={styles.backupModalBackdrop}>
+          {!backupRequestData ? (
+            <View style={styles.backupModalCard}>
+              <ActivityIndicator size="large" color="#2E78E6" style={{ marginVertical: 30 }} />
+              <Text style={{ color: '#fff', textAlign: 'center', marginTop: 16 }}>
+                Loading backup request...
+              </Text>
+            </View>
+          ) : (
+            <View style={styles.backupModalCard}>
+              {/* Header */}
+              <View style={styles.backupModalHeader}>
+                <View style={styles.backupAlertIconContainer}>
+                  <Ionicons name="alert-circle" size={20} color="#FF1E1E" />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.backupModalTitle}>🚨 Emergency Backup Alert</Text>
+                  <Text style={styles.backupModalSubtitle}>Officer needs assistance</Text>
+                </View>
+              </View>
+
+              {/* Divider */}
+              <View style={styles.backupDivider} />
+
+              {/* Content */}
+              <View style={styles.backupModalContent}>
+                <View style={styles.backupInfoRow}>
+                  <Text style={styles.backupInfoLabel}>Enforcer:</Text>
+                  <Text style={styles.backupInfoValue}>{backupRequestData.enforcer || 'N/A'}</Text>
+                </View>
+
+                <View style={styles.backupInfoRow}>
+                  <Text style={styles.backupInfoLabel}>Location:</Text>
+                  <Text style={styles.backupInfoValue}>{backupRequestData.location || 'N/A'}</Text>
+                </View>
+
+                <View style={styles.backupInfoRow}>
+                  <Text style={styles.backupInfoLabel}>Date & Time:</Text>
+                  <Text style={styles.backupInfoValue}>{backupRequestData.time || 'N/A'}</Text>
+                </View>
+
+                <View style={styles.backupInfoRow}>
+                  <Text style={styles.backupInfoLabel}>No. of Responders:</Text>
+                  <Text style={styles.backupInfoValue}>{backupRequestData.responders || 0}</Text>
+                </View>
+              </View>
+
+              {/* Divider */}
+              <View style={styles.backupDivider} />
+
+              {/* Buttons */}
+              <View style={styles.backupButtonRow}>
+                <TouchableOpacity
+                  style={[styles.backupButton, styles.backupDeclineButton]}
+                  onPress={handleBackupRequestDecline}
+                  disabled={accepting}
+                  activeOpacity={0.7}
+                >
+                  <Ionicons name="close" size={16} color="white" style={{ marginRight: 6 }} />
+                  <Text style={styles.backupDeclineButtonText}>DECLINE</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.backupButton, styles.backupAcceptButton]}
+                  onPress={handleBackupRequestAccept}
+                  disabled={accepting}
+                  activeOpacity={0.7}
+                >
+                  {accepting ? (
+                    <ActivityIndicator size="small" color="#0B1A33" style={{ marginRight: 6 }} />
+                  ) : (
+                    <Ionicons name="checkmark" size={16} color="#0B1A33" style={{ marginRight: 6 }} />
+                  )}
+                  <Text style={styles.backupAcceptButtonText}>
+                    {accepting ? 'ACCEPTING...' : 'ACCEPT'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+        </View>
+      </Modal>
     </LinearGradient>
   );
 }
@@ -545,5 +702,115 @@ const styles = StyleSheet.create({
     height: 1,
     backgroundColor: "rgba(255,255,255,0.08)",
     marginVertical: 10,
+  },
+
+  // Backup request modal styles
+  backupModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+  },
+  backupModalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#0F192D',
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 30, 30, 0.6)',
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  backupModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  backupAlertIconContainer: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(255, 30, 30, 0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
+  backupModalTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: 'rgba(255, 255, 255, 0.95)',
+    marginBottom: 4,
+  },
+  backupModalSubtitle: {
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.65)',
+    fontStyle: 'italic',
+  },
+  backupDivider: {
+    height: 1,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    marginVertical: 12,
+  },
+  backupModalContent: {
+    marginBottom: 4,
+  },
+  backupInfoRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+    paddingHorizontal: 4,
+  },
+  backupInfoLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.65)',
+  },
+  backupInfoValue: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: 'rgba(255, 255, 255, 0.92)',
+    textAlign: 'right',
+    flex: 1,
+    marginLeft: 12,
+  },
+  backupButtonRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginTop: 4,
+  },
+  backupButton: {
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  backupDeclineButton: {
+    backgroundColor: 'rgba(255, 30, 30, 0.15)',
+    borderColor: 'rgba(255, 30, 30, 0.4)',
+  },
+  backupDeclineButtonText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: 'rgba(255, 255, 255, 0.85)',
+    letterSpacing: 0.3,
+  },
+  backupAcceptButton: {
+    backgroundColor: '#3DDC84',
+    borderColor: 'rgba(61, 220, 132, 0.5)',
+  },
+  backupAcceptButtonText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0B1A33',
+    letterSpacing: 0.4,
   },
 });

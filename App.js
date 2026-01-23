@@ -10,6 +10,8 @@ import messaging from '@react-native-firebase/messaging';
 import supabase from './src/lib/supabase';
 
 import { AuthProvider, useAuth } from "./src/context/AuthContext";
+import { NotificationProvider, useNotification } from "./src/context/NotificationContext";
+import { RecordingProvider, useRecording } from "./src/context/RecordingContext";
 
 import LoadingScreen from "./src/screens/LoadingScreen";
 import LoginScreen from "./src/screens/LoginScreen";
@@ -95,14 +97,147 @@ function AppNavigator({ navigationRef }) {
   );
 }
 
+function AppWithNotificationHandler({ navigationRef, emergencyModalVisible, setEmergencyModalVisible, emergencyData, setEmergencyData, modalLoading, setModalLoading, handleEmergencyAccept, handleEmergencyDecline, shouldNavigateToEmergency, setShouldNavigateToEmergency, emergencyRequestId, setEmergencyRequestId, processNotificationResponse, pendingNotificationTrigger }) {
+  const { isRecording } = useRecording();
+  const { setEmergency } = useNotification();
+
+  // Process pending notification responses when they become available
+  useEffect(() => {
+    const processPending = async () => {
+      if (window.__pendingNotificationResponse) {
+        const data = window.__pendingNotificationResponse;
+        window.__pendingNotificationResponse = null;
+
+        console.log('[AppWithNotificationHandler] Processing pending notification response:', data);
+
+        // If recording is active, navigate to RecordingScreen
+        if (isRecording) {
+          console.log('[AppWithNotificationHandler] Recording is active, will navigate to RecordingScreen');
+          navigationRef.current?.navigate('Recording');
+          
+          // Also set the pending emergency in context so RecordingScreen can display it
+          if (data?.request_id) {
+            setEmergency({
+              request_id: data.request_id,
+              triggered_by_user_id: data?.triggered_by_user_id,
+            });
+          }
+        }
+
+        // Process the notification data
+        await processNotificationResponse(data);
+      }
+    };
+
+    processPending();
+  }, [isRecording, processNotificationResponse, setEmergency, pendingNotificationTrigger]);
+
+  return (
+    <>
+      <AppNavigator navigationRef={navigationRef} />
+      <EmergencyBackupModal
+        visible={emergencyModalVisible}
+        data={emergencyData}
+        loading={modalLoading}
+        onAccept={handleEmergencyAccept}
+        onDecline={handleEmergencyDecline}
+        navigationRef={navigationRef}
+        shouldNavigate={shouldNavigateToEmergency}
+        setShouldNavigate={setShouldNavigateToEmergency}
+        requestId={emergencyRequestId}
+        setRequestId={setEmergencyRequestId}
+      />
+    </>
+  );
+}
+
 export default function App() {
   const [isReady, setIsReady] = useState(false);
+  const isReadyRef = useRef(false); // Use ref for notification handler to access current state
   const navigationRef = useRef();
   const [emergencyModalVisible, setEmergencyModalVisible] = useState(false);
   const [emergencyData, setEmergencyData] = useState(null);
   const [modalLoading, setModalLoading] = useState(false);
   const [shouldNavigateToEmergency, setShouldNavigateToEmergency] = useState(false);
   const [emergencyRequestId, setEmergencyRequestId] = useState(null);
+  const [pendingNotificationTrigger, setPendingNotificationTrigger] = useState(0); // Trigger to process pending notifications
+
+  // Update ref whenever isReady changes
+  useEffect(() => {
+    isReadyRef.current = isReady;
+  }, [isReady]);
+
+  // Helper function to process notification responses
+  const processNotificationResponse = async (data) => {
+    if (!data?.type === 'emergency_backup' || !data?.request_id) {
+      console.log('[App] Notification is not emergency_backup or missing request_id');
+      return;
+    }
+
+    console.log('[App] 📲 Processing emergency backup notification for request_id:', data.request_id);
+
+    try {
+      // Fetch emergency backup details from Supabase
+      console.log('[App] Fetching emergency backup details...');
+      const { data: backupData, error } = await supabase
+        .from('emergency_backups')
+        .select('*')
+        .eq('request_id', data.request_id)
+        .single();
+
+      if (error) {
+        console.error('[App] ❌ Error fetching emergency backup details:', error);
+        if (isReadyRef.current) {
+          setTimeout(() => {
+            Alert.alert('Error', 'Failed to load emergency details');
+          }, 100);
+        }
+        return;
+      }
+
+      if (backupData) {
+        console.log('[App] ✅ Emergency backup details fetched:', {
+          request_id: backupData.request_id,
+          enforcer: backupData.enforcer,
+          location: backupData.location
+        });
+
+        // Set emergency data and show modal IMMEDIATELY
+        console.log('[App] Setting emergency data for request_id:', data.request_id);
+        setEmergencyData({
+          ...backupData,
+          request_id: data.request_id,
+          triggered_by_user_id: data?.triggered_by_user_id,
+        });
+
+        // Show modal instantly
+        console.log('[App] Showing emergency modal...');
+        setEmergencyModalVisible(true);
+
+        // Set nav flags if app is ready
+        if (isReadyRef.current) {
+          setShouldNavigateToEmergency(true);
+          setEmergencyRequestId(data.request_id);
+        }
+
+        console.log('[App] ✅ Emergency modal visible');
+      } else {
+        console.warn('[App] No backup data found for request_id:', data.request_id);
+        if (isReadyRef.current) {
+          setTimeout(() => {
+            Alert.alert('Error', 'Emergency backup not found');
+          }, 100);
+        }
+      }
+    } catch (fetchErr) {
+      console.error('[App] Failed to fetch backup details:', fetchErr);
+      if (isReadyRef.current) {
+        setTimeout(() => {
+          Alert.alert('Error', 'Failed to load emergency details: ' + fetchErr.message);
+        }, 100);
+      }
+    }
+  };
 
   // Setup Firebase and notification listeners globally - runs once at app startup
   useEffect(() => {
@@ -185,66 +320,15 @@ export default function App() {
         const { notification } = response;
         const data = notification.request.content.data;
         console.log('[App] 🔔 Background notification tapped:', data);
-        console.log('[App] App ready state:', isReady);
         
-        if (data?.type === 'emergency_backup' && data?.request_id) {
-          console.log('[App] 📲 Processing background notification emergency_backup...');
-          
-          // If app is not ready yet, wait for it to be ready before showing modal
-          if (!isReady) {
-            console.log('[App] App not ready yet, waiting...');
-            const maxWaitTime = 5000; // 5 second timeout
-            const startTime = Date.now();
-            
-            // Wait for app to be ready
-            while (!isReady && (Date.now() - startTime) < maxWaitTime) {
-              await new Promise(resolve => setTimeout(resolve, 100));
-            }
-            console.log('[App] App is now ready, proceeding with notification...');
-          }
-          
-          try {
-            // Fetch full emergency backup details from Supabase
-            console.log('[App] Fetching emergency backup details for request_id:', data.request_id);
-            const { data: backupData, error } = await supabase
-              .from('emergency_backups')
-              .select('*')
-              .eq('request_id', data.request_id)
-              .single();
-            
-            if (error) {
-              console.error('[App] ❌ Error fetching emergency backup details:', error);
-              Alert.alert('Error', 'Failed to load emergency details');
-              return;
-            }
-            
-            if (backupData) {
-              console.log('[App] ✅ Emergency backup details fetched:', {
-                request_id: backupData.request_id,
-                enforcer: backupData.enforcer,
-                location: backupData.location
-              });
-              
-              // Set the emergency data
-              setEmergencyData({
-                ...backupData,
-                request_id: data.request_id,
-                triggered_by_user_id: data?.triggered_by_user_id,
-              });
-              
-              // Show modal immediately
-              console.log('[App] Showing emergency modal...');
-              setEmergencyModalVisible(true);
-              console.log('[App] ✅ Emergency modal should be visible now');
-            } else {
-              console.warn('[App] No backup data found for request_id:', data.request_id);
-              Alert.alert('Error', 'Emergency backup not found');
-            }
-          } catch (fetchErr) {
-            console.error('[App] Failed to fetch backup details:', fetchErr);
-            Alert.alert('Error', 'Failed to load emergency details: ' + fetchErr.message);
-          }
-        }
+        // Store notification response data to be processed when app is fully ready
+        // This will be handled by AppWithNotificationHandler component which has access to contexts
+        window.__pendingNotificationResponse = data;
+        
+        console.log('[App] Notification response stored for later processing');
+        
+        // Trigger the processing by incrementing the trigger counter
+        setPendingNotificationTrigger(prev => prev + 1);
       } catch (err) {
         console.error('[App] Failed to handle background notification:', err);
       }
@@ -267,13 +351,39 @@ export default function App() {
           console.log('Initial URL:', initialURL);
           // Handle any future deep linking logic here
         }
+
+        // Check for notification response when app starts (cold-start scenario)
+        // This handles the case where app was completely killed and notification was tapped
+        try {
+          const lastNotificationResponse = await Notifications.getLastNotificationResponseAsync();
+          if (lastNotificationResponse) {
+            console.log('[App] 📬 Cold-start: Found last notification response:', lastNotificationResponse.notification.request.content.data);
+            const data = lastNotificationResponse.notification.request.content.data;
+            
+            // Process the notification using our helper function
+            if (data?.type === 'emergency_backup' && data?.request_id) {
+              console.log('[App] 🚀 Processing cold-start emergency_backup notification...');
+              // Defer processing to next tick so state is ready
+              setTimeout(async () => {
+                await processNotificationResponse(data);
+              }, 100);
+            }
+          } else {
+            console.log('[App] No last notification response on cold-start');
+          }
+        } catch (notifErr) {
+          console.error('[App] Error checking last notification response:', notifErr);
+        }
       } catch (e) {
         console.error('Failed to get initial URL:', e);
       } finally {
+        // Mark app as ready immediately - notification handler can proceed
+        console.log('[App] App initialization complete, setting isReady=true');
         setIsReady(true);
       }
     };
 
+    // Start preparation immediately
     prepareApp();
   }, []);
 
@@ -403,19 +513,27 @@ export default function App() {
   return (
     <>
       <AuthProvider>
-        <AppNavigator navigationRef={navigationRef} />
-        <EmergencyBackupModal
-          visible={emergencyModalVisible}
-          data={emergencyData}
-          loading={modalLoading}
-          onAccept={handleEmergencyAccept}
-          onDecline={handleEmergencyDecline}
-          navigationRef={navigationRef}
-          shouldNavigate={shouldNavigateToEmergency}
-          setShouldNavigate={setShouldNavigateToEmergency}
-          requestId={emergencyRequestId}
-          setRequestId={setEmergencyRequestId}
-        />
+        <RecordingProvider>
+          <NotificationProvider>
+            <AppWithNotificationHandler
+              navigationRef={navigationRef}
+              emergencyModalVisible={emergencyModalVisible}
+              setEmergencyModalVisible={setEmergencyModalVisible}
+              emergencyData={emergencyData}
+              setEmergencyData={setEmergencyData}
+              modalLoading={modalLoading}
+              setModalLoading={setModalLoading}
+              handleEmergencyAccept={handleEmergencyAccept}
+              handleEmergencyDecline={handleEmergencyDecline}
+              shouldNavigateToEmergency={shouldNavigateToEmergency}
+              setShouldNavigateToEmergency={setShouldNavigateToEmergency}
+              emergencyRequestId={emergencyRequestId}
+              setEmergencyRequestId={setEmergencyRequestId}
+              processNotificationResponse={processNotificationResponse}
+              pendingNotificationTrigger={pendingNotificationTrigger}
+            />
+          </NotificationProvider>
+        </RecordingProvider>
       </AuthProvider>
     </>
   );

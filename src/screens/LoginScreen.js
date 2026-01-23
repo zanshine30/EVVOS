@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  ActivityIndicator,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
@@ -29,9 +30,10 @@ export default function LoginScreen({ navigation }) {
   const [attemptCount, setAttemptCount] = useState(0);
   const [cooldownRemaining, setCooldownRemaining] = useState(0);
   const [isOnCooldown, setIsOnCooldown] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
 
   const handleSignIn = async () => {
-    if (isOnCooldown) return;
+    if (isOnCooldown || isLoading) return;
 
     const badgeTrimmed = badgeNumber.trim();
     const passTrimmed = password.trim();
@@ -55,16 +57,31 @@ export default function LoginScreen({ navigation }) {
     if (hasError) return;
 
     try {
+      setIsLoading(true);
       const result = await loginByBadge(badgeTrimmed, passTrimmed);
+      
       if (!result.success) {
         const newAttemptCount = attemptCount + 1;
         setAttemptCount(newAttemptCount);
         const cooldownDuration = calculateCooldown(newAttemptCount);
-        setPassError(result.error);
+
+        // Determine which field has the error based on error message
+        // If error mentions "badge" or "not found", it's a badge error
+        // Otherwise, it's a password error
+        if (result.error?.toLowerCase().includes('badge') || 
+            result.error?.toLowerCase().includes('not found') ||
+            result.error?.toLowerCase().includes('no user')) {
+          setBadgeError(result.error);
+          setPassError("");
+        } else {
+          setPassError(result.error);
+          setBadgeError("");
+        }
 
         if (cooldownDuration > 0) {
           startCooldown(cooldownDuration);
         }
+        setIsLoading(false);
         return;
       }
 
@@ -72,6 +89,8 @@ export default function LoginScreen({ navigation }) {
       setAttemptCount(0);
       setIsOnCooldown(false);
       setCooldownRemaining(0);
+      setBadgeError("");
+      setPassError("");
       await clearPaired();
 
       navigation.reset({
@@ -83,10 +102,12 @@ export default function LoginScreen({ navigation }) {
       setAttemptCount(newAttemptCount);
       const cooldownDuration = calculateCooldown(newAttemptCount);
       setPassError("An error occurred. Please try again.");
+      setBadgeError("");
 
       if (cooldownDuration > 0) {
         startCooldown(cooldownDuration);
       }
+      setIsLoading(false);
     }
   };
 
@@ -163,6 +184,7 @@ export default function LoginScreen({ navigation }) {
                 autoCapitalize="none"
                 autoCorrect={false}
                 returnKeyType="next"
+                editable={!isLoading}
               />
             </View>
             {!!badgeError && <Text style={styles.errorText}>{badgeError}</Text>}
@@ -182,12 +204,14 @@ export default function LoginScreen({ navigation }) {
                 autoCapitalize="none"
                 autoCorrect={false}
                 returnKeyType="done"
+                editable={!isLoading}
               />
 
               <TouchableOpacity
                 onPress={() => setShowPassword((v) => !v)}
                 style={styles.eyeBtn}
                 activeOpacity={0.7}
+                disabled={isLoading}
               >
                 <Ionicons
                   name={showPassword ? "eye-off" : "eye"}
@@ -208,13 +232,20 @@ export default function LoginScreen({ navigation }) {
 
             <TouchableOpacity
               onPress={handleSignIn}
-              style={[styles.signInBtn, isOnCooldown && styles.signInBtnDisabled]}
-              activeOpacity={isOnCooldown ? 0.5 : 0.85}
-              disabled={isOnCooldown}
+              style={[styles.signInBtn, (isOnCooldown || isLoading) && styles.signInBtnDisabled]}
+              activeOpacity={(isOnCooldown || isLoading) ? 0.5 : 0.85}
+              disabled={isOnCooldown || isLoading}
             >
-              <Text style={styles.signInText}>
-                {isOnCooldown ? `Try again in ${cooldownRemaining}s` : "Sign In"}
-              </Text>
+              {isLoading ? (
+                <>
+                  <ActivityIndicator size="small" color="white" style={{ marginRight: 8 }} />
+                  <Text style={styles.signInText}>Logging in...</Text>
+                </>
+              ) : (
+                <Text style={styles.signInText}>
+                  {isOnCooldown ? `Try again in ${cooldownRemaining}s` : "Sign In"}
+                </Text>
+              )}
             </TouchableOpacity>
 
             {attemptCount > 0 && (

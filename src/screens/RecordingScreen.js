@@ -7,12 +7,16 @@ import {
   ScrollView,
   Modal,
   Pressable,
+  ActivityIndicator,
+  Alert,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useContext } from 'react';
 import { AuthContext } from '../context/AuthContext';
+import { useRecording } from '../context/RecordingContext';
+import { useNotification } from '../context/NotificationContext';
 import supabase from '../lib/supabase';
 
 export default function RecordingScreen({ navigation, route }) {
@@ -25,7 +29,15 @@ export default function RecordingScreen({ navigation, route }) {
   const [resolveConfirmOpen, setResolveConfirmOpen] = useState(false);
   const [alertModal, setAlertModal] = useState({ visible: false, title: "", message: "", type: "info" });
 
+  // Emergency backup modal state
+  const [emergencyBackupModalOpen, setEmergencyBackupModalOpen] = useState(false);
+  const [emergencyBackupData, setEmergencyBackupData] = useState(null);
+  const [acceptingEmergency, setAcceptingEmergency] = useState(false);
+
   const { profile, user } = useContext(AuthContext);
+  const { startRecording, stopRecording, isRecording } = useRecording();
+  const { pendingEmergency, clearEmergency } = useNotification();
+  
   const [backupData, setBackupData] = useState(null);
   const [emergencyTriggered, setEmergencyTriggered] = useState(false);
   const [currentRequestId, setCurrentRequestId] = useState(null);
@@ -34,6 +46,26 @@ export default function RecordingScreen({ navigation, route }) {
     const t = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, []);
+
+  // Set recording as active when screen mounts
+  useEffect(() => {
+    console.log('[RecordingScreen] Screen mounted, marking recording as active');
+    startRecording();
+    
+    return () => {
+      console.log('[RecordingScreen] Screen unmounted, marking recording as inactive');
+      stopRecording();
+    };
+  }, [startRecording, stopRecording]);
+
+  // Handle pending emergency from background notification
+  useEffect(() => {
+    if (pendingEmergency) {
+      console.log('[RecordingScreen] Pending emergency detected:', pendingEmergency.request_id);
+      setEmergencyBackupData(pendingEmergency);
+      setEmergencyBackupModalOpen(true);
+    }
+  }, [pendingEmergency]);
 
   
   const backupDataMemo = useMemo(() => {
@@ -238,6 +270,119 @@ export default function RecordingScreen({ navigation, route }) {
   
   const declineBackupRequest = () => {
     setBackupNotifyOpen(false);
+  };
+
+  const handleEmergencyBackupAcceptDuringRecording = async () => {
+    if (!emergencyBackupData?.request_id) {
+      Alert.alert('Error', 'Request ID is missing');
+      return;
+    }
+
+    try {
+      setAcceptingEmergency(true);
+      console.log('[RecordingScreen] Accepting emergency backup during recording:', emergencyBackupData.request_id);
+
+      // Step 1: Increment responders
+      const { data: current, error: fetchError } = await supabase
+        .from('emergency_backups')
+        .select('responders')
+        .eq('request_id', emergencyBackupData.request_id)
+        .single();
+
+      if (fetchError) throw new Error(`Failed to fetch responders: ${fetchError.message}`);
+      if (!current) throw new Error('Emergency backup record not found');
+
+      const newResponderCount = (current.responders || 0) + 1;
+      console.log('[RecordingScreen] Incrementing responders:', current.responders, '→', newResponderCount);
+
+      const { error: updateError } = await supabase
+        .from('emergency_backups')
+        .update({ responders: newResponderCount })
+        .eq('request_id', emergencyBackupData.request_id);
+
+      if (updateError) throw new Error(`Failed to update responders: ${updateError.message}`);
+
+      console.log('[RecordingScreen] ✅ Responder count updated');
+
+      // Step 2: Upload recording with URGENT status immediately (no confirmation)
+      console.log('[RecordingScreen] Uploading recording with URGENT status...');
+      
+      const incidentData = {
+        officer_id: user.id,
+        badge: profile?.badge || '',
+        status: "URGENT",
+        location: "Camarin Rd.",
+        duration: `${Math.floor(seconds / 60)}m ${seconds % 60}s`,
+        transcript: "Emergency backup incident during recording.",
+        tags: [],
+        alert: false,
+        driver_name: "Emergency Backup Responder",
+        plate_number: "N/A",
+        violations: ["Emergency Backup Response"],
+        notes: `Responded to emergency backup request: ${emergencyBackupData.request_id}`,
+        display_name: profile?.display_name || 'Unknown',
+        date_time: new Date().toISOString(),
+      };
+
+      // Refresh session
+      await supabase.auth.refreshSession();
+
+      const { data: uploadData, error: uploadError } = await supabase.functions.invoke('insert-incident', {
+        body: incidentData,
+      });
+
+      if (uploadError) {
+        console.error('[RecordingScreen] Upload error:', uploadError);
+        throw new Error('Failed to upload incident');
+      }
+
+      if (uploadData?.success) {
+        console.log('[RecordingScreen] ✅ Incident uploaded with URGENT status');
+      } else {
+        throw new Error('Upload was not successful');
+      }
+
+      // Step 3: Stop recording without confirmation
+      console.log('[RecordingScreen] Stopping recording automatically...');
+      stopRecording();
+
+      // Step 4: Close modal and clear emergency
+      setEmergencyBackupModalOpen(false);
+      setEmergencyBackupData(null);
+      clearEmergency();
+
+      // Step 5: Show success and navigate to EmergencyBackup screen
+      setAlertModal({
+        visible: true,
+        title: "Success",
+        message: "Emergency accepted. Recording uploaded and stopped.",
+        type: "success"
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Navigate to EmergencyBackup screen
+      navigation.navigate('EmergencyBackup', {
+        request_id: emergencyBackupData.request_id,
+      });
+    } catch (err) {
+      console.error('[RecordingScreen] Error accepting emergency during recording:', err);
+      setAlertModal({
+        visible: true,
+        title: "Error",
+        message: err.message || 'Failed to accept emergency backup',
+        type: "error"
+      });
+    } finally {
+      setAcceptingEmergency(false);
+    }
+  };
+
+  const handleEmergencyBackupDeclineDuringRecording = () => {
+    console.log('[RecordingScreen] Declining emergency backup during recording');
+    setEmergencyBackupModalOpen(false);
+    setEmergencyBackupData(null);
+    clearEmergency();
   };
 
   
@@ -568,6 +713,54 @@ export default function RecordingScreen({ navigation, route }) {
           </Modal>
         </ScrollView>
       </SafeAreaView>
+
+      <Modal visible={emergencyBackupModalOpen} transparent animationType="fade">
+        <View style={styles.emergencyBackupModalBackdrop}>
+          <View style={[styles.emergencyBackupModalCard, styles.emergencyBackupModalRedBorder]}>
+            <View style={styles.emergencyBackupModalHeaderRow}>
+              <View style={styles.emergencyBackupModalHeaderLeft}>
+                <Ionicons name="alert-circle" size={20} color="#FF5050" />
+                <Text style={styles.emergencyBackupModalTitle}>Emergency Backup Alert</Text>
+              </View>
+              <TouchableOpacity onPress={handleEmergencyBackupDeclineDuringRecording} activeOpacity={0.7}>
+                <Ionicons name="close" size={20} color="rgba(255,255,255,0.65)" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.emergencyBackupModalBodyText}>
+              Officer {emergencyBackupData?.enforcer} at {emergencyBackupData?.location} needs backup assistance.
+            </Text>
+
+            <View style={styles.emergencyBackupModalBtnRow}>
+              <TouchableOpacity
+                style={[styles.emergencyBackupModalBtn, styles.emergencyBackupModalBtnDecline]}
+                onPress={handleEmergencyBackupDeclineDuringRecording}
+                disabled={acceptingEmergency}
+                activeOpacity={0.9}
+              >
+                <Ionicons name="close" size={16} color="white" style={{ marginRight: 6 }} />
+                <Text style={styles.emergencyBackupModalBtnDeclineText}>DECLINE</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.emergencyBackupModalBtn, styles.emergencyBackupModalBtnAccept]}
+                onPress={handleEmergencyBackupAcceptDuringRecording}
+                disabled={acceptingEmergency}
+                activeOpacity={0.9}
+              >
+                {acceptingEmergency ? (
+                  <ActivityIndicator size="small" color="#0B1A33" style={{ marginRight: 6 }} />
+                ) : (
+                  <Ionicons name="checkmark" size={16} color="#0B1A33" style={{ marginRight: 6 }} />
+                )}
+                <Text style={styles.emergencyBackupModalBtnAcceptText}>
+                  {acceptingEmergency ? 'ACCEPTING...' : 'ACCEPT'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </LinearGradient>
   );
 }
@@ -925,4 +1118,79 @@ const styles = StyleSheet.create({
     fontWeight: "900",
   },
   popupDeclineText: { color: "white", fontSize: 12, fontWeight: "900" },
+
+  // Emergency Backup Modal Styles (during recording)
+  emergencyBackupModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 18,
+  },
+  emergencyBackupModalCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#0F192D',
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 30, 30, 0.6)',
+    padding: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  emergencyBackupModalRedBorder: { borderColor: 'rgba(255, 30, 30, 0.6)' },
+  emergencyBackupModalHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    marginBottom: 12,
+  },
+  emergencyBackupModalHeaderLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  emergencyBackupModalTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: 'rgba(255, 255, 255, 0.95)',
+    marginLeft: 10,
+  },
+  emergencyBackupModalBodyText: {
+    color: 'rgba(255, 255, 255, 0.65)',
+    fontSize: 12,
+    lineHeight: 16,
+    marginBottom: 16,
+  },
+  emergencyBackupModalBtnRow: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  emergencyBackupModalBtn: {
+    flex: 1,
+    height: 44,
+    borderRadius: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  emergencyBackupModalBtnDecline: {
+    backgroundColor: 'rgba(255, 30, 30, 0.15)',
+    borderColor: 'rgba(255, 30, 30, 0.4)',
+  },
+  emergencyBackupModalBtnDeclineText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: 'rgba(255, 255, 255, 0.85)',
+    letterSpacing: 0.3,
+  },
+  emergencyBackupModalBtnAccept: {
+    backgroundColor: '#3DDC84',
+    borderColor: 'rgba(61, 220, 132, 0.5)',
+  },
+  emergencyBackupModalBtnAcceptText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#0B1A33',
+    letterSpacing: 0.4,
+  },
 });

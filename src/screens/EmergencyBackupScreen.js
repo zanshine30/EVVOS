@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useEffect } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Modal } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import MapView, { Marker } from "react-native-maps";
@@ -12,6 +12,9 @@ export default function EmergencyBackupScreen({ navigation, route }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [mounted, setMounted] = useState(true);
+  const [resolveBlockedModalOpen, setResolveBlockedModalOpen] = useState(false);
+  const [cancelConfirmModalOpen, setCancelConfirmModalOpen] = useState(false);
+  const [cancelLoading, setCancelLoading] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -97,6 +100,90 @@ export default function EmergencyBackupScreen({ navigation, route }) {
     }
   }, [route?.params?.request_id, mounted]);
 
+  // Poll for status updates every second
+  useEffect(() => {
+    if (!requestId || !mounted) return;
+
+    console.log('[EmergencyBackupScreen] Starting status polling for request_id:', requestId);
+    
+    const pollInterval = setInterval(async () => {
+      try {
+        const { data, error } = await supabase
+          .from('emergency_backups')
+          .select('status')
+          .eq('request_id', requestId)
+          .single();
+
+        if (!mounted) {
+          console.log('[EmergencyBackupScreen] Component unmounted, stopping poll');
+          return;
+        }
+
+        if (error) {
+          console.warn('[EmergencyBackupScreen] Poll error:', error);
+          return;
+        }
+
+        if (data && data.status !== backupData?.status) {
+          console.log('[EmergencyBackupScreen] ✅ Status updated:', backupData?.status, '→', data.status);
+          setBackupData(prev => ({
+            ...prev,
+            status: data.status,
+          }));
+        }
+      } catch (err) {
+        console.warn('[EmergencyBackupScreen] Poll exception:', err);
+      }
+    }, 1000); // Poll every 1 second
+
+    return () => {
+      console.log('[EmergencyBackupScreen] Stopping status polling');
+      clearInterval(pollInterval);
+    };
+  }, [requestId, mounted, backupData?.status]);
+
+  // Poll for responder count updates every second when cancel modal is open
+  useEffect(() => {
+    if (!requestId || !mounted || !cancelConfirmModalOpen) return;
+
+    console.log('[EmergencyBackupScreen] Starting responder count polling for request_id:', requestId);
+    
+    const pollInterval = setInterval(async () => {
+      try {
+        const { data, error } = await supabase
+          .from('emergency_backups')
+          .select('responders')
+          .eq('request_id', requestId)
+          .single();
+
+        if (!mounted) {
+          console.log('[EmergencyBackupScreen] Component unmounted, stopping responder poll');
+          return;
+        }
+
+        if (error) {
+          console.warn('[EmergencyBackupScreen] Responder poll error:', error);
+          return;
+        }
+
+        if (data && data.responders !== backupData?.responders) {
+          console.log('[EmergencyBackupScreen] ✅ Responder count updated:', backupData?.responders, '→', data.responders);
+          setBackupData(prev => ({
+            ...prev,
+            responders: data.responders,
+          }));
+        }
+      } catch (err) {
+        console.warn('[EmergencyBackupScreen] Responder poll exception:', err);
+      }
+    }, 1000); // Poll every 1 second
+
+    return () => {
+      console.log('[EmergencyBackupScreen] Stopping responder count polling');
+      clearInterval(pollInterval);
+    };
+  }, [requestId, mounted, cancelConfirmModalOpen, backupData?.responders]);
+
   const coords = backupData?.coords || { latitude: 14.7566, longitude: 121.0447 };
   const name = backupData?.enforcer ?? "Juan Bartolome";
   const location = backupData?.location ?? "Llano Rd., Caloocan City";
@@ -138,6 +225,71 @@ export default function EmergencyBackupScreen({ navigation, route }) {
       } finally {
         setLoading(false);
       }
+    }
+  };
+
+  // Handle cancel button - shows confirmation modal
+  const handleCancelPress = () => {
+    console.log('[EmergencyBackupScreen] Cancel button pressed, opening confirmation modal');
+    setCancelConfirmModalOpen(true);
+  };
+
+  // Confirm cancel and decrement responders
+  const handleCancelConfirm = async () => {
+    if (!requestId) {
+      Alert.alert('Error', 'Request ID is missing');
+      return;
+    }
+
+    try {
+      setCancelLoading(true);
+      console.log('[EmergencyBackupScreen] Decrementing responders for request_id:', requestId);
+
+      // Fetch current responder count
+      const { data: current, error: fetchError } = await supabase
+        .from('emergency_backups')
+        .select('responders')
+        .eq('request_id', requestId)
+        .single();
+
+      if (fetchError) {
+        console.error('[EmergencyBackupScreen] Fetch error:', fetchError);
+        Alert.alert('Error', 'Failed to update responder count');
+        setCancelLoading(false);
+        return;
+      }
+
+      // Decrement responder count (but not below 0)
+      const currentCount = current?.responders || 0;
+      const newResponderCount = Math.max(0, currentCount - 1);
+      console.log('[EmergencyBackupScreen] Responders:', currentCount, '→', newResponderCount);
+
+      // Update in database
+      const { error: updateError } = await supabase
+        .from('emergency_backups')
+        .update({ responders: newResponderCount })
+        .eq('request_id', requestId);
+
+      if (updateError) {
+        console.error('[EmergencyBackupScreen] Update error:', updateError);
+        Alert.alert('Error', 'Failed to update responder count');
+        setCancelLoading(false);
+        return;
+      }
+
+      console.log('[EmergencyBackupScreen] ✅ Responders updated successfully');
+      setCancelConfirmModalOpen(false);
+      setCancelLoading(false);
+
+      // Navigate back to Home
+      navigation.reset({
+        index: 0,
+        routes: [{ name: "Home" }],
+      });
+    } catch (err) {
+      console.error('[EmergencyBackupScreen] Cancel confirm error:', err);
+      Alert.alert('Error', 'Failed to process cancellation');
+      setCancelLoading(false);
     }
   };
 
@@ -260,9 +412,17 @@ export default function EmergencyBackupScreen({ navigation, route }) {
           
           <View style={styles.bottomRow}>
             <TouchableOpacity
-              style={[styles.bottomBtn, styles.resolved]}
-              activeOpacity={0.9}
+              style={[
+                styles.bottomBtn,
+                styles.resolved,
+                backupData?.status !== 'RESOLVED' && styles.resolvedDisabled
+              ]}
+              activeOpacity={backupData?.status === 'RESOLVED' ? 0.9 : 1}
               onPress={async () => {
+                if (backupData?.status !== 'RESOLVED') {
+                  setResolveBlockedModalOpen(true);
+                  return;
+                }
                 if (requestId) {
                   try {
                     await supabase.from('emergency_backups').update({ status: 'RESOLVED' }).eq('request_id', requestId);
@@ -276,13 +436,15 @@ export default function EmergencyBackupScreen({ navigation, route }) {
                 });
               }}
             >
-              <Text style={styles.bottomTextDark}>RESOLVED</Text>
+              <Text style={[styles.bottomTextDark, backupData?.status !== 'RESOLVED' && styles.resolvedDisabledText]}>
+                {backupData?.status === 'RESOLVED' ? 'RESOLVED' : 'AWAITING REQUESTER'}
+              </Text>
             </TouchableOpacity>
 
             <TouchableOpacity
               style={[styles.bottomBtn, styles.cancel]}
               activeOpacity={0.9}
-              onPress={() => navigation.goBack()}
+              onPress={handleCancelPress}
             >
               <Text style={styles.bottomText}>CANCEL</Text>
             </TouchableOpacity>
@@ -290,6 +452,79 @@ export default function EmergencyBackupScreen({ navigation, route }) {
         </View>
         )}
       </SafeAreaView>
+
+      <Modal visible={resolveBlockedModalOpen} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, styles.modalRedBorder]}>
+            <View style={styles.modalHeaderRow}>
+              <View style={styles.modalHeaderLeft}>
+                <Ionicons name="alert-circle" size={20} color="#FF5050" />
+                <Text style={styles.modalTitle}>Cannot Resolve</Text>
+              </View>
+              <TouchableOpacity onPress={() => setResolveBlockedModalOpen(false)} activeOpacity={0.7}>
+                <Ionicons name="close" size={20} color="rgba(255,255,255,0.65)" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalBodyText}>
+              The requester must mark this emergency as resolved first before you can declare it resolved.
+            </Text>
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnCancel]}
+                onPress={() => setResolveBlockedModalOpen(false)}
+                activeOpacity={0.9}
+              >
+                <Text style={styles.modalBtnCancelText}>OK</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal visible={cancelConfirmModalOpen} transparent animationType="fade">
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, styles.modalRedBorder]}>
+            <View style={styles.modalHeaderRow}>
+              <View style={styles.modalHeaderLeft}>
+                <Ionicons name="help-circle" size={20} color="#FF5050" />
+                <Text style={styles.modalTitle}>Cancel Response?</Text>
+              </View>
+              <TouchableOpacity onPress={() => !cancelLoading && setCancelConfirmModalOpen(false)} activeOpacity={0.7} disabled={cancelLoading}>
+                <Ionicons name="close" size={20} color="rgba(255,255,255,0.65)" />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.modalBodyText}>
+              Are you sure you want to cancel your response? This will remove you from the responder list.
+            </Text>
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnCancel]}
+                onPress={() => setCancelConfirmModalOpen(false)}
+                activeOpacity={0.9}
+                disabled={cancelLoading}
+              >
+                <Text style={styles.modalBtnCancelText}>KEEP RESPONDING</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalBtn, styles.modalBtnConfirm, cancelLoading && styles.modalBtnConfirmLoading]}
+                onPress={handleCancelConfirm}
+                activeOpacity={0.9}
+                disabled={cancelLoading}
+              >
+                {cancelLoading ? (
+                  <ActivityIndicator size="small" color="#FF5050" />
+                ) : (
+                  <Text style={styles.modalBtnConfirmText}>CANCEL RESPONSE</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </LinearGradient>
   );
 }
@@ -375,7 +610,78 @@ const styles = StyleSheet.create({
   bottomRow: { marginTop: "auto", flexDirection: "row", gap: 10 },
   bottomBtn: { flex: 1, borderRadius: 12, paddingVertical: 14, alignItems: "center" },
   resolved: { backgroundColor: "#3DDC84" },
+  resolvedDisabled: { backgroundColor: "rgba(100, 100, 100, 0.6)" },
+  resolvedDisabledText: { color: "rgba(15,25,45,0.5)" },
   cancel: { backgroundColor: "#FF1E1E" },
   bottomText: { color: "white", fontSize: 12, fontWeight: "900", letterSpacing: 0.5 },
   bottomTextDark: { color: "rgba(15,25,45,0.95)", fontSize: 12, fontWeight: "900", letterSpacing: 0.5 },
+
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.55)",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 18,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 360,
+    backgroundColor: "rgba(15,25,45,0.96)",
+    borderRadius: 14,
+    padding: 14,
+    borderWidth: 1,
+  },
+  modalRedBorder: { borderColor: "rgba(255,80,80,0.45)" },
+
+  modalHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  modalHeaderLeft: { flexDirection: "row", alignItems: "center" },
+  modalTitle: {
+    marginLeft: 8,
+    color: "rgba(255,255,255,0.90)",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+
+  modalBodyText: {
+    color: "rgba(255,255,255,0.55)",
+    fontSize: 11,
+    lineHeight: 16,
+    marginBottom: 12,
+  },
+
+  modalBtnRow: { flexDirection: "row", gap: 12 },
+  modalBtn: {
+    flex: 1,
+    height: 40,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+  },
+  modalBtnCancel: {
+    backgroundColor: "rgba(255,255,255,0.06)",
+    borderColor: "rgba(255,255,255,0.16)",
+  },
+  modalBtnCancelText: {
+    color: "rgba(255,255,255,0.75)",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  modalBtnConfirm: {
+    backgroundColor: "rgba(255, 80, 80, 0.15)",
+    borderColor: "rgba(255, 80, 80, 0.4)",
+  },
+  modalBtnConfirmLoading: {
+    backgroundColor: "rgba(255, 80, 80, 0.1)",
+  },
+  modalBtnConfirmText: {
+    color: "rgba(255, 80, 80, 0.95)",
+    fontSize: 12,
+    fontWeight: "700",
+  },
 });
