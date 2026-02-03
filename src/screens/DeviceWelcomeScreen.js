@@ -1,34 +1,75 @@
-import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
+import React, { useEffect, useState, useMemo } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { clearPaired, getPaired } from "../utils/deviceStore";
+import { clearPaired, getPaired, setPaired } from "../utils/deviceStore";
 import { useAuth } from "../context/AuthContext";
+import { supabaseUrl, supabaseAnonKey } from "../lib/supabase";
+import { createClient } from "@supabase/supabase-js";
 
 export default function DeviceWelcomeScreen({ navigation }) {
-  const { displayName, badge } = useAuth();
+  const { displayName, badge, user } = useAuth(); // Added 'user' to access user_id
   const [paired, setPairedState] = useState(false);
   const [loading, setLoading] = useState(true);
 
+  // Initialize Supabase Client
+  const supabase = useMemo(() => createClient(supabaseUrl, supabaseAnonKey), []);
+
   const load = async () => {
     setLoading(true);
-    const p = await getPaired();
-    setPairedState(!!p);
+
+    // 1. Check Local Storage first (Fastest)
+    const localPaired = await getPaired();
+    if (localPaired) {
+      setPairedState(true);
+      setLoading(false);
+      // Already paired locally, go directly to Home
+      navigation.reset({ index: 0, routes: [{ name: "Home" }] });
+      return;
+    }
+
+    // 2. Check Supabase Cloud Database (If not paired locally)
+    if (user?.id) {
+      try {
+        console.log("[DeviceWelcome] Checking cloud for existing device...");
+        const { data, error } = await supabase
+          .from("device_credentials")
+          .select("id")
+          .eq("user_id", user.id)
+          .limit(1);
+
+        if (!error && data && data.length > 0) {
+          console.log("[DeviceWelcome] Found existing device in cloud. Syncing...");
+
+          // Sync local storage to match cloud status
+          await setPaired(true);
+          setPairedState(true);
+
+          // Redirect to Home
+          navigation.reset({ index: 0, routes: [{ name: "Home" }] });
+          return;
+        }
+      } catch (err) {
+        console.warn("[DeviceWelcome] Error checking device status:", err);
+      }
+    }
+
+    // 3. No device found locally or in cloud
+    setPairedState(false);
     setLoading(false);
   };
 
   useEffect(() => {
     const unsub = navigation.addListener("focus", load);
     return unsub;
-  }, [navigation]);
+  }, [navigation, user]); // Added user dependency
 
   const handleLogout = async () => {
     await clearPaired();
     navigation.reset({ index: 0, routes: [{ name: "Login" }] });
   };
 
- 
   const handleAddDevice = () => {
     navigation.navigate("DevicePairingFlow");
   };
@@ -45,17 +86,15 @@ export default function DeviceWelcomeScreen({ navigation }) {
       style={{ flex: 1 }}
     >
       <SafeAreaView style={{ flex: 1 }}>
-        
         <View style={styles.topBar}>
           <View style={{ flexDirection: "row", alignItems: "center" }}>
             <Ionicons name="person-circle" size={26} color="#4DB5FF" />
             <View style={{ marginLeft: 8 }}>
               <Text style={styles.officerName}>Officer {displayName}</Text>
-              <Text style={styles.badge}>{badge ? `Badge #${badge}` : ''}</Text>
+              <Text style={styles.badge}>{badge ? `Badge #${badge}` : ""}</Text>
             </View>
           </View>
 
-     
           <TouchableOpacity onPress={handleLogout} activeOpacity={0.8}>
             <Ionicons name="log-out-outline" size={18} color="#FF4A4A" />
           </TouchableOpacity>
@@ -65,21 +104,24 @@ export default function DeviceWelcomeScreen({ navigation }) {
           <Text style={styles.welcome}>Welcome to E.V.V.O.S</Text>
 
           <View style={styles.card}>
-            <Ionicons
-              name={paired ? "link-outline" : "unlink-outline"}
-              size={48}
-              color="rgba(0,0,0,0.85)"
-            />
+            {loading ? (
+              <ActivityIndicator size="large" color="#4DB5FF" />
+            ) : (
+              <Ionicons
+                name={paired ? "link-outline" : "unlink-outline"}
+                size={48}
+                color="rgba(0,0,0,0.85)"
+              />
+            )}
             <Text style={styles.cardText}>
               {loading
-                ? "Checking device status..."
+                ? "Checking for existing devices..."
                 : paired
-                ? "Device is paired."
-                : "Looks like you are not connected to a device."}
+                  ? "Device is paired."
+                  : "Looks like you are not connected to a device."}
             </Text>
           </View>
 
-        
           {!paired && !loading ? (
             <TouchableOpacity
               style={styles.addBtn}
@@ -93,7 +135,6 @@ export default function DeviceWelcomeScreen({ navigation }) {
             </TouchableOpacity>
           ) : null}
 
-        
           {paired && !loading ? (
             <TouchableOpacity
               style={styles.dashboardBtn}
@@ -155,7 +196,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
   },
 
- 
   addBtn: {
     height: 52,
     borderRadius: 12,
@@ -175,7 +215,6 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
 
- 
   dashboardBtn: {
     height: 52,
     borderRadius: 12,

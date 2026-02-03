@@ -17,6 +17,7 @@ export function AuthProvider({ children }) {
     const [rememberMe, setRememberMe] = useState(false);
     const [recoveryMode, setRecoveryMode] = useState(false);
     const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [devicePaired, setDevicePaired] = useState(false);
     
     // Flag to skip AsyncStorage removal during initial app load
     const [initComplete, setInitComplete] = useState(false);
@@ -28,14 +29,19 @@ export function AuthProvider({ children }) {
 
         const init = async () => {
             try {
-                // 1) Try getting the current session from supabase client
+                // 1) Try getting the current session from supabase client (with timeout for offline mode)
                 let sessionObj = null;
                 try {
-                    const { data } = await supabase.auth.getSession();
+                    // Add a 5-second timeout for the session check
+                    const sessionPromise = supabase.auth.getSession();
+                    const timeoutPromise = new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('Session check timeout')), 5000)
+                    );
+                    const { data } = await Promise.race([sessionPromise, timeoutPromise]);
                     sessionObj = data?.session ?? null;
                     console.log('[Init] supabase.auth.getSession returned:', !!sessionObj);
                 } catch (err) {
-                    console.warn('[Init] supabase.auth.getSession failed:', err);
+                    console.warn('[Init] supabase.auth.getSession failed (likely offline):', err.message);
                     sessionObj = null;
                 }
 
@@ -100,7 +106,13 @@ export function AuthProvider({ children }) {
                     // read profile (prefer RPC 'get_my_profile')
                     try {
                         console.log('[Init] Fetching profile for user:', sessionObj.user.id);
-                        const { data: rpcData, error: rpcErr } = await supabase.rpc("get_my_profile");
+                        // Add timeout for profile fetch (offline mode)
+                        const profilePromise = supabase.rpc("get_my_profile");
+                        const timeoutPromise = new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('Profile fetch timeout')), 5000)
+                        );
+                        const { data: rpcData, error: rpcErr } = await Promise.race([profilePromise, timeoutPromise]);
+                        
                         if (!rpcErr && Array.isArray(rpcData) && rpcData.length > 0) {
                             if (mounted) {
                                 setProfile(rpcData[0]);
@@ -109,26 +121,59 @@ export function AuthProvider({ children }) {
                             }
                         } else {
                             // fallback: select from users table
-                            const { data: p, error: pErr } = await supabase
+                            const fallbackPromise = supabase
                                 .from("users")
                                 .select("display_name, role, first_name, last_name, badge")
                                 .eq("auth_user_id", sessionObj.user.id)
                                 .maybeSingle();
+                            const fallbackTimeoutPromise = new Promise((_, reject) =>
+                                setTimeout(() => reject(new Error('Fallback profile fetch timeout')), 5000)
+                            );
+                            const { data: p, error: pErr } = await Promise.race([fallbackPromise, fallbackTimeoutPromise]);
+                            
                             if (!pErr && p && mounted) {
                                 setProfile(p);
                                 setBadge(p.badge);
                                 console.log('[Init] ✅ Profile loaded from users table');
                             } else if (mounted) {
-                                console.warn('[Init] No profile found for user');
+                                console.warn('[Init] No profile found for user (may be offline)');
                                 setProfile(null);
                                 setBadge(null);
                             }
                         }
                     } catch (err) {
-                        console.warn("Profile load failed:", err);
+                        console.warn("Profile load failed (likely offline):", err.message);
                         if (mounted) {
                             setProfile(null);
                             setBadge(null);
+                        }
+                    }
+
+                    // Check if device is already paired
+                    try {
+                        console.log('[Init] Checking for paired device...');
+                        // Add timeout for device check (offline mode)
+                        const devicePromise = supabase
+                            .from("device_credentials")
+                            .select("id, device_name")
+                            .eq("user_id", sessionObj.user.id)
+                            .maybeSingle();
+                        const deviceTimeoutPromise = new Promise((_, reject) =>
+                            setTimeout(() => reject(new Error('Device check timeout')), 5000)
+                        );
+                        const { data: deviceCreds, error: deviceErr } = await Promise.race([devicePromise, deviceTimeoutPromise]);
+                        
+                        if (!deviceErr && deviceCreds && mounted) {
+                            console.log('[Init] ✅ Device already paired:', deviceCreds.device_name);
+                            setDevicePaired(true);
+                        } else if (mounted) {
+                            console.log('[Init] No paired device found (may be offline)');
+                            setDevicePaired(false);
+                        }
+                    } catch (err) {
+                        console.warn('[Init] Device check failed:', err);
+                        if (mounted) {
+                            setDevicePaired(false);
                         }
                     }
 
@@ -147,6 +192,11 @@ export function AuthProvider({ children }) {
                 }
             } catch (err) {
                 console.error("Failed to initialize auth:", err);
+                // If offline, still allow user to proceed with cached session if available
+                if (mounted) {
+                    setIsAuthenticated(false);
+                    console.log('[Init] ❌ Init error (possibly offline) - allowing offline mode');
+                }
             } finally {
                 // Mark init as complete so onAuthStateChange knows to remove stored sessions on logout
                 if (mounted) {
@@ -230,15 +280,32 @@ export function AuthProvider({ children }) {
                                     if (p) registerForPushNotificationsAsync(sess.user.id);
                                 }
                             }
+                            
+                            // Check for paired device
+                            const { data: deviceCreds } = await supabase
+                                .from("device_credentials")
+                                .select("id, device_name")
+                                .eq("user_id", sess.user.id)
+                                .maybeSingle();
+                            
+                            if (deviceCreds) {
+                                console.log('[Auth Change] Device already paired:', deviceCreds.device_name);
+                                setDevicePaired(true);
+                            } else {
+                                console.log('[Auth Change] No paired device found');
+                                setDevicePaired(false);
+                            }
                         } catch (e) {
-                            console.warn("Profile refresh failed:", e);
+                            console.warn("Profile/device refresh failed:", e);
                             setProfile(null);
                             setBadge(null);
+                            setDevicePaired(false);
                         }
                     })();
                 } else {
                     setProfile(null);
                     setBadge(null);
+                    setDevicePaired(false);
                     // Not signed in: check storage for remember me
                     (async () => {
                         const savedEmail = await AsyncStorage.getItem("evvos_remember_email");
@@ -412,6 +479,7 @@ export function AuthProvider({ children }) {
             setUser(null);
             setProfile(null);
             setBadge(null);
+            setDevicePaired(false);
             await AsyncStorage.removeItem(SESSION_KEY);
             await AsyncStorage.removeItem("evvos_remember_email");
             setRememberMe(false);
@@ -484,6 +552,7 @@ export function AuthProvider({ children }) {
         rememberMe,
         recoveryMode,
         isAuthenticated,
+        devicePaired,
         login,
         loginByBadge,
         logout,
