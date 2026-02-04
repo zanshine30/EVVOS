@@ -344,22 +344,60 @@ network={{
             logger.warning("Internet check failed")
             return False
 
+    async def _delete_old_credentials(self, user_id: str) -> bool:
+        """
+        Deletes existing credentials for this user/device ID combination 
+        to ensure no duplicates exist in Supabase.
+        """
+        try:
+            logger.info(f"Cleaning up old credentials for User: {user_id}, Device: {self.device_id}")
+            # We assume the table is named 'device_credentials' based on standard Supabase patterns
+            # and the Edge Function name provided in context.
+            url = f"{SUPABASE_URL}/rest/v1/device_credentials"
+            
+            # Delete logic: Remove rows where user_id matches AND device_id matches
+            # This ensures we don't accidentally delete other devices belonging to the same user
+            params = {
+                "user_id": f"eq.{user_id}",
+                "device_id": f"eq.{self.device_id}"
+            }
+            
+            headers = {
+                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+                "apikey": SUPABASE_ANON_KEY
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.delete(url, params=params, headers=headers) as resp:
+                    if resp.status in [200, 204]:
+                        logger.info("✓ Old device credentials removed successfully")
+                        return True
+                    else:
+                        error_text = await resp.text()
+                        logger.warning(f"Failed to remove old credentials (Status {resp.status}): {error_text}")
+                        # We return True anyway because if the row didn't exist, it might fail or return 204
+                        # and we want the new insertion to proceed.
+                        return True
+        except Exception as e:
+            logger.error(f"Error during credential cleanup: {e}")
+            return False # Proceed with caution
+
     async def _report_to_supabase(
         self, ssid: str, password: str, status: str = "success", user_id: str = None
     ) -> bool:
-        """Report provisioning success to Supabase via Edge Function"""
+        """Report provisioning success to Supabase via Edge Function, ensuring no duplicates"""
         try:
-            logger.info(f"Registering device credentials to Supabase via Edge Function")
+            logger.info(f"Registering device credentials to Supabase")
             
             # Get user_id from auth context if available
             if not user_id:
                 logger.warning("No user_id provided for Supabase registration")
                 return False
             
-            # Note: We used to clean up old credentials here, but it caused hangs.
-            # Cleanup is now handled by the server-side Edge Function before insertion.
+            # 1. Clean up previous credentials for this device/user
+            await self._delete_old_credentials(user_id)
 
-            # Encrypt the password
+            # 2. Encrypt the password
             encrypted_password = self._encrypt_password(password)
             
             payload = {
@@ -385,7 +423,7 @@ network={{
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if resp.status == 200:
-                        logger.info("✓ Device credentials stored successfully")
+                        logger.info("✓ New device credentials stored successfully via Edge Function")
                         return True
                     else:
                         error_text = await resp.text()
@@ -579,10 +617,48 @@ cache-size=1000
         })
 
     async def _handle_provisioning_form(self, request: web.Request) -> web.Response:
-        """Serve the simplified provisioning form HTML (no token needed)"""
-        # Extract user_id from query params
-        user_id = request.query.get('user_id', '')
+        """
+        Serve the simplified provisioning form HTML.
+        MODIFIED: Checks for user_id and blocks access if missing.
+        MODIFIED: Updates text to guide user back to app upon success and attempts auto-close.
+        """
+        user_id = request.query.get('user_id', '').strip()
         
+        # ----------------------------------------------------------------
+        # 1. SECURITY CHECK: BLOCK ACCESS IF NO USER_ID
+        # ----------------------------------------------------------------
+        if not user_id:
+            logger.warning("Access denied: Provisioning page accessed without user_id")
+            error_html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Access Denied - E.V.V.O.S</title>
+    <style>
+        body { font-family: -apple-system, system-ui, sans-serif; background: #f8d7da; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; padding: 20px; text-align: center; color: #721c24; }
+        .box { background: white; padding: 40px; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); max-width: 400px; border: 1px solid #f5c6cb; }
+        h1 { margin-top: 0; font-size: 24px; }
+        p { line-height: 1.6; color: #555; }
+        .icon { font-size: 48px; margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="box">
+        <div class="icon">🚫</div>
+        <h1>Action Required</h1>
+        <p>You have scanned this code using your standard Camera app.</p>
+        <p style="font-weight: bold; color: #333;">Please open the E.V.V.O.S Mobile App and use the built-in scanner to provision this device.</p>
+    </div>
+</body>
+</html>
+"""
+            return web.Response(text=error_html, content_type='text/html', status=403)
+
+        # ----------------------------------------------------------------
+        # 2. SERVE PROVISIONING FORM (With Return to App Instructions)
+        # ----------------------------------------------------------------
         html_content = f"""
 <!DOCTYPE html>
 <html lang="en">
@@ -591,78 +667,123 @@ cache-size=1000
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>E.V.V.O.S Device Provisioning</title>
     <style>
-        /* ... styles omitted for brevity, same as original ... */
         * {{ margin: 0; padding: 0; box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 16px; }}
-        .container {{ background: white; border-radius: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3); width: 100%; max-width: 420px; padding: 24px; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif; background: linear-gradient(135deg, #0B1A33 0%, #3D5F91 100%); min-height: 100vh; display: flex; justify-content: center; align-items: center; padding: 16px; }}
+        .container {{ background: white; border-radius: 16px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4); width: 100%; max-width: 420px; padding: 24px; }}
         @media (min-width: 600px) {{ .container {{ padding: 40px; }} }}
         .header {{ text-align: center; margin-bottom: 28px; }}
-        .header h1 {{ font-size: 28px; color: #333; margin-bottom: 8px; font-weight: 700; }}
+        .header h1 {{ font-size: 26px; color: #1a1a1a; margin-bottom: 8px; font-weight: 800; }}
         .header p {{ font-size: 14px; color: #666; line-height: 1.5; }}
-        .form-group {{ margin-bottom: 18px; }}
-        .form-group label {{ display: block; font-size: 13px; font-weight: 600; color: #333; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }}
-        .form-group input {{ width: 100%; padding: 13px 14px; border: 2px solid #e0e0e0; border-radius: 10px; font-size: 16px; transition: border-color 0.3s, box-shadow 0.3s; font-family: inherit; -webkit-appearance: none; appearance: none; }}
-        .form-group input:focus {{ outline: none; border-color: #667eea; box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1); }}
-        .password-toggle {{ display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: 13px; color: #666; cursor: pointer; user-select: none; }}
-        .submit-btn {{ width: 100%; padding: 14px 16px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 10px; font-size: 16px; font-weight: 600; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; margin-top: 24px; }}
-        .status-message {{ margin-top: 20px; padding: 14px 16px; border-radius: 10px; text-align: center; font-size: 13px; display: none; }}
+        .form-group {{ margin-bottom: 20px; position: relative; }}
+        .form-group label {{ display: block; font-size: 12px; font-weight: 700; color: #444; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }}
+        
+        .input-wrapper {{ position: relative; display: flex; align-items: center; }}
+        .form-group input {{ width: 100%; padding: 14px 14px; padding-right: 45px; border: 2px solid #e0e0e0; border-radius: 12px; font-size: 16px; transition: all 0.2s ease; outline: none; }}
+        .form-group input:focus {{ border-color: #3D5F91; box-shadow: 0 0 0 4px rgba(61, 95, 145, 0.15); }}
+        
+        /* Eye Icon Style */
+        .toggle-password {{ position: absolute; right: 14px; cursor: pointer; color: #888; display: flex; align-items: center; justify-content: center; height: 100%; }}
+        .toggle-password svg {{ width: 22px; height: 22px; transition: color 0.2s; }}
+        .toggle-password:hover {{ color: #3D5F91; }}
+
+        .submit-btn {{ width: 100%; padding: 16px; background: #15C85A; color: white; border: none; border-radius: 12px; font-size: 16px; font-weight: 700; cursor: pointer; transition: transform 0.1s, background 0.2s; margin-top: 10px; }}
+        .submit-btn:active {{ transform: scale(0.98); background: #12b04f; }}
+        .submit-btn:disabled {{ opacity: 0.7; cursor: not-allowed; }}
+        
+        .status-message {{ margin-top: 20px; padding: 14px; border-radius: 12px; text-align: center; font-size: 13px; font-weight: 500; display: none; }}
         .status-message.success {{ background: #d4edda; color: #155724; border: 1px solid #c3e6cb; display: block; }}
         .status-message.error {{ background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; display: block; }}
+        
         .loading {{ display: none; text-align: center; margin-top: 24px; }}
-        .spinner {{ border: 4px solid #f3f3f3; border-top: 4px solid #667eea; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto 12px; }}
+        .spinner {{ border: 3px solid rgba(0,0,0,0.1); border-top: 3px solid #15C85A; border-radius: 50%; width: 30px; height: 30px; animation: spin 0.8s linear infinite; margin: 0 auto 12px; }}
         @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+
+        .app-link {{ display: none; margin-top: 15px; text-align: center; }}
+        .app-link a {{ color: #3D5F91; text-decoration: none; font-weight: bold; border: 2px solid #3D5F91; padding: 10px 20px; border-radius: 8px; display: inline-block; }}
+        .app-link p {{ margin-bottom: 8px; font-size: 14px; color: #444; }}
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>E.V.V.O.S Provisioning</h1>
-            <p>Connect your device by entering your mobile hotspot details</p>
+            <h1>Connect Device</h1>
+            <p>Enter your Mobile Hotspot credentials.</p>
         </div>
         
         <form id="provisioningForm">
             <input type="hidden" id="user_id" name="user_id" value="{user_id}">
+            
             <div class="form-group">
-                <label for="ssid">Hotspot SSID</label>
-                <input type="text" id="ssid" name="ssid" placeholder="e.g., John's iPhone" required>
+                <label for="ssid">Hotspot Name (SSID)</label>
+                <div class="input-wrapper">
+                    <input type="text" id="ssid" name="ssid" placeholder="e.g. iPhone Hotspot" required autocorrect="off" autocapitalize="none">
+                </div>
             </div>
             
             <div class="form-group">
                 <label for="password">Hotspot Password</label>
-                <input type="password" id="password" name="password" placeholder="Enter your password" required>
-                <label class="password-toggle">
-                    <input type="checkbox" id="showPassword">
-                    <span>Show password</span>
-                </label>
+                <div class="input-wrapper">
+                    <input type="password" id="password" name="password" placeholder="Required" required>
+                    <div class="toggle-password" id="toggleBtn">
+                        <svg id="eyeOpen" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                        </svg>
+                        <svg id="eyeClosed" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" style="display:none;">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21" />
+                        </svg>
+                    </div>
+                </div>
             </div>
             
-            <button type="submit" class="submit-btn" id="submitBtn">Send Credentials</button>
+            <button type="submit" class="submit-btn" id="submitBtn">Connect Device</button>
         </form>
         
         <div class="loading" id="loading">
             <div class="spinner"></div>
-            <p>Sending credentials to device...</p>
+            <p>Transmitting credentials...</p>
         </div>
         
         <div class="status-message" id="statusMessage"></div>
+
+        <div class="app-link" id="appLink">
+            <p><strong>Credentials Sent Successfully!</strong></p>
+            <p>Please return to the E.V.V.O.S Mobile App to finish setup.</p>
+            <br>
+            <a href="#" onclick="window.close(); return false;">Close Window & Return</a>
+        </div>
     </div>
 
     <script>
         const form = document.getElementById('provisioningForm');
         const submitBtn = document.getElementById('submitBtn');
         const passwordInput = document.getElementById('password');
-        const showPasswordCheckbox = document.getElementById('showPassword');
+        const toggleBtn = document.getElementById('toggleBtn');
+        const eyeOpen = document.getElementById('eyeOpen');
+        const eyeClosed = document.getElementById('eyeClosed');
         const loading = document.getElementById('loading');
         const statusMessage = document.getElementById('statusMessage');
+        const appLink = document.getElementById('appLink');
 
-        showPasswordCheckbox.addEventListener('change', (e) => {{
-            passwordInput.type = e.target.checked ? 'text' : 'password';
+        // Toggle Password Logic
+        toggleBtn.addEventListener('click', () => {{
+            const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+            passwordInput.setAttribute('type', type);
+            
+            if (type === 'text') {{
+                eyeOpen.style.display = 'none';
+                eyeClosed.style.display = 'block';
+            }} else {{
+                eyeOpen.style.display = 'block';
+                eyeClosed.style.display = 'none';
+            }}
         }});
 
         form.addEventListener('submit', async (e) => {{
             e.preventDefault();
             const ssid = document.getElementById('ssid').value.trim();
-            const password = document.getElementById('password').value.trim();
+            const password = passwordInput.value.trim();
+            const userId = document.getElementById('user_id').value;
 
             if (!ssid || !password) {{
                 showMessage('Please enter both SSID and password', 'error');
@@ -675,27 +796,31 @@ cache-size=1000
             statusMessage.style.display = 'none';
 
             try {{
-                const response = await fetch('http://192.168.50.1:8000/provision', {{
+                const response = await fetch('/provision', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ user_id: document.getElementById('user_id').value, ssid: ssid, password: password }}),
+                    body: JSON.stringify({{ user_id: userId, ssid: ssid, password: password }}),
                 }});
 
                 const data = await response.json();
 
                 if (response.ok) {{
-                    showMessage('✅ Credentials sent successfully! Your device is now connecting to your network...', 'success');
-                    form.reset();
+                    // Try to auto-close window
+                    loading.style.display = 'none';
+                    appLink.style.display = 'block';
+                    showMessage('✅ Credentials received!', 'success');
+                    
+                    // Attempt to close window automatically after 1 second
+                    setTimeout(() => {{
+                        window.close();
+                    }}, 1500);
                 }} else {{
-                    showMessage(`Error: ${{data.error || 'Failed'}}`, 'error');
-                    form.style.display = 'block';
-                    submitBtn.disabled = false;
+                    throw new Error(data.error || 'Failed');
                 }}
             }} catch (error) {{
-                showMessage(`Connection error. Make sure you're still connected to EVVOS_0001`, 'error');
+                showMessage(error.message || 'Connection error', 'error');
                 form.style.display = 'block';
                 submitBtn.disabled = false;
-            }} finally {{
                 loading.style.display = 'none';
             }}
         }});
@@ -711,7 +836,7 @@ cache-size=1000
         return web.Response(text=html_content, content_type='text/html')
 
     async def _handle_credentials(self, request: web.Request) -> web.Response:
-        """Handle incoming credentials from web form (simplified, no token)"""
+        """Handle incoming credentials from web form"""
         cors_headers = {
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
@@ -728,8 +853,9 @@ cache-size=1000
             
             logger.info(f"Credential data received - User: {user_id}, SSID: {ssid}, Password: {'*' * len(password)}")
             
+            # STRICT CHECK: Reject if user_id is missing
             if not user_id or not ssid or not password:
-                logger.warning("Received incomplete credentials")
+                logger.warning("Received incomplete credentials (missing user_id, ssid, or password)")
                 return web.json_response(
                     {"error": "User ID, SSID, and password are required"}, 
                     status=400,
