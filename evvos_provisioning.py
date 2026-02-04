@@ -556,7 +556,7 @@ cache-size=1000
         """
         Serve the simplified provisioning form HTML.
         MODIFIED: Checks for user_id and blocks access if missing.
-        MODIFIED: Adds Eye Icon for password visibility.
+        MODIFIED: Updates text to guide user back to app upon success and attempts auto-close.
         """
         user_id = request.query.get('user_id', '').strip()
         
@@ -593,7 +593,7 @@ cache-size=1000
             return web.Response(text=error_html, content_type='text/html', status=403)
 
         # ----------------------------------------------------------------
-        # 2. SERVE PROVISIONING FORM (With Eye Icon)
+        # 2. SERVE PROVISIONING FORM (With Return to App Instructions)
         # ----------------------------------------------------------------
         html_content = f"""
 <!DOCTYPE html>
@@ -633,6 +633,10 @@ cache-size=1000
         .loading {{ display: none; text-align: center; margin-top: 24px; }}
         .spinner {{ border: 3px solid rgba(0,0,0,0.1); border-top: 3px solid #15C85A; border-radius: 50%; width: 30px; height: 30px; animation: spin 0.8s linear infinite; margin: 0 auto 12px; }}
         @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+
+        .app-link {{ display: none; margin-top: 15px; text-align: center; }}
+        .app-link a {{ color: #3D5F91; text-decoration: none; font-weight: bold; border: 2px solid #3D5F91; padding: 10px 20px; border-radius: 8px; display: inline-block; }}
+        .app-link p {{ margin-bottom: 8px; font-size: 14px; color: #444; }}
     </style>
 </head>
 <body>
@@ -677,6 +681,13 @@ cache-size=1000
         </div>
         
         <div class="status-message" id="statusMessage"></div>
+
+        <div class="app-link" id="appLink">
+            <p><strong>Credentials Sent Successfully!</strong></p>
+            <p>Please return to the E.V.V.O.S Mobile App to finish setup.</p>
+            <br>
+            <a href="#" onclick="window.close(); return false;">Close Window & Return</a>
+        </div>
     </div>
 
     <script>
@@ -688,6 +699,7 @@ cache-size=1000
         const eyeClosed = document.getElementById('eyeClosed');
         const loading = document.getElementById('loading');
         const statusMessage = document.getElementById('statusMessage');
+        const appLink = document.getElementById('appLink');
 
         // Toggle Password Logic
         toggleBtn.addEventListener('click', () => {{
@@ -729,8 +741,15 @@ cache-size=1000
                 const data = await response.json();
 
                 if (response.ok) {{
-                    showMessage('✅ Success! Device is connecting...', 'success');
-                    form.reset();
+                    // Try to auto-close window
+                    loading.style.display = 'none';
+                    appLink.style.display = 'block';
+                    showMessage('✅ Credentials received!', 'success');
+                    
+                    // Attempt to close window automatically after 1 second
+                    setTimeout(() => {{
+                        window.close();
+                    }}, 1500);
                 }} else {{
                     throw new Error(data.error || 'Failed');
                 }}
@@ -738,7 +757,6 @@ cache-size=1000
                 showMessage(error.message || 'Connection error', 'error');
                 form.style.display = 'block';
                 submitBtn.disabled = false;
-            }} finally {{
                 loading.style.display = 'none';
             }}
         }});
