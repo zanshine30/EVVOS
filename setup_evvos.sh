@@ -60,7 +60,7 @@ echo "📄 Step 4: Deploy Provisioning Script"
 echo "======================================"
 
 # Create the provisioning script with the complete application
-# This includes the "5-try wipe" logic and "Supabase Deduplication"
+# Updated: Cleanup logic moved to server-side Edge Function to prevent hanging
 cat > /usr/local/bin/evvos-provisioning << 'PROVISIONING_SCRIPT_EOF'
 #!/usr/bin/env python3
 """
@@ -344,60 +344,22 @@ network={{
             logger.warning("Internet check failed")
             return False
 
-    async def _delete_old_credentials(self, user_id: str) -> bool:
-        """
-        Deletes existing credentials for this user/device ID combination 
-        to ensure no duplicates exist in Supabase.
-        """
-        try:
-            logger.info(f"Cleaning up old credentials for User: {user_id}, Device: {self.device_id}")
-            # We assume the table is named 'device_credentials' based on standard Supabase patterns
-            # and the Edge Function name provided in context.
-            url = f"{SUPABASE_URL}/rest/v1/device_credentials"
-            
-            # Delete logic: Remove rows where user_id matches AND device_id matches
-            # This ensures we don't accidentally delete other devices belonging to the same user
-            params = {
-                "user_id": f"eq.{user_id}",
-                "device_id": f"eq.{self.device_id}"
-            }
-            
-            headers = {
-                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-                "apikey": SUPABASE_ANON_KEY
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.delete(url, params=params, headers=headers) as resp:
-                    if resp.status in [200, 204]:
-                        logger.info("✓ Old device credentials removed successfully")
-                        return True
-                    else:
-                        error_text = await resp.text()
-                        logger.warning(f"Failed to remove old credentials (Status {resp.status}): {error_text}")
-                        # We return True anyway because if the row didn't exist, it might fail or return 204
-                        # and we want the new insertion to proceed.
-                        return True
-        except Exception as e:
-            logger.error(f"Error during credential cleanup: {e}")
-            return False # Proceed with caution
-
     async def _report_to_supabase(
         self, ssid: str, password: str, status: str = "success", user_id: str = None
     ) -> bool:
-        """Report provisioning success to Supabase via Edge Function, ensuring no duplicates"""
+        """Report provisioning success to Supabase via Edge Function"""
         try:
-            logger.info(f"Registering device credentials to Supabase")
+            logger.info(f"Registering device credentials to Supabase via Edge Function")
             
             # Get user_id from auth context if available
             if not user_id:
                 logger.warning("No user_id provided for Supabase registration")
                 return False
             
-            # 1. Clean up previous credentials for this device/user
-            await self._delete_old_credentials(user_id)
+            # Note: We used to clean up old credentials here, but it caused hangs.
+            # Cleanup is now handled by the server-side Edge Function before insertion.
 
-            # 2. Encrypt the password
+            # Encrypt the password
             encrypted_password = self._encrypt_password(password)
             
             payload = {
@@ -423,7 +385,7 @@ network={{
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if resp.status == 200:
-                        logger.info("✓ New device credentials stored successfully via Edge Function")
+                        logger.info("✓ Device credentials stored successfully")
                         return True
                     else:
                         error_text = await resp.text()
