@@ -8,19 +8,27 @@ import {
   ScrollView,
   Alert,
   Linking,
+  Vibration,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { CameraView, useCameraPermissions } from "expo-camera"; // Updated for generic Expo Camera
 import { setPaired } from "../utils/deviceStore";
 import { useAuth } from "../context/AuthContext";
-import supabase from "../lib/supabase"; // Authenticated client
+import supabase from "../lib/supabase";
 
 export default function DevicePairingFlowScreen({ navigation }) {
   const { displayName, badge, logout, user } = useAuth();
 
-  // Simplified state: We only need to know if we are scanning or not
-  const [isScanning, setIsScanning] = useState(false);
+  // Camera & Permissions
+  const [permission, requestPermission] = useCameraPermissions();
+  const [scanned, setScanned] = useState(false);
+  const [showManualButton, setShowManualButton] = useState(false);
+  const [scanFailCount, setScanFailCount] = useState(0); // Tracks invalid scans
+
+  // Provisioning State
+  const [isScanning, setIsScanning] = useState(false); // "Scanning" here means "Waiting for Cloud connection"
   const [statusMessage, setStatusMessage] = useState("");
   const [statusError, setStatusError] = useState(null);
 
@@ -34,8 +42,6 @@ export default function DevicePairingFlowScreen({ navigation }) {
       const checkForDevice = async () => {
         try {
           console.log("[DevicePairing] Polling Supabase...");
-
-          // We look for records updated/created in the last 1 HOUR to capture the recent pairing
           const timeWindow = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
           const { data, error } = await supabase
@@ -45,211 +51,179 @@ export default function DevicePairingFlowScreen({ navigation }) {
             .or(`updated_at.gte.${timeWindow},created_at.gte.${timeWindow},provisioned_at.gte.${timeWindow}`)
             .limit(1);
 
-          if (error) {
-            console.warn("[DevicePairing] Poll error:", error.message);
-          }
-
           if (data && data.length > 0) {
-            console.log("[DevicePairing] Device found!", data[0]);
-
-            // 1. Stop Scanning
             clearInterval(intervalId);
             setIsScanning(false);
-
-            // 2. Save Local State
             await setPaired(true);
             setStatusMessage("✓ Device Connected Successfully!");
 
-            // 3. Navigate
             Alert.alert("Success", "Your E.V.V.O.S device is now online and paired.", [
               {
                 text: "Go to Dashboard",
                 onPress: () => {
-                  navigation.reset({
-                    index: 0,
-                    routes: [{ name: "Home" }],
-                  });
+                  navigation.reset({ index: 0, routes: [{ name: "Home" }] });
                 }
               }
             ]);
-          } else {
-            // Still waiting...
-            console.log("[DevicePairing] No record found yet.");
           }
-
         } catch (e) {
-          console.log("[DevicePairing] Network request failed (likely no internet yet):", e.message);
-          // We don't stop the loop; we just wait for the phone to reconnect to cellular/WiFi
+          console.log("[DevicePairing] Network request failed:", e.message);
         }
       };
 
-      // Poll immediately then every 5 seconds
       checkForDevice();
       intervalId = setInterval(checkForDevice, 5000);
     }
-
-    return () => {
-      if (intervalId) clearInterval(intervalId);
-    };
+    return () => { if (intervalId) clearInterval(intervalId); };
   }, [isScanning, user, navigation]);
 
-
   // ------------------------------------------------------------------
-  //  ACTION HANDLERS
+  //  QR CODE HANDLER
   // ------------------------------------------------------------------
+  const handleBarCodeScanned = async ({ type, data }) => {
+    if (scanned || isScanning) return; // Prevent double trigger
 
-  const handleStartProvisioning = async () => {
-    try {
-      setStatusError(null);
+    // 1. Validation Logic
+    // We expect the QR to contain the base URL like "http://192.168.50.1:8000/provisioning"
+    // Adjust this check based on your actual QR content requirements.
+    const isValidQR = data.includes("192.168.50.1") || data.includes("provisioning");
 
-      if (!user || !user.id) {
-        Alert.alert("Error", "You must be logged in to provision a device.");
-        return;
-      }
+    if (!isValidQR) {
+      setScanned(true);
+      Vibration.vibrate(); // Feedback for error
 
-      const userId = user.id;
-      // Pass the user_id to the Pi so it can forward it to Supabase
-      const url = `http://192.168.50.1:8000/provisioning?user_id=${encodeURIComponent(userId)}`;
+      const newCount = scanFailCount + 1;
+      setScanFailCount(newCount);
 
-      const supported = await Linking.canOpenURL(url);
-
-      if (supported) {
-        // 1. Open the browser
-        await Linking.openURL(url);
-
-        // 2. Immediately switch UI to "Scanning" mode
-        setIsScanning(true);
-        setStatusMessage("Waiting for device to connect to cloud...");
-
-      } else {
+      if (newCount >= 3) {
+        // TRIGGER FALLBACK after 3 failed attempts
         Alert.alert(
-          "Connection Error",
-          "Cannot reach the device. Make sure you are connected to the 'EVVOS_0001' WiFi network."
+          "Scanning Failed",
+          "We cannot recognize this device. Switching to manual mode.",
+          [{ text: "OK", onPress: () => setShowManualButton(true) }]
         );
+      } else {
+        Alert.alert("Invalid Device", "This QR code does not match an EVVOS device. Try again.", [
+          { text: "OK", onPress: () => setScanned(false) } // Reset scan lock
+        ]);
       }
-    } catch (error) {
-      console.error("[DevicePairing] Error starting provisioning:", error);
-      setStatusError("Failed to open provisioning form.");
+      return;
     }
+
+    // 2. Success Logic
+    setScanned(true);
+    Vibration.vibrate();
+
+    // Append user_id to the scanned URL
+    const finalUrl = `${data}?user_id=${encodeURIComponent(user.id)}`;
+
+    // Proceed to open browser
+    openProvisioningUrl(finalUrl);
+  };
+
+  // ------------------------------------------------------------------
+  //  MANUAL / COMMON ACTIONS
+  // ------------------------------------------------------------------
+
+  const openProvisioningUrl = async (url) => {
+    try {
+      const supported = await Linking.canOpenURL(url);
+      if (supported) {
+        await Linking.openURL(url);
+        setIsScanning(true); // Start polling
+        setStatusMessage("Waiting for device to connect to cloud...");
+      } else {
+        Alert.alert("Error", "Cannot open the link provided by the device.");
+        setScanned(false);
+      }
+    } catch (err) {
+      console.error(err);
+      setStatusError("Failed to open provisioning link.");
+      setScanned(false);
+    }
+  };
+
+  const handleManualProvisioning = () => {
+    // Default fallback URL if QR fails
+    const defaultUrl = `http://192.168.50.1:8000/provisioning?user_id=${encodeURIComponent(user.id)}`;
+    openProvisioningUrl(defaultUrl);
   };
 
   const handleStopScanning = () => {
     setIsScanning(false);
     setStatusMessage("");
+    setScanned(false); // Re-enable camera
   };
 
   const handleGoBack = () => {
     if (isScanning) {
       Alert.alert("Cancel Setup?", "We are still waiting for your device to connect.", [
         { text: "Keep Waiting", style: "cancel" },
-        {
-          text: "Exit",
-          style: "destructive",
-          onPress: () => {
-            setIsScanning(false);
-            navigation.goBack();
-          }
-        }
+        { text: "Exit", style: "destructive", onPress: () => navigation.goBack() }
       ]);
     } else {
       navigation.goBack();
     }
   };
 
-  const handleLogout = () => {
-    Alert.alert("Logout", "Are you sure you want to logout?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Logout",
-        style: "destructive",
-        onPress: async () => {
-          await logout();
-          navigation.reset({ index: 0, routes: [{ name: "Login" }] });
-        },
-      },
-    ]);
+  const handleLogout = async () => {
+    await logout();
+    navigation.reset({ index: 0, routes: [{ name: "Login" }] });
   };
 
   // ------------------------------------------------------------------
   //  RENDER
   // ------------------------------------------------------------------
 
-  const renderContent = () => {
-    return (
-      <>
-        <Text style={styles.stepText}>Device Provisioning</Text>
-        <Text style={styles.bodyText}>
-          Follow the steps below to connect your E.V.V.O.S device to the cloud.
-        </Text>
-
+  // Helper to render Camera or Icon based on state
+  const renderScannerArea = () => {
+    // If waiting for cloud, show loading spinner
+    if (isScanning) {
+      return (
         <View style={styles.imageBox}>
-          {isScanning ? (
-            <ActivityIndicator size={64} color="#15C85A" />
-          ) : (
-            <Ionicons name="wifi" size={64} color="rgba(255,255,255,0.85)" />
-          )}
+          <ActivityIndicator size={64} color="#15C85A" />
         </View>
+      );
+    }
 
-        {statusError && (
-          <View style={styles.errorBox}>
-            <Text style={styles.errorText}>{statusError}</Text>
-          </View>
-        )}
+    // If Manual Button was triggered (either by 3 fails or user click)
+    if (showManualButton) {
+      return (
+        <View style={styles.imageBox}>
+          <Ionicons name="keypad" size={64} color="rgba(255,255,255,0.85)" />
+          <Text style={styles.manualModeText}>Manual Mode Active</Text>
+        </View>
+      );
+    }
 
-        {/* Status Message Display */}
-        {statusMessage !== "" && (
-          <View style={isScanning ? styles.loadingBox : styles.statusBox}>
-            <Text style={isScanning ? styles.loadingText : styles.statusText}>
-              {statusMessage}
-            </Text>
-          </View>
-        )}
+    // Permission Handling
+    if (!permission) return <View style={styles.imageBox} />;
+    if (!permission.granted) {
+      return (
+        <TouchableOpacity style={styles.imageBox} onPress={requestPermission}>
+          <Ionicons name="camera-outline" size={48} color="white" />
+          <Text style={{ color: "white", marginTop: 10 }}>Tap to Enable Camera</Text>
+        </TouchableOpacity>
+      );
+    }
 
-        {/* Instructions only visible when NOT scanning */}
-        {!isScanning && (
-          <View style={styles.infoBox}>
-            <Ionicons name="information-circle-outline" size={16} color="#6DA8FF" />
-            <Text style={styles.infoText}>
-              1. Connect to WiFi: "EVVOS_0001"{'\n'}
-              2. Turn off Mobile Data{'\n'}
-              3. Press "Start Provisioning"
-            </Text>
-          </View>
-        )}
-
-        {!isScanning ? (
-          <TouchableOpacity
-            style={styles.primaryBtn}
-            activeOpacity={0.9}
-            onPress={handleStartProvisioning}
-          >
-            <View style={styles.btnIconCircle}>
-              <Ionicons name="play" size={25} color="white" />
-            </View>
-            <Text style={styles.primaryText}>Start Provisioning</Text>
-          </TouchableOpacity>
-        ) : (
-          <View>
-            {/* While scanning, we show instructions on what to do next */}
-            <View style={styles.infoBox}>
-              <Ionicons name="phone-portrait-outline" size={16} color="#6DA8FF" />
-              <Text style={styles.infoText}>
-                After entering WiFi details in the browser, your device will restart.
-                {"\n\n"}
-                Please ensure your phone reconnects to the Internet (Mobile Data/Home WiFi) so we can detect the device.
-              </Text>
-            </View>
-
-            <TouchableOpacity
-              style={[styles.secondaryBtn]}
-              activeOpacity={0.8}
-              onPress={handleStopScanning}
-            >
-              <Text style={styles.secondaryText}>Cancel / Retry</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-      </>
+    // Live Camera View
+    return (
+      <View style={styles.cameraContainer}>
+        <CameraView
+          style={StyleSheet.absoluteFillObject}
+          facing="back"
+          onBarcodeScanned={scanned ? undefined : handleBarCodeScanned}
+          barcodeScannerSettings={{
+            barcodeTypes: ["qr"],
+          }}
+        />
+        {/* Overlay Frame */}
+        <View style={styles.overlayLayer}>
+          <View style={styles.scanFrame} />
+          <Text style={styles.scanText}>Scan Device QR Code</Text>
+        </View>
+      </View>
     );
   };
 
@@ -269,19 +243,100 @@ export default function DevicePairingFlowScreen({ navigation }) {
               <Text style={styles.badge}>{badge ? `Badge #${badge}` : ""}</Text>
             </View>
           </View>
-
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-            <TouchableOpacity activeOpacity={0.9} onPress={handleLogout}>
-              <Ionicons name="log-out-outline" size={18} color="rgba(255,255,255,0.75)" />
-            </TouchableOpacity>
-            <TouchableOpacity activeOpacity={0.9} onPress={handleGoBack}>
-              <Ionicons name="arrow-back" size={18} color="rgba(255,255,255,0.75)" />
-            </TouchableOpacity>
+          <View style={{ flexDirection: "row", gap: 12 }}>
+            <TouchableOpacity onPress={handleLogout}><Ionicons name="log-out-outline" size={18} color="rgba(255,255,255,0.75)" /></TouchableOpacity>
+            <TouchableOpacity onPress={handleGoBack}><Ionicons name="arrow-back" size={18} color="rgba(255,255,255,0.75)" /></TouchableOpacity>
           </View>
         </View>
 
         <ScrollView contentContainerStyle={styles.page} showsVerticalScrollIndicator={false}>
-          {renderContent()}
+          <Text style={styles.stepText}>Device Provisioning</Text>
+          <Text style={styles.bodyText}>
+            {showManualButton
+              ? "Press the button below to connect manually."
+              : "Scan the QR code found on your device screen to begin."}
+          </Text>
+
+          {/* DYNAMIC AREA: Camera OR Icon */}
+          {renderScannerArea()}
+
+          {statusError && (
+            <View style={styles.errorBox}>
+              <Text style={styles.errorText}>{statusError}</Text>
+            </View>
+          )}
+
+          {statusMessage !== "" && (
+            <View style={isScanning ? styles.loadingBox : styles.statusBox}>
+              <Text style={isScanning ? styles.loadingText : styles.statusText}>{statusMessage}</Text>
+            </View>
+          )}
+
+          {/* INSTRUCTIONS */}
+          {!isScanning && (
+            <View style={styles.infoBox}>
+              <Ionicons name="information-circle-outline" size={16} color="#6DA8FF" />
+              <Text style={styles.infoText}>
+                1. Connect to WiFi: "EVVOS_0001"{'\n'}
+                2. Turn off Mobile Data{'\n'}
+                3. {showManualButton ? "Press Button" : "Scan QR Code"}
+              </Text>
+            </View>
+          )}
+
+          {/* BUTTONS LOGIC */}
+          {!isScanning ? (
+            <>
+              {/* Show Manual Button ONLY if triggered */}
+              {showManualButton ? (
+                <TouchableOpacity
+                  style={styles.primaryBtn}
+                  activeOpacity={0.9}
+                  onPress={handleManualProvisioning}
+                >
+                  <View style={styles.btnIconCircle}>
+                    <Ionicons name="play" size={25} color="white" />
+                  </View>
+                  <Text style={styles.primaryText}>Start Provisioning (Manual)</Text>
+                </TouchableOpacity>
+              ) : (
+                /* Or show "Trouble Scanning?" toggle */
+                <TouchableOpacity
+                  style={styles.textLinkBtn}
+                  onPress={() => setShowManualButton(true)}
+                >
+                  <Text style={styles.textLink}>Trouble Scanning? Use Manual Button</Text>
+                </TouchableOpacity>
+              )}
+
+              {/* If user is in manual mode, allow them to go back to camera */}
+              {showManualButton && (
+                <TouchableOpacity
+                  style={styles.textLinkBtn}
+                  onPress={() => {
+                    setShowManualButton(false);
+                    setScanFailCount(0);
+                    setScanned(false);
+                  }}
+                >
+                  <Text style={styles.textLink}>Switch back to Camera</Text>
+                </TouchableOpacity>
+              )}
+            </>
+          ) : (
+            <View>
+              <View style={styles.infoBox}>
+                <Ionicons name="phone-portrait-outline" size={16} color="#6DA8FF" />
+                <Text style={styles.infoText}>
+                  Your device is restarting...{'\n'}
+                  Please reconnect your phone to the Internet now.
+                </Text>
+              </View>
+              <TouchableOpacity style={styles.secondaryBtn} onPress={handleStopScanning}>
+                <Text style={styles.secondaryText}>Cancel / Retry</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           <Text style={styles.footer}>Public Safety and Traffic Management Department</Text>
         </ScrollView>
@@ -299,45 +354,65 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     alignItems: "center",
   },
-  officerName: {
-    color: "rgba(255,255,255,0.90)",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  badge: {
-    color: "rgba(255,255,255,0.55)",
-    fontSize: 10,
-    marginTop: 2,
-  },
-  page: {
-    flexGrow: 1,
-    paddingHorizontal: 18,
-    paddingTop: 18,
-    paddingBottom: 36,
-  },
-  stepText: {
-    color: "rgba(255,255,255,0.92)",
-    fontSize: 13,
-    fontWeight: "800",
-    marginBottom: 8,
-  },
-  bodyText: {
-    color: "rgba(255,255,255,0.70)",
-    fontSize: 12,
-    lineHeight: 18,
-    marginBottom: 16,
-  },
+  officerName: { color: "rgba(255,255,255,0.90)", fontSize: 12, fontWeight: "700" },
+  badge: { color: "rgba(255,255,255,0.55)", fontSize: 10, marginTop: 2 },
+  page: { flexGrow: 1, paddingHorizontal: 18, paddingTop: 18, paddingBottom: 36 },
+  stepText: { color: "rgba(255,255,255,0.92)", fontSize: 13, fontWeight: "800", marginBottom: 8 },
+  bodyText: { color: "rgba(255,255,255,0.70)", fontSize: 12, lineHeight: 18, marginBottom: 16 },
+
+  // SCANNER STYLES
   imageBox: {
-    height: 190,
+    height: 250, // Taller for camera
     width: "100%",
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.12)",
-    backgroundColor: "rgba(0,0,0,0.12)",
+    backgroundColor: "rgba(0,0,0,0.3)",
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 14,
+    overflow: "hidden",
   },
+  cameraContainer: {
+    height: 250,
+    width: "100%",
+    borderRadius: 12,
+    overflow: "hidden",
+    marginBottom: 14,
+    borderWidth: 1,
+    borderColor: "#4DB5FF",
+    backgroundColor: "#000",
+  },
+  overlayLayer: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  scanFrame: {
+    width: 180,
+    height: 180,
+    borderWidth: 2,
+    borderColor: "#15C85A",
+    borderRadius: 12,
+    backgroundColor: "transparent",
+  },
+  scanText: {
+    color: "white",
+    marginTop: 10,
+    fontSize: 12,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  manualModeText: {
+    color: "rgba(255,255,255,0.6)",
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: "600",
+  },
+
+  // BTNS & BOXES
   primaryBtn: {
     height: 50,
     width: "100%",
@@ -356,90 +431,31 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255, 255, 255, 0.1)",
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.2)",
-    flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     marginTop: 10,
   },
-  primaryText: {
-    color: "white",
-    fontSize: 15,
-    fontWeight: "800",
-  },
-  secondaryText: {
-    color: "rgba(255,255,255,0.8)",
-    fontSize: 14,
-    fontWeight: "600",
-  },
-  statusBox: {
-    backgroundColor: "rgba(255,255,255,0.08)",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.12)",
-    padding: 12,
-    marginBottom: 14,
+  textLinkBtn: {
+    padding: 15,
     alignItems: "center",
   },
-  statusText: {
-    color: "rgba(255,255,255,0.70)",
-    fontSize: 12,
-  },
-  loadingBox: {
-    backgroundColor: "rgba(21,200,90,0.1)",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(21,200,90,0.3)",
-    padding: 12,
-    marginBottom: 14,
-    alignItems: "center",
-  },
-  loadingText: {
-    color: "#15C85A",
+  textLink: {
+    color: "#6DA8FF",
     fontSize: 13,
-    fontWeight: "600",
+    textDecorationLine: "underline",
   },
-  errorBox: {
-    backgroundColor: "rgba(255,30,30,0.15)",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(255,30,30,0.3)",
-    padding: 12,
-    marginBottom: 12,
-  },
-  errorText: {
-    color: "rgba(255,150,150,0.90)",
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  infoBox: {
-    backgroundColor: "rgba(109,168,255,0.12)",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "rgba(109,168,255,0.3)",
-    padding: 12,
-    marginBottom: 12,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-  },
-  infoText: {
-    color: "rgba(109,168,255,0.85)",
-    fontSize: 11,
-    lineHeight: 16,
-    flex: 1,
-  },
-  btnIconCircle: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: "rgba(255,255,255,0.2)",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  footer: {
-    marginTop: 22,
-    alignSelf: "center",
-    color: "rgba(255,255,255,0.25)",
-    fontSize: 10,
-  },
+  primaryText: { color: "white", fontSize: 15, fontWeight: "800" },
+  secondaryText: { color: "rgba(255,255,255,0.8)", fontSize: 14, fontWeight: "600" },
+
+  // ALERTS
+  statusBox: { backgroundColor: "rgba(255,255,255,0.08)", borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,255,255,0.12)", padding: 12, marginBottom: 14, alignItems: "center" },
+  statusText: { color: "rgba(255,255,255,0.70)", fontSize: 12 },
+  loadingBox: { backgroundColor: "rgba(21,200,90,0.1)", borderRadius: 10, borderWidth: 1, borderColor: "rgba(21,200,90,0.3)", padding: 12, marginBottom: 14, alignItems: "center" },
+  loadingText: { color: "#15C85A", fontSize: 13, fontWeight: "600" },
+  errorBox: { backgroundColor: "rgba(255,30,30,0.15)", borderRadius: 10, borderWidth: 1, borderColor: "rgba(255,30,30,0.3)", padding: 12, marginBottom: 12 },
+  errorText: { color: "rgba(255,150,150,0.90)", fontSize: 11, lineHeight: 16 },
+  infoBox: { backgroundColor: "rgba(109,168,255,0.12)", borderRadius: 10, borderWidth: 1, borderColor: "rgba(109,168,255,0.3)", padding: 12, marginBottom: 12, flexDirection: "row", alignItems: "center", gap: 10 },
+  infoText: { color: "rgba(109,168,255,0.85)", fontSize: 11, lineHeight: 16, flex: 1 },
+  btnIconCircle: { width: 24, height: 24, borderRadius: 12, backgroundColor: "rgba(255,255,255,0.2)", alignItems: "center", justifyContent: "center" },
+  footer: { marginTop: 22, alignSelf: "center", color: "rgba(255,255,255,0.25)", fontSize: 10 },
 });

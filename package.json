@@ -16,6 +16,7 @@
     "@react-navigation/native-stack": "^7.9.0",
     "@supabase/supabase-js": "^2.90.1",
     "expo": "~54.0.31",
+    "expo-camera": "~17.0.10",
     "expo-dev-client": "~6.0.20",
     "expo-linear-gradient": "~15.0.8",
     "expo-notifications": "^0.32.16",
