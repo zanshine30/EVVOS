@@ -1129,52 +1129,56 @@ cache-size=1000
                     
                     if await self._connect_to_wifi(ssid, password):
                         logger.info(f"✓ WiFi connection command executed (attempt {wifi_attempt})")
-                        await asyncio.sleep(5)
-                        wifi_connected = True
-                        break
+                        # Wait to see if we actually get an IP
+                        for wait_ip in range(6):
+                            await asyncio.sleep(5)
+                            if self._check_wifi_connected():
+                                wifi_connected = True
+                                break
+                        if wifi_connected: break
                     else:
                         logger.warning(f"✗ WiFi connection failed (attempt {wifi_attempt}/5)")
                         await asyncio.sleep(3)
                 
+                # --- CRITICAL CHANGE START ---
                 if not wifi_connected:
                     logger.error("✗ WiFi connection failed after 5 attempts")
-                    logger.info("Cleaning up failed credentials and returning to AP mode...")
+                    logger.info("Cleaning up failed credentials to prevent retry loops...")
                     
-                    try:
-                        if os.path.exists(self.state_file):
+                    # 1. Delete the local state file so it doesn't reload on restart
+                    if os.path.exists(self.state_file):
+                        try:
                             os.remove(self.state_file)
-                            logger.info("✓ State file deleted - credentials cleared")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete state file: {e}")
+                            logger.info("✓ State file deleted")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete state file: {e}")
+
+                    # 2. Clear memory variables
+                    self.received_credentials = None
+                    
+                    # 3. Force clean the interface before returning to AP mode
+                    subprocess.run(["sudo", "ip", "addr", "flush", "dev", "wlan0"], capture_output=True)
                     
                     logger.info("Restarting in AP mode for credential retry...")
-                    return await self._provision_with_hotspot()
-                
+                    return await self._provision_with_hotspot() 
+                # --- CRITICAL CHANGE END ---
+
                 # WiFi connected, now check internet
                 logger.info("Verifying internet connectivity...")
                 internet_verified = False
                 for attempt in range(1, 6):
-                    logger.info(f"Internet check attempt {attempt}/5...")
-                    
                     if await self._check_internet():
                         logger.info("✓ Internet connection verified!")
                         internet_verified = True
                         break
-                    
                     await asyncio.sleep(3)
                 
                 if not internet_verified:
-                    logger.error("✗ Internet connectivity verification failed after 5 attempts")
-                    logger.info("Cleaning up and returning to AP mode...")
-                    
-                    try:
-                        if os.path.exists(self.state_file):
-                            os.remove(self.state_file)
-                            logger.info("✓ State file deleted - credentials cleared")
-                    except Exception as e:
-                        logger.warning(f"Failed to delete state file: {e}")
-                    
-                    logger.info("Restarting in AP mode...")
+                    logger.error("✗ Internet connectivity verification failed")
+                    # Clean up and restart AP mode
+                    if os.path.exists(self.state_file):
+                        os.remove(self.state_file)
+                    self.received_credentials = None
                     return await self._provision_with_hotspot()
                 
                 # All checks passed
@@ -1183,6 +1187,8 @@ cache-size=1000
                 
                 if await self._report_to_supabase(ssid, password, user_id=user_id):
                     logger.info("✓ Provisioning successful!")
+                    if os.path.exists(self.state_file):
+                        os.remove(self.state_file)
                     return True
                 else:
                     logger.error("Failed to report to Supabase")
@@ -1195,8 +1201,6 @@ cache-size=1000
                 
         except Exception as e:
             logger.error(f"Hotspot provisioning error: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
             await self._stop_hotspot()
             return False
 
