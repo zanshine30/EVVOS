@@ -209,6 +209,7 @@ sed -i '/dtparam=audio=on/d' "$CONFIG_PATH"
 if ! grep -q "dtoverlay=respeaker-2mic-v2_0" "$CONFIG_PATH"; then
     echo "dtparam=i2c_arm=on" >> "$CONFIG_PATH"
     echo "dtparam=i2s=on" >> "$CONFIG_PATH"
+    echo "dtparam=spi=on" >> "$CONFIG_PATH"
     echo "# ReSpeaker 2-Mics Pi HAT v2.0" >> "$CONFIG_PATH"
     echo "dtoverlay=respeaker-2mic-v2_0" >> "$CONFIG_PATH"
 fi
@@ -318,6 +319,7 @@ Pi then connects to user's hotspot to get internet access.
 import asyncio
 import json
 import logging
+import RPi.GPIO as GPIO
 import os
 import subprocess
 import sys
@@ -328,6 +330,8 @@ from typing import Optional, Dict, Any
 import hashlib
 import base64
 
+BUTTON_GPIO = 17
+
 try:
     import aiohttp
     from aiohttp import web
@@ -336,6 +340,12 @@ except ImportError as e:
     print("Run: pip install aiohttp")
     sys.exit(1)
 
+try:
+    import RPi.GPIO as GPIO
+except ImportError:
+    GPIO = None
+
+BUTTON_GPIO = 17  # ReSpeaker 2-Mics User Button
 # Configuration
 DEVICE_NAME = "EVVOS_0001"
 CREDS_FILE = "/etc/evvos/device_credentials.json"
@@ -376,6 +386,7 @@ class EVVOSWiFiProvisioner:
         self.dnsmasq_process = None
         # Philippines timezone is UTC+8
         self.manila_tz = timezone(timedelta(hours=8))
+        self._setup_button()
 
     def _get_manila_time(self) -> datetime:
         """Get current time in Asia/Manila timezone (UTC+8)"""
@@ -2042,7 +2053,54 @@ cache-size=1000
                 logger.error(f"[MONITOR] Unexpected error in connectivity monitor loop: {e}")
                 await asyncio.sleep(5)  # Wait before retrying to avoid rapid error loops
 
+    def _setup_button(self):
+        """Initialize GPIO for ReSpeaker Button"""
+        if GPIO:
+            try:
+                GPIO.setmode(GPIO.BCM)
+                GPIO.setup(BUTTON_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+                logging.info(f"✓ ReSpeaker Button initialized on GPIO {BUTTON_GPIO}")
+            except Exception as e:
+                logging.error(f"Failed to setup button GPIO: {e}")
+
+    async def _monitor_button(self):
+        """Monitor button for 5-second hold to factory reset"""
+        if not GPIO: return
+
+        logging.info("[BUTTON] Starting button monitor task...")
+        press_start = None
+
+        while True:
+            try:
+                # Button is Active LOW (False when pressed)
+                if GPIO.input(BUTTON_GPIO) == False:
+                    if press_start is None:
+                        press_start = time.time()
+                    
+                    if (time.time() - press_start_time) > 5.0:
+                        logger.warning("Triggering Factory Reset...")
+                        await self._perform_factory_reset()
+                        press_start_time = None
+                        await asyncio.sleep(10) # Give it time to die
+                else:
+                    press_start = None
+                
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logging.error(f"Button error: {e}")
+                await asyncio.sleep(1)
+
+    async def _perform_factory_reset(self):
+        """Wipe credentials and restart services"""
+        cmd = "sudo rm -f /etc/evvos/device_credentials.json /tmp/evvos_ble_state.json && sudo systemctl restart evvos-provisioning evvos-voice-command"
+        try:
+            logging.info("Executing Factory Reset...")
+            subprocess.run(cmd, shell=True, check=False)
+        except Exception as e:
+            logging.error(f"Reset failed: {e}")
+
     async def run(self):
+        asyncio.create_task(self._monitor_button())
         """Main provisioning loop"""
         logger.info(f"EVVOS WiFi Hotspot Provisioning Agent Started (Device: {self.device_id})")
         logger.info("=" * 60)
@@ -2079,6 +2137,28 @@ async def main():
     provisioner = EVVOSWiFiProvisioner()
     await provisioner.run()
 
+def _setup_button(self):
+        """Initialize GPIO for ReSpeaker Button"""
+        GPIO.setmode(GPIO.BCM)
+        GPIO.setup(BUTTON_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+    async def _monitor_button(self):
+        """Check for 5-second hold to reset"""
+        press_start = None
+        while True:
+            if GPIO.input(BUTTON_GPIO) == False: # Button pressed
+                if press_start is None: press_start = time.time()
+                if (time.time() - press_start) > 5.0:
+                    await self._perform_factory_reset()
+                    press_start = None
+            else:
+                press_start = None
+            await asyncio.sleep(0.1)
+
+    async def _perform_factory_reset(self):
+        """Wipe credentials and restart both services"""
+        cmd = "sudo rm -f /etc/evvos/device_credentials.json /tmp/evvos_ble_state.json && sudo systemctl restart evvos-provisioning evvos-voice-command"
+        subprocess.run(cmd, shell=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -2139,246 +2219,192 @@ elif curl -fsSL "https://raw.githubusercontent.com/YOUR-USERNAME/EVVOS/main/evvo
 else
     # Fallback: Create minimal working implementation
     echo "⚠️  Using fallback voice command implementation"
-    cat > /usr/local/bin/evvos-voice-command.py << 'VOICE_COMMAND_EOF'
+    cat > /usr/local/bin/evvos-voice-command.py << 'VOICE_CMD_EOF'
 #!/usr/bin/env python3
-"""
-EVVOS Voice Command Service - Supabase Real-time Integration
-ReSpeaker 2-Mics Pi HAT v2.0 + Vosk + Supabase Real-time
-
-ARCHITECTURE:
-1. Pi listens for voice commands using Vosk grammar
-2. When command recognized, writes to Supabase voice_commands table
-3. Mobile app receives via Supabase Real-time subscription
-4. Mobile app processes and executes command immediately
-
-Flow: Voice → Vosk → Supabase → Mobile App → Action
-"""
-
 import asyncio
 import json
 import logging
+import RPi.GPIO as GPIO
 import os
-import signal
-import subprocess
 import sys
+import signal
 import time
-from datetime import datetime, timezone, timedelta
-import aiohttp
+import spidev  # Added for LED control
 
-try:
-    from vosk import Model, KaldiRecognizer
-except ImportError as e:
-    print(f"Error: Missing library: {e}")
-    sys.exit(1)
+# Ensure we are in the venv
+if sys.prefix == sys.base_prefix:
+    os.execv("/opt/evvos/venv/bin/python3", ["python3"] + sys.argv)
+
+import numpy as np
+import RPi.GPIO as GPIO
+from vosk import Model, KaldiRecognizer
+import queue
+import sounddevice as sd
+import aiohttp
 
 # Configuration
 LOGS_DIR = "/var/log/evvos"
-GRAMMAR_FILE = "/etc/evvos/vosk/grammar.json"
 CREDS_FILE = "/etc/evvos/device_credentials.json"
 SUPABASE_URL = "https://zekbonbxwccgsfagrrph.supabase.co"
 SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpla2JvbmJ4d2NjZ3NmYWdycnBoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzOTQyOTUsImV4cCI6MjA4Mzk3MDI5NX0.0ss5U-uXryhWGf89ucndqNK8-Bzj_GRZ-4-Xap6ytHg"
 
-os.makedirs(LOGS_DIR, exist_ok=True)
+# Logging Setup
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(f"{LOGS_DIR}/evvos_voice_command.log"),
-        logging.StreamHandler(),
-    ],
+    format="%(asctime)s - [VoiceCmd] - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler(f"{LOGS_DIR}/voice_command.log"), logging.StreamHandler()]
 )
-logger = logging.getLogger("EVVOS_VoiceCommand")
+logger = logging.getLogger("EVVOS_VOICE")
 
-class VoiceCommandService:
+# -----------------------------------------------------------------------------
+# LED CONTROLLER (APA102 for ReSpeaker 2-Mics)
+# -----------------------------------------------------------------------------
+class PixelController:
     def __init__(self):
-        self.running = True
-        self.audio_process = None
-        self.recognizer = None
-        self.commands = self._load_grammar()
-        self.device_id = self._load_device_id()
-        self.user_id = self._load_user_id()
-        self.manila_tz = timezone(timedelta(hours=8))
-    
-    def _load_device_id(self):
+        self.num_leds = 3
         try:
-            with open(CREDS_FILE, 'r') as f:
-                creds = json.load(f)
-                return creds.get("device_id", "unknown")
-        except:
-            return "unknown"
-    
-    def _load_user_id(self):
+            self.spi = spidev.SpiDev()
+            self.spi.open(0, 0)  # Bus 0, Device 0
+            self.spi.max_speed_hz = 8000000
+            self.enabled = True
+        except Exception as e:
+            logger.error(f"Failed to init SPI for LEDs: {e}")
+            self.enabled = False
+
+    def show(self, data):
+        if not self.enabled: return
+        # APA102 Frame: Start(32x0) + LED_Frames + End(32x1)
+        # LED Frame: 111(3bits) + Brightness(5bits) + B + G + R
+        buffer = [0x00] * 4
+        for r, g, b in data:
+            buffer += [0xE0 | 0x05, b, g, r] # Brightness set to 5 (dim)
+        buffer += [0xFF] * 4
+        self.spi.xfer2(buffer)
+
+    def off(self):
+        self.show([(0,0,0)] * self.num_leds)
+
+    def listen_mode(self):
+        # Solid Blue (indicating Ready/Listening)
+        self.show([(0, 0, 100)] * self.num_leds)
+
+    def success_mode(self):
+        # Flash Green (Recognized)
+        for _ in range(2):
+            self.show([(0, 150, 0)] * self.num_leds)
+            time.sleep(0.1)
+            self.off()
+            time.sleep(0.1)
+        self.listen_mode() # Return to listening
+
+    def error_mode(self):
+        # Flash Red (Error/Unknown)
+        self.show([(150, 0, 0)] * self.num_leds)
+        time.sleep(0.5)
+        self.listen_mode()
+
+# -----------------------------------------------------------------------------
+# VOICE SERVICE
+# -----------------------------------------------------------------------------
+class EVVOSVoiceService:
+    def __init__(self):
+        self.model = Model(lang="en-us")
+        self.q = queue.Queue()
+        self.pixels = PixelController()
+        
+    def _audio_callback(self, indata, frames, time, status):
+        if status:
+            logger.warning(f"Audio Status: {status}")
+        self.q.put(bytes(indata))
+
+    def _get_user_id(self):
         try:
-            with open(CREDS_FILE, 'r') as f:
-                creds = json.load(f)
-                return creds.get("user_id")
+            with open(CREDS_FILE) as f:
+                data = json.load(f)
+                return data.get("user_id")
         except:
             return None
-    
-    def _load_grammar(self):
+
+    def _get_device_id(self):
         try:
-            if os.path.exists(GRAMMAR_FILE):
-                with open(GRAMMAR_FILE, 'r') as f:
-                    commands = json.load(f)
-                    logger.info(f"✓ Loaded {len(commands)} voice commands")
-                    return commands
-        except Exception as e:
-            logger.warning(f"Grammar load error: {e}")
-        return ["okay", "confirm", "cancel", "start", "stop", "help", "repeat", "clear"]
-    
-    def _setup_audio(self):
-        try:
-            logger.info("🎤 Initializing audio device with ALSA...")
-            self.audio_process = subprocess.Popen(
-                [
-                    "arecord",
-                    "-D", "default",
-                    "-r", "16000",      # Sample rate
-                    "-c", "1",          # Mono
-                    "-f", "S16_LE",     # 16-bit signed little-endian
-                    "-t", "raw",        # Raw audio
-                    "-q",               # Quiet
-                    "-",                # Output to stdout
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                bufsize=0,
-            )
-            logger.info("✓ Audio device initialized")
-            return True
-        except Exception as e:
-            logger.error(f"Audio setup failed: {e}")
-            return False
-    
-    def _setup_vosk(self):
-        try:
-            logger.info("🗣️ Initializing Vosk recognizer...")
-            model = Model(lang="en-us")
-            self.recognizer = KaldiRecognizer(model, 16000)
-            logger.info(f"✓ Vosk ready (grammar: {len(self.commands)} commands)")
-            return True
-        except Exception as e:
-            logger.error(f"Vosk setup failed: {e}")
-            return False
-    
-    async def _send_to_supabase(self, command: str):
-        """Write recognized command to Supabase voice_commands table"""
-        if not self.user_id:
-            logger.warning("⚠️ User ID not available, cannot send command")
-            return False
+            with open("/sys/class/net/wlan0/address") as f:
+                return f.read().strip().replace(":", "")
+        except:
+            return "unknown_device"
+
+    async def _send_command(self, user_id, command_text):
+        url = f"{SUPABASE_URL}/rest/v1/voice_commands"
+        headers = {
+            "apikey": SUPABASE_ANON_KEY,
+            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal"
+        }
+        payload = {
+            "user_id": user_id,
+            "device_id": self._get_device_id(),
+            "command": command_text,
+            "status": "pending"
+        }
         
         try:
-            timestamp = datetime.now(self.manila_tz).isoformat()
-            payload = {
-                "device_id": self.device_id,
-                "user_id": self.user_id,
-                "command": command,
-                "confidence": 1.0,
-                "status": "recognized",
-                "timestamp": timestamp,
-            }
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-                "apikey": SUPABASE_ANON_KEY,
-            }
-            
-            url = f"{SUPABASE_URL}/rest/v1/voice_commands"
-            
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as resp:
+                async with session.post(url, headers=headers, json=payload) as resp:
                     if resp.status in [200, 201]:
-                        logger.info(f"✅ Command sent to Supabase Real-time: {command}")
+                        logger.info(f"Command '{command_text}' sent successfully")
                         return True
                     else:
-                        error = await resp.text()
-                        logger.warning(f"Supabase POST failed ({resp.status}): {error}")
+                        logger.error(f"Supabase Error: {resp.status} - {await resp.text()}")
                         return False
         except Exception as e:
-            logger.warning(f"Error sending to Supabase: {e}")
+            logger.error(f"Connection Error: {e}")
             return False
-    
-    def listen(self):
-        try:
-            logger.info("🎯 Listening for voice commands...")
-            while self.running:
-                try:
-                    if not self.audio_process or not self.audio_process.stdout:
-                        logger.error("Audio process not running")
-                        time.sleep(1)
-                        continue
+
+    async def run(self):
+        logger.info("Starting Voice Recognition Loop...")
+        
+        # Initial LED Test
+        self.pixels.off()
+        time.sleep(0.5)
+        self.pixels.listen() # Set to Blue
+
+        # Audio Config
+        device_info = sd.query_devices(kind='input')
+        samplerate = int(device_info['default_samplerate'])
+        
+        # Start Stream
+        with sd.RawInputStream(samplerate=samplerate, blocksize=8000, dtype='int16',
+                               channels=1, callback=self._audio_callback):
+            rec = KaldiRecognizer(self.model, samplerate)
+            
+            while True:
+                data = self.q.get()
+                if rec.AcceptWaveform(data):
+                    result = json.loads(rec.Result())
+                    text = result.get("text", "")
                     
-                    data = self.audio_process.stdout.read(4096)
-                    if not data:
-                        logger.warning("No audio data received")
-                        time.sleep(0.1)
-                        continue
-                    
-                    if self.recognizer.AcceptWaveform(data):
-                        result = json.loads(self.recognizer.Result())
-                        if 'result' in result and result['result']:
-                            text = result['result'][0].get('conf', '')
-                            if text:
-                                logger.warning(f"\n{'='*60}")
-                                logger.warning(f"🎙️  COMMAND RECOGNIZED: {text.upper()}")
-                                logger.warning(f"{'='*60}\n")
-                                asyncio.run(self._send_to_supabase(text))
-                    
-                    time.sleep(0.01)
-                except Exception as e:
-                    logger.debug(f"Listen error: {e}")
-                    time.sleep(0.1)
-        except Exception as e:
-            logger.error(f"Fatal error: {e}")
-    
-    def cleanup(self):
-        try:
-            if self.audio_process:
-                self.audio_process.terminate()
-                try:
-                    self.audio_process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    self.audio_process.kill()
-        except Exception as e:
-            logger.warning(f"Cleanup error: {e}")
-    
-    def signal_handler(self, sig, frame):
-        logger.info(f"Signal {sig} received, shutting down...")
-        self.running = False
-    
-    def run(self):
-        logger.warning("="*60)
-        logger.warning("🎙️  EVVOS Voice Command Service (Supabase Real-time)")
-        logger.warning("="*60)
-        logger.info(f"Device: {self.device_id}")
-        logger.info(f"User: {self.user_id}")
-        logger.info(f"Supabase: {SUPABASE_URL}")
-        logger.warning("="*60 + "\n")
-        
-        signal.signal(signal.SIGTERM, self.signal_handler)
-        signal.signal(signal.SIGINT, self.signal_handler)
-        
-        if not self._setup_audio():
-            logger.error("Failed to setup audio")
-            return
-        
-        if not self._setup_vosk():
-            logger.error("Failed to setup Vosk")
-            return
-        
-        self.listen()
-        self.cleanup()
+                    if text:
+                        logger.info(f"Recognized: {text}")
+                        user_id = self._get_user_id()
+                        
+                        if user_id:
+                            # Success LED Animation
+                            self.pixels.success_mode()
+                            await self._send_command(user_id, text)
+                        else:
+                            logger.warning("No User ID found. Provisioning needed.")
+                            self.pixels.error_mode()
+                else:
+                    # Partial result - can be used for "thinking" animation if desired
+                    pass
 
 if __name__ == "__main__":
-    service = VoiceCommandService()
-    service.run()
-VOICE_COMMAND_EOF
+    try:
+        service = EVVOSVoiceService()
+        asyncio.run(service.run())
+    except KeyboardInterrupt:
+        print("\nStopping...")
+VOICE_CMD_EOF
 fi
 
 chmod +x /usr/local/bin/evvos-voice-command.py
