@@ -388,33 +388,6 @@ class PixelRing:
         if self.enabled:
             self.set_color(0, 0, 0, 0)
 
-    def breathe(self, r: int, g: int, b: int, duration: float = 2.0, steps: int = 20):
-        """
-        Create a breathing (pulsing) effect
-        duration: time for one full breath cycle (in/out)
-        steps: number of brightness levels in the pulse
-        """
-        if not self.enabled:
-            return
-        
-        try:
-            min_brightness = 3
-            max_brightness = 20
-            
-            # Fade in
-            for i in range(steps):
-                brightness = int(min_brightness + (max_brightness - min_brightness) * (i / steps))
-                self.set_color(r, g, b, brightness)
-                time.sleep(duration / (2 * steps))
-            
-            # Fade out
-            for i in range(steps, 0, -1):
-                brightness = int(min_brightness + (max_brightness - min_brightness) * (i / steps))
-                self.set_color(r, g, b, brightness)
-                time.sleep(duration / (2 * steps))
-        except Exception as e:
-            logger.debug(f"LED breathe error: {e}")
-
     def flash(self, r: int, g: int, b: int, times: int = 3, flash_duration: float = 0.15):
         """
         Flash a color multiple times
@@ -625,36 +598,31 @@ class VoiceRecognitionService:
         consecutive_silence = 0
         max_silence_frames = 5  # ~1 second of silence
         
-        # Breathing animation state (non-blocking, fast)
-        breathing_step = 0
-        breathing_max_steps = 3
-        breathing_direction = 1
-        min_brightness = 10
-        max_brightness = 15
-        audio_chunk_counter = 0  # Only update LED every N chunks
-        led_update_interval = 4  # Update LED only every 4 audio chunks (less interfering)
+        # Simple blink animation state (minimal overhead, no interference)
+        blink_counter = 0
+        blink_interval = 8  # Blink every 8 chunks (~2 seconds)
+        blink_state = True  # True = on, False = off
         
-        logger.info("Starting breathing cyan listening indicator...")
+        logger.info("Starting simple blink listening indicator...")
         
         try:
             while self.running:
                 try:
-                    # Read audio chunk from microphone FIRST (priority to voice detection)
+                    # Read audio chunk from microphone (PRIORITY - no LED overhead before this)
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
                     
-                    # Update LED breathing effect ONLY every N chunks (non-blocking, minimal interference)
-                    audio_chunk_counter += 1
-                    if audio_chunk_counter >= led_update_interval:
-                        audio_chunk_counter = 0
-                        brightness = int(min_brightness + (max_brightness - min_brightness) * (breathing_step / breathing_max_steps))
-                        self.pixels.set_color(*LED_COLORS["listening"], brightness=brightness)
+                    # Update LED blink effect (very minimal, happens rarely)
+                    blink_counter += 1
+                    if blink_counter >= blink_interval:
+                        blink_counter = 0
+                        blink_state = not blink_state  # Toggle on/off
                         
-                        # Update breathing animation state
-                        breathing_step += breathing_direction
-                        if breathing_step >= breathing_max_steps:
-                            breathing_direction = -1
-                        elif breathing_step <= 0:
-                            breathing_direction = 1
+                        if blink_state:
+                            # Blink ON (cyan listening indicator)
+                            self.pixels.set_color(*LED_COLORS["listening"], brightness=12)
+                        else:
+                            # Blink OFF (dim)
+                            self.pixels.set_color(*LED_COLORS["listening"], brightness=5)
                     
                     # Process audio with Vosk recognizer
                     if self.recognizer.AcceptWaveform(data):
