@@ -2096,10 +2096,9 @@ cache-size=1000
                             logger.error(f"[MONITOR] Error sending heartbeat: {e}")
                     else:
                         logger.debug("[MONITOR] No credentials available - skipping heartbeat")
-                            
             except Exception as e:
                 logger.error(f"[MONITOR] Unexpected error in connectivity monitor loop: {e}")
-                await asyncio.sleep(5)  # Wait before retrying to avoid rapid error loops
+                await asyncio.sleep(5)
 
     def _setup_button(self):
         """Initialize GPIO for ReSpeaker Button"""
@@ -2107,15 +2106,15 @@ cache-size=1000
             try:
                 GPIO.setmode(GPIO.BCM)
                 GPIO.setup(BUTTON_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-                logging.info(f"✓ ReSpeaker Button initialized on GPIO {BUTTON_GPIO}")
+                logger.info(f"✓ ReSpeaker Button initialized on GPIO {BUTTON_GPIO}")
             except Exception as e:
-                logging.error(f"Failed to setup button GPIO: {e}")
+                logger.error(f"Failed to setup button GPIO: {e}")
 
     async def _monitor_button(self):
         """Monitor button for 5-second hold to factory reset"""
         if not GPIO: return
 
-        logging.info("[BUTTON] Starting button monitor task...")
+        logger.info("[BUTTON] Starting button monitor task...")
         press_start = None
 
         while True:
@@ -2125,27 +2124,34 @@ cache-size=1000
                     if press_start is None:
                         press_start = time.time()
                     
-                    if (time.time() - press_start_time) > 5.0:
-                        logger.warning("Triggering Factory Reset...")
+                    if (time.time() - press_start) > 5.0:
+                        logger.warning("[BUTTON] ========== FACTORY RESET TRIGGERED ==========")
                         await self._perform_factory_reset()
-                        press_start_time = None
-                        await asyncio.sleep(10) # Give it time to die
+                        press_start = None
+                        await asyncio.sleep(10)  # Give it time to restart
                 else:
                     press_start = None
                 
                 await asyncio.sleep(0.1)
             except Exception as e:
-                logging.error(f"Button error: {e}")
+                logger.error(f"[BUTTON] Button monitor error: {e}")
                 await asyncio.sleep(1)
 
     async def _perform_factory_reset(self):
-        """Wipe credentials and restart services"""
-        cmd = "sudo rm -f /etc/evvos/device_credentials.json /tmp/evvos_ble_state.json && sudo systemctl restart evvos-provisioning evvos-voice-command"
+        """Wipe credentials and restart both provisioning and voice command services"""
         try:
-            logging.info("Executing Factory Reset...")
-            subprocess.run(cmd, shell=True, check=False)
+            logger.warning("[BUTTON] Deleting credentials...")
+            subprocess.run(["sudo", "rm", "-f", "/etc/evvos/device_credentials.json", "/tmp/evvos_ble_state.json"], check=False)
+            
+            logger.warning("[BUTTON] Restarting provisioning service...")
+            subprocess.run(["sudo", "systemctl", "restart", "evvos-provisioning"], check=False)
+            
+            logger.warning("[BUTTON] Stopping voice command service...")
+            subprocess.run(["sudo", "systemctl", "stop", "evvos-voice-command"], check=False)
+            
+            logger.warning("[BUTTON] ========== FACTORY RESET COMPLETE ==========")
         except Exception as e:
-            logging.error(f"Reset failed: {e}")
+            logger.error(f"[BUTTON] Reset failed: {e}")
 
     async def run(self):
         asyncio.create_task(self._monitor_button())
@@ -2185,28 +2191,7 @@ async def main():
     provisioner = EVVOSWiFiProvisioner()
     await provisioner.run()
 
-def _setup_button(self):
-        """Initialize GPIO for ReSpeaker Button"""
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(BUTTON_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    async def _monitor_button(self):
-        """Check for 5-second hold to reset"""
-        press_start = None
-        while True:
-            if GPIO.input(BUTTON_GPIO) == False: # Button pressed
-                if press_start is None: press_start = time.time()
-                if (time.time() - press_start) > 5.0:
-                    await self._perform_factory_reset()
-                    press_start = None
-            else:
-                press_start = None
-            await asyncio.sleep(0.1)
-
-    async def _perform_factory_reset(self):
-        """Wipe credentials and restart both services"""
-        cmd = "sudo rm -f /etc/evvos/device_credentials.json /tmp/evvos_ble_state.json && sudo systemctl restart evvos-provisioning evvos-voice-command"
-        subprocess.run(cmd, shell=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
