@@ -627,29 +627,34 @@ class VoiceRecognitionService:
         
         # Breathing animation state (non-blocking, fast)
         breathing_step = 0
-        breathing_max_steps = 5  # Fewer steps = faster breathing cycle
-        breathing_direction = 1  # 1 for fade in, -1 for fade out
-        min_brightness = 3
-        max_brightness = 20
+        breathing_max_steps = 3
+        breathing_direction = 1
+        min_brightness = 10
+        max_brightness = 15
+        audio_chunk_counter = 0  # Only update LED every N chunks
+        led_update_interval = 4  # Update LED only every 4 audio chunks (less interfering)
         
         logger.info("Starting breathing cyan listening indicator...")
         
         try:
             while self.running:
                 try:
-                    # Update LED breathing effect (non-blocking, one step at a time)
-                    brightness = int(min_brightness + (max_brightness - min_brightness) * (breathing_step / breathing_max_steps))
-                    self.pixels.set_color(*LED_COLORS["listening"], brightness=brightness)
-                    
-                    # Update breathing animation state
-                    breathing_step += breathing_direction
-                    if breathing_step >= breathing_max_steps:
-                        breathing_direction = -1
-                    elif breathing_step <= 0:
-                        breathing_direction = 1
-                    
-                    # Read audio chunk from microphone
+                    # Read audio chunk from microphone FIRST (priority to voice detection)
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
+                    
+                    # Update LED breathing effect ONLY every N chunks (non-blocking, minimal interference)
+                    audio_chunk_counter += 1
+                    if audio_chunk_counter >= led_update_interval:
+                        audio_chunk_counter = 0
+                        brightness = int(min_brightness + (max_brightness - min_brightness) * (breathing_step / breathing_max_steps))
+                        self.pixels.set_color(*LED_COLORS["listening"], brightness=brightness)
+                        
+                        # Update breathing animation state
+                        breathing_step += breathing_direction
+                        if breathing_step >= breathing_max_steps:
+                            breathing_direction = -1
+                        elif breathing_step <= 0:
+                            breathing_direction = 1
                     
                     # Process audio with Vosk recognizer
                     if self.recognizer.AcceptWaveform(data):
