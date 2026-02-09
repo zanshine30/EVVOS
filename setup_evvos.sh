@@ -129,7 +129,7 @@ timeout = 600
 connect_timeout = 60
 retries = 5
 wait = 2
-WETGCONFIG
+WGETCONFIG
 echo "✓ Wget configured with 10min timeout, 60s connect timeout, 5 retries"
 
 # Configure curl defaults
