@@ -33,7 +33,25 @@ apt-get install -y \
   net-tools
 
 echo ""
-echo "📁 Step 2: Create Application Directory Structure"
+echo "📁 Step 2: Configure GPIO Permissions"
+echo "====================================="
+# Add gpio group and configure permissions for ReSpeaker button (GPIO 17)
+groupadd -f gpio 2>/dev/null || true
+usermod -a -G gpio root 2>/dev/null || true
+
+# Set up GPIO permissions in udev rules
+cat > /etc/udev/rules.d/99-gpio.rules << 'UDEV_RULES'
+SUBSYSTEM=="gpio", MODE="0660", GROUP="gpio"
+SUBSYSTEM=="gpio*", PROGRAM="/bin/sh -c 'chown -R root:gpio /sys/class/gpio && chmod -R 770 /sys/class/gpio; chown -R root:gpio /sys/devices/virtual/gpio && chmod -R 770 /sys/devices/virtual/gpio'"
+UDEV_RULES
+
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger 2>/dev/null || true
+
+echo "✓ GPIO permissions configured for ReSpeaker button"
+
+echo ""
+echo "📁 Step 3: Create Application Directory Structure"
 echo "==================================================="
 mkdir -p /opt/evvos
 mkdir -p /etc/evvos
@@ -41,7 +59,7 @@ mkdir -p /var/log/evvos
 mkdir -p /tmp
 
 echo ""
-echo "🐍 Step 3: Create Virtual Environment & Install Dependencies"
+echo "🐍 Step 4: Create Virtual Environment & Install Dependencies"
 echo "=============================================================="
 # Create virtual environment in /opt/evvos
 # We use --system-site-packages to ensure access to system libs if needed
@@ -56,7 +74,7 @@ echo "✓ Virtual environment created at /opt/evvos/venv"
 echo "✓ Python packages installed"
 
 echo ""
-echo "📄 Step 4: Deploy Provisioning Script"
+echo "📄 Step 5: Deploy Provisioning Script"
 echo "======================================"
 
 # Create the provisioning script with the complete application
@@ -1868,7 +1886,7 @@ chmod +x /usr/local/bin/evvos-provisioning
 echo "✓ Provisioning script deployed (updated with latest logic)"
 
 echo ""
-echo "📋 Step 5: Create Systemd Service"
+echo "📋 Step 6: Create Systemd Service"
 echo "=================================="
 cat > /etc/systemd/system/evvos-provisioning.service << 'SERVICE_FILE'
 [Unit]
@@ -1895,7 +1913,7 @@ chmod 644 /etc/systemd/system/evvos-provisioning.service
 echo "✓ Systemd service created"
 
 echo ""
-echo "🔧 Step 6: Enable and Start Service"
+echo "🔧 Step 7: Enable and Start Service"
 echo "===================================="
 systemctl daemon-reload
 systemctl enable evvos-provisioning
