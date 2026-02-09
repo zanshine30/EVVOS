@@ -273,18 +273,17 @@ except ImportError:
 # Voice recognition settings
 VOSK_MODEL_PATH = "/opt/evvos/vosk_model/current"
 SAMPLE_RATE = 16000
-AUDIO_CHUNK_SIZE = 4000
+AUDIO_CHUNK_SIZE = 2048  # Reduced from 4000 for faster recognition (0.128s per chunk vs 0.25s)
 
 # EVVOS command list (8 commands)
 RECOGNIZED_COMMANDS = [
     "start recording",
     "stop recording",
     "emergency backup",
-    "backup backup backup",
     "mark incident",
     "snapshot",
     "confirm",
-    "cancel"
+    "cancel",
 ]
 
 # LED configuration (ReSpeaker APA102)
@@ -451,8 +450,7 @@ class VoiceRecognitionService:
         command_patterns = {
             "start recording": ["start", "recording"],
             "stop recording": ["stop", "recording"],
-            "emergency backup": ["emergency", "backup"],
-            "backup backup backup": ["backup"],  # Check for "backup" word
+            "emergency backup": ["help", "alert", "emergency", "backup"],  # Multiple triggers for Emergency Backup
             "mark incident": ["mark", "incident"],
             "snapshot": ["snapshot"],
             "confirm": ["confirm"],
@@ -461,11 +459,10 @@ class VoiceRecognitionService:
         
         # Priority ordering: longer/more specific commands first
         priority_order = [
-            "emergency backup",
             "start recording",
             "stop recording",
             "mark incident",
-            "backup backup backup",
+            "emergency backup",
             "snapshot",
             "confirm",
             "cancel",
@@ -474,12 +471,13 @@ class VoiceRecognitionService:
         for cmd in priority_order:
             keywords = command_patterns[cmd]
             
-            # Special case: "backup backup backup" - check for multiple "backup" words
-            if cmd == "backup backup backup":
-                backup_count = words.count("backup")
-                if backup_count >= 2:  # At least 2 "backup" words
-                    logger.debug(f"Command match: '{cmd}' (found {backup_count} 'backup' words in: '{text}')")
-                    return cmd
+            # Special case: "emergency backup" - check for ANY of the trigger words
+            if cmd == "emergency backup":
+                # Check if any trigger word is present
+                for keyword in keywords:
+                    if keyword in text:
+                        logger.debug(f"Command match: '{cmd}' (trigger word '{keyword}' in: '{text}')")
+                        return cmd
             
             # Check if all keywords are present in the text (in order)
             elif all(keyword in text for keyword in keywords):
@@ -598,37 +596,16 @@ class VoiceRecognitionService:
         consecutive_silence = 0
         max_silence_frames = 5  # ~1 second of silence
         
-        # Simple blink animation state (minimal overhead, no interference)
-        blink_counter = 0
-        blink_state = True  # True = on, False = off
-        blink_on_interval = 4   # ON for 1 second (4 chunks × 0.25s)
-        blink_off_interval = 8  # OFF for 2 seconds (8 chunks × 0.25s)
+        # Set LED to listening state once (no blinking overhead during listening)
+        self.pixels.set_color(*LED_COLORS["listening"], brightness=1)
         
-        logger.info("Starting simple blink listening indicator (1s on, 2s off)...")
+        logger.info("Listening indicator on, ready for voice commands...")
         
         try:
             while self.running:
                 try:
-                    # Read audio chunk from microphone (PRIORITY - no LED overhead before this)
+                    # Read audio chunk from microphone (CRITICAL PATH - minimal overhead)
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
-                    
-                    # Update LED blink effect (asymmetric: 1s on, 2s off)
-                    blink_counter += 1
-                    
-                    if blink_state:
-                        # Currently ON - check if time to turn OFF
-                        if blink_counter >= blink_on_interval:
-                            blink_counter = 0
-                            blink_state = False
-                            # Turn LED completely OFF
-                            self.pixels.set_color(0, 0, 0, 0)
-                    else:
-                        # Currently OFF - check if time to turn ON
-                        if blink_counter >= blink_off_interval:
-                            blink_counter = 0
-                            blink_state = True
-                            # Turn LED ON (cyan listening indicator)
-                            self.pixels.set_color(*LED_COLORS["listening"], brightness=12)
                     
                     # Process audio with Vosk recognizer
                     if self.recognizer.AcceptWaveform(data):
@@ -736,7 +713,7 @@ class VoiceRecognitionService:
             sys.exit(1)
         
         # Show startup indicator
-        self.pixels.set_color(0, 0, 255, brightness=8)  # Blue = starting
+        self.pixels.set_color(0, 0, 255, brightness=2)  # Blue = starting
         time.sleep(1)
         
         # Main recognition loop
