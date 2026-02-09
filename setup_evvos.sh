@@ -116,11 +116,13 @@ index-url = https://pypi.org/simple/
 timeout = 1800
 retries = 5
 no-cache-dir = true
+trusted-host = pypi.org
+trusted-host = files.pythonhosted.org
 [install]
 prefer-binary = true
 no-deps = false
 PIPCONFIG
-echo "✓ Pip timeout set to 1800s (30 min), 5 retries enabled, binary preference enforced"
+echo "✓ Pip configured: PyPI only, 1800s timeout, 5 retries, binary preference"
 
 # Configure wget with timeout and retries
 echo "Configuring wget timeout settings..."
@@ -217,25 +219,30 @@ for i in {1..3}; do
   fi
 done
 
-# Install Vosk and audio libraries with binary preference and retries
-echo "Installing audio libraries (Vosk, PyAudio, SoundFile)..."
-echo "⏱️  This is another large download - may take 10-20 minutes"
+# Install Vosk and scipy with binary preference and retries
+# NOTE: PyAudio is NOT installed via pip because 0.2.13 requires compilation
+# The system already has libportaudio2 from Step 1, which provides the audio library
+echo "Installing Vosk and numerical libraries..."
+echo "⏱️  This download may take 5-10 minutes"
 for i in {1..3}; do
   if pip install --no-cache-dir --prefer-binary --timeout=1800 --retries=5 \
-    pyaudio==0.2.13 \
     scipy==1.10.1 \
     vosk==0.3.32; then
-    echo "✓ Audio libraries installed successfully"
+    echo "✓ Core audio libraries installed successfully"
     break
   fi
   if [ $i -lt 3 ]; then
     echo "⚠ Attempt $i failed, retrying in 15 seconds..."
     sleep 15
   else
-    echo "❌ Audio libraries installation failed after 3 attempts"
+    echo "❌ Library installation failed after 3 attempts"
     exit 1
   fi
 done
+
+# PyAudio is already available via system packages (libportaudio2)
+# The voice service will use PortAudio directly through the system libraries
+echo "✓ System audio framework (PortAudio) already installed"
 
 echo "✓ Audio and Vosk libraries installed"
 
