@@ -440,15 +440,16 @@ class VoiceRecognitionService:
     def match_voice_command(self, text: str, confidence: float = 0.0) -> str:
         """
         Intelligently match recognized text to a voice command
-        Handles variations with confidence threshold to reduce false positives
+        Handles variations with optional confidence threshold
         Returns: command name if matched, None otherwise
         """
-        # Minimum confidence threshold - lower = more sensitive, higher = more accurate
-        MIN_CONFIDENCE = 0.5
+        # For Vosk small model: confidence is often 0, so use very low threshold
+        # Only reject if confidence is explicitly negative (error state)
+        MIN_CONFIDENCE = -0.1  # Accept all results from Vosk (it returns 0 by default)
         
-        # If confidence too low, reject immediately
+        # If confidence is invalid, log it but continue
         if confidence < MIN_CONFIDENCE:
-            logger.debug(f"Confidence too low ({confidence:.2f} < {MIN_CONFIDENCE}): '{text}'")
+            logger.debug(f"Invalid confidence ({confidence:.2f}): '{text}'")
             return None
         
         text = text.lower().strip()
@@ -484,16 +485,17 @@ class VoiceRecognitionService:
                 for keyword in keywords:
                     # Exact word match (not substring) to avoid false positives
                     if keyword in words:  # Check words list, not text string
-                        logger.debug(f"✓ Match: '{cmd}' (confidence: {confidence:.2f}, trigger: '{keyword}' in words: {words})")
+                        logger.info(f"✓ Command detected: '{cmd}' (trigger: '{keyword}' | full text: '{text}')")
                         return cmd
             
             # For multi-word commands: check if ALL keywords are present
             elif all(keyword in words for keyword in keywords):  # Check words list for better accuracy
-                logger.debug(f"✓ Match: '{cmd}' (confidence: {confidence:.2f}, keywords: {keywords} in words: {words})")
+                logger.info(f"✓ Command detected: '{cmd}' (keywords: {keywords} | full text: '{text}')")
                 return cmd
         
-        # No match found
-        logger.debug(f"✗ No match (confidence: {confidence:.2f}): '{text}'")
+        # No match found - only log if text seems like an attempt
+        if len(text) > 2:
+            logger.debug(f"Text recognized but no match: '{text}' (words: {words})")
         return None
 
     def get_manila_time(self) -> str:
@@ -607,7 +609,7 @@ class VoiceRecognitionService:
         max_silence_frames = 5  # ~1 second of silence
         
         # Set LED to listening state once (solid cyan, no blinking overhead during listening)
-        self.pixels.set_color(*LED_COLORS["listening"], brightness=5)
+        self.pixels.set_color(*LED_COLORS["listening"], brightness=15)
         
         logger.info("Listening indicator on, ready for voice commands...")
         
