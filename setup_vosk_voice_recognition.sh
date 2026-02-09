@@ -90,11 +90,14 @@ apt-get install -y \
     python3-pip \
     python3-dev \
     portaudio19-dev \
+    libasound2 \
     libasound2-dev \
     libatlas-base-dev \
     libffi-dev \
     libssl-dev \
     libopenblas-dev \
+    libsndfile1 \
+    libjack-dev \
     python3-numpy \
     spidev \
     git \
@@ -133,21 +136,23 @@ log_info "Upgrading pip, setuptools, wheel..."
 pip install --upgrade pip setuptools wheel
 
 log_info "Installing Vosk speech recognition library..."
-if pip install vosk; then
+if pip install --no-cache-dir vosk; then
     log_success "Vosk installed"
 else
     log_warning "Vosk installation reported warnings (may still work)"
 fi
 
 log_info "Installing PyAudio for microphone access..."
-if pip install pyaudio; then
+if pip install --no-cache-dir pyaudio; then
     log_success "PyAudio installed"
 else
-    log_error "PyAudio installation failed. Microphone access may not work."
+    log_error "PyAudio installation failed. Attempting rebuild..."
+    log_info "Rebuilding PyAudio with verbose output..."
+    pip install --no-cache-dir --verbose pyaudio 2>&1 | tail -20 || log_warning "PyAudio rebuild reported issues"
 fi
 
 log_info "Installing additional audio and GPIO libraries..."
-pip install \
+pip install --no-cache-dir \
     gpiozero \
     RPi.GPIO \
     spidev \
@@ -155,6 +160,24 @@ pip install \
     requests
 
 log_success "All Python packages installed"
+
+# Verify PyAudio installation
+log_info "Verifying PyAudio installation..."
+python3 << 'PYAUDIO_VERIFICATION'
+try:
+    import pyaudio
+    p = pyaudio.PyAudio()
+    device_count = p.get_device_count()
+    print(f"[PyAudio] ✓ Working correctly")
+    print(f"[PyAudio] ✓ Found {device_count} audio devices")
+    p.terminate()
+except ImportError as e:
+    print(f"[PyAudio] ✗ Import failed: {e}")
+    print("[PyAudio] Attempting recovery...")
+    exit(1)
+except Exception as e:
+    print(f"[PyAudio] ⚠ Warning: {e}")
+PYAUDIO_VERIFICATION
 
 # ============================================================================
 # STEP 4: DOWNLOAD VOSK SPEECH RECOGNITION MODEL
@@ -270,9 +293,16 @@ LED_COUNT = 3  # ReSpeaker has 3 RGB LEDs
 # LED Colors (RGB)
 LED_COLORS = {
     "off": (0, 0, 0),
-    "listening": (0, 100, 100),  # Cyan - listening for voice
+    "listening": (0, 150, 150),  # Cyan - listening for voice
     "recognized": (0, 255, 0),    # Green - command recognized
     "error": (255, 0, 0),         # Red - error occurred
+}
+
+# LED Brightness levels
+LED_BRIGHTNESS = {
+    "listening": 8,      # Dim cyan to indicate ready
+    "recognized": 20,    # Bright green flash for command detection
+    "error": 15,         # Bright red for errors
 }
 
 # Logging configuration
@@ -494,7 +524,7 @@ class VoiceRecognitionService:
         logger.info("=" * 70)
         
         # Show listening indicator
-        self.pixels.set_color(*LED_COLORS["listening"], brightness=5)
+        self.pixels.set_color(*LED_COLORS["listening"], brightness=LED_BRIGHTNESS["listening"])
         
         self.running = True
         consecutive_silence = 0
@@ -530,7 +560,7 @@ class VoiceRecognitionService:
                         
                         # Reset listening indicator after brief recognition
                         time.sleep(0.2)
-                        self.pixels.set_color(*LED_COLORS["listening"], brightness=5)
+                        self.pixels.set_color(*LED_COLORS["listening"], brightness=LED_BRIGHTNESS["listening"])
                     else:
                         # Partial result
                         partial = json.loads(self.recognizer.PartialResult())
@@ -555,8 +585,8 @@ class VoiceRecognitionService:
     def _on_command_detected(self, command: str, full_text: str, confidence: float):
         """Handler for detected voice command"""
         
-        # Flash green LED
-        self.pixels.set_color(*LED_COLORS["recognized"], brightness=15)
+        # Flash green LED (command recognized)
+        self.pixels.set_color(*LED_COLORS["recognized"], brightness=LED_BRIGHTNESS["recognized"])
         
         # Log command detection
         timestamp = self.get_manila_time()
@@ -581,6 +611,12 @@ class VoiceRecognitionService:
         # TODO: Send command to mobile app or internal service
         # Example: POST to local API, write to pipe, etc.
         logger.info(f"Command '{command}' ready for processing")
+        
+        # Keep green flash visible for 0.7 seconds
+        time.sleep(0.7)
+        
+        # Reset LED back to listening state (cyan)
+        self.pixels.set_color(*LED_COLORS["listening"], brightness=LED_BRIGHTNESS["listening"])
 
     def shutdown(self):
         """Cleanup resources"""
