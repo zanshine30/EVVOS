@@ -613,9 +613,9 @@ class VoiceRecognitionService:
         self.active_listening = False
         self.active_listening_start_time = None
         
-        # Set initial LED state (dim cyan = idle, waiting for wake word)
-        self.pixels.set_color(*LED_COLORS["listening"], brightness=8)
-        logger.info("LED: Dim cyan (idle)")
+        # Set initial LED state (off = idle, waiting for wake word)
+        self.pixels.set_color(*LED_COLORS["listening"], brightness=0)
+        logger.info("LED: Off (idle - waiting for wake word)")
         
         try:
             while self.running:
@@ -629,9 +629,9 @@ class VoiceRecognitionService:
                         if elapsed > self.active_listening_timeout:
                             logger.info("⏱️  Active listening timeout (5 sec) - returning to idle")
                             self.active_listening = False
-                            # Switch back to idle LED
-                            self.pixels.set_color(*LED_COLORS["listening"], brightness=8)
-                            logger.info("LED: Dim cyan (idle)")
+                            # Switch back to idle LED (off)
+                            self.pixels.set_color(*LED_COLORS["listening"], brightness=0)
+                            logger.info("LED: Off (idle)")
                     
                     # Process audio with Vosk recognizer
                     if self.recognizer.AcceptWaveform(data):
@@ -649,9 +649,9 @@ class VoiceRecognitionService:
                                     # Wake word detected! Enter active listening mode
                                     self.active_listening = True
                                     self.active_listening_start_time = time.time()
-                                    # Switch to bright cyan = active listening
-                                    self.pixels.set_color(*LED_COLORS["listening"], brightness=15)
-                                    logger.info("LED: Bright cyan (active listening - 5 seconds)")
+                                    # Switch to solid bright cyan = active listening
+                                    self.pixels.set_color(*LED_COLORS["listening"], brightness=20)
+                                    logger.info("LED: Solid bright cyan (active listening - 5 seconds)")
                             
                             # ACTIVE MODE: Listen for commands
                             else:
@@ -915,9 +915,9 @@ echo "  Example: \"${CYAN}EVVOS${NC}\" → wait for beep → \"${GREEN}snapshot$
 echo ""
 
 log_info "LED Feedback States:"
-echo "  • ${CYAN}Dim cyan${NC}    = IDLE (waiting for 'EVVOS' wake word)"
-echo "  • ${CYAN}Bright cyan${NC} = ACTIVE (5 seconds to say command)"
-echo "  • ${GREEN}Green flashes${NC} = Command detected successfully"
+echo "  • ${CYAN}Off${NC}           = IDLE (waiting for 'EVVOS' wake word)"
+echo "  • ${CYAN}Bright cyan${NC}   = ACTIVE (5 seconds to say command)"
+echo "  • ${GREEN}Green flashes${NC}  = Command detected successfully"
 echo ""
 
 log_info "IMPORTANT: Testing the Wake Word System:"
@@ -926,7 +926,7 @@ echo "  ${CYAN}sudo journalctl -u evvos-voice -f${NC}"
 echo ""
 echo "  1. Say: \"${CYAN}EVVOS${NC}\""
 echo "     Look for: ${GREEN}🎙️ WAKE WORD DETECTED${NC}"
-echo "     LED changes to bright cyan"
+echo "     LED lights up solid bright cyan"
 echo ""
 echo "  2. You have 5 seconds to say a command:"
 echo "     Say: \"${GREEN}snapshot${NC}\""
@@ -934,7 +934,7 @@ echo "     Look for: ${GREEN}✓ Command detected: 'snapshot'${NC}"
 echo "     LED flashes green 3 times"
 echo ""
 echo "  3. If you don't say a command in 5 seconds:"
-echo "     LED returns to dim cyan (idle)"
+echo "     LED turns off (idle)"
 echo "     Say \"${CYAN}EVVOS${NC}\" again to restart"
 echo ""
 
@@ -985,18 +985,21 @@ echo "  A: Check SPI is enabled (dtparam=spi=on in /boot/firmware/config.txt)"
 echo ""
 
 log_info "Next Steps:"
-echo "  1. Test the wake word system:"
+echo "  1. Watch the LED behavior:"
 echo "     ${CYAN}sudo journalctl -u evvos-voice -f${NC}"
 echo ""
-echo "  2. Say: \"${CYAN}EVVOS${NC}\" (should see 🎙️ WAKE_WORD_DETECTED)"
+echo "  2. Say the wake word loudly and clearly:"
+echo "     \"${CYAN}EVVOS${NC}\" → LED should light up solid bright cyan"
 echo ""
 echo "  3. Within 5 seconds, say a command:"
 echo "     \"${GREEN}snapshot${NC}\" or \"${GREEN}help${NC}\" or \"${GREEN}start recording${NC}\""
 echo ""
-echo "  4. If command doesn't trigger:"
-echo "     • Check microphone gain: ${CYAN}amixer -c seeed2micvoicec contents${NC}"
-echo "     • Speak clearly and distinctly"
-echo "     • Wait for bright cyan LED before saying command"
+echo "  4. Watch for success:"
+echo "     LED flashes green 3 times = command detected"
+echo "     LED turns off = command executed, return to idle"
+echo ""
+echo "  5. To activate again:"
+echo "     Say \"${CYAN}EVVOS${NC}\" once more (LED turns on = active)"
 echo ""
 
 log_info "Integration:"
