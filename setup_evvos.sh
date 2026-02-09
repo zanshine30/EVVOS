@@ -2120,13 +2120,13 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone, timedelta
 import aiohttp
 
 try:
-    import pyaudio
     from vosk import Model, KaldiRecognizer
 except ImportError as e:
     print(f"Error: Missing library: {e}")
@@ -2153,8 +2153,7 @@ logger = logging.getLogger("EVVOS_VoiceCommand")
 class VoiceCommandService:
     def __init__(self):
         self.running = True
-        self.audio_stream = None
-        self.pa = None
+        self.audio_process = None
         self.recognizer = None
         self.commands = self._load_grammar()
         self.device_id = self._load_device_id()
@@ -2190,16 +2189,20 @@ class VoiceCommandService:
     
     def _setup_audio(self):
         try:
-            logger.info("🎤 Initializing audio device...")
-            self.pa = pyaudio.PyAudio()
-            self.audio_stream = self.pa.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=16000,
-                input=True,
-                input_device_index=0,
-                frames_per_buffer=4096,
-                exception_on_overflow=False
+            logger.info("🎤 Initializing audio device with ALSA...")
+            self.audio_process = subprocess.Popen(
+                [
+                    "arecord",
+                    "-r", "16000",      # Sample rate
+                    "-c", "1",          # Mono
+                    "-f", "S16_LE",     # 16-bit signed little-endian
+                    "-t", "raw",        # Raw audio
+                    "-q",               # Quiet
+                    "-",                # Output to stdout
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
             )
             logger.info("✓ Audio device initialized")
             return True
@@ -2266,7 +2269,16 @@ class VoiceCommandService:
             logger.info("🎯 Listening for voice commands...")
             while self.running:
                 try:
-                    data = self.audio_stream.read(4096, exception_on_overflow=False)
+                    if not self.audio_process or not self.audio_process.stdout:
+                        logger.error("Audio process not running")
+                        time.sleep(1)
+                        continue
+                    
+                    data = self.audio_process.stdout.read(4096)
+                    if not data:
+                        logger.warning("No audio data received")
+                        time.sleep(0.1)
+                        continue
                     
                     if self.recognizer.AcceptWaveform(data):
                         result = json.loads(self.recognizer.Result())
@@ -2287,11 +2299,12 @@ class VoiceCommandService:
     
     def cleanup(self):
         try:
-            if self.audio_stream:
-                self.audio_stream.stop_stream()
-                self.audio_stream.close()
-            if self.pa:
-                self.pa.terminate()
+            if self.audio_process:
+                self.audio_process.terminate()
+                try:
+                    self.audio_process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    self.audio_process.kill()
         except Exception as e:
             logger.warning(f"Cleanup error: {e}")
     
