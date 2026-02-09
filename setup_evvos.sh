@@ -116,8 +116,6 @@ index-url = https://pypi.org/simple/
 timeout = 1800
 retries = 5
 no-cache-dir = true
-trusted-host = pypi.org
-trusted-host = files.pythonhosted.org
 [install]
 prefer-binary = true
 no-deps = false
