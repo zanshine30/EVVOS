@@ -5,7 +5,7 @@
 
 set -e  # Exit on error
 
-echo "🔧 EVVOS WiFi Provisioning System - Fresh Setup (NEW)"
+echo "🔧 EVVOS WiFi Provisioning System - Fresh Setup"
 echo "=================================================="
 
 # Check if running as root
@@ -15,10 +15,43 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo ""
-echo "📦 Step 1: System Update & Package Installation (with Timeout Protection)"
-echo "========================================================================="
+echo "📦 Step 1: System Update & Package Installation (with Lock Handling)"
+echo "====================================================================="
 
-# Configure APT with timeout settings to prevent hangs
+# CRITICAL: Release dpkg lock from any blocking processes
+echo "Checking for blocking apt/dpkg processes..."
+for i in {1..30}; do
+  if ! lsof /var/lib/apt/lists/lock 2>/dev/null | grep -q .; then
+    echo "✓ No blocking apt processes detected"
+    break
+  fi
+  
+  if [ $i -eq 1 ]; then
+    echo "⏳ Waiting for dpkg lock to be released (apt-get is running)..."
+  fi
+  
+  if [ $i -eq 15 ]; then
+    echo "⚠️  Still waiting... Attempting to stop unattended-upgrades..."
+    systemctl stop unattended-upgrades 2>/dev/null || true
+    systemctl kill -s SIGKILL apt-get 2>/dev/null || true
+    killall -9 apt-get 2>/dev/null || true
+    sleep 5
+  fi
+  
+  if [ $i -lt 30 ]; then
+    sleep 2
+  else
+    echo "❌ Could not acquire dpkg lock after 60 seconds"
+    echo "   Try running: sudo killall -9 apt-get && sudo dpkg --configure -a"
+    exit 1
+  fi
+done
+
+# Force-configure any partially installed packages
+echo "Ensuring dpkg database is consistent..."
+dpkg --configure -a || true
+
+# Configure APT with timeout settings
 echo "Configuring APT timeout settings..."
 mkdir -p /etc/apt/apt.conf.d
 cat > /etc/apt/apt.conf.d/99-evvos-timeout << 'APTCONFIG'
@@ -27,14 +60,14 @@ APT::ForceIPv4 "true";
 APT::Get::AllowUnauthenticated "true";
 APT::Install-Recommends "false";
 APT::Install-Suggests "false";
-DPkg::Lock::Timeout "600";
+DPkg::Lock::Timeout "1200";
 APT::Acquire::Retries "5";
 APT::Acquire::http::Timeout "60";
 APT::Acquire::https::Timeout "60";
 APT::Acquire::ftp::Timeout "60";
 APT::Acquire::Timeout "60";
 APTCONFIG
-echo "✓ APT configured with 60s timeout, 5 retry attempts"
+echo "✓ APT configured with timeout protection (lock wait: 20min)"
 
 # Update package lists with retries
 echo "Updating package lists..."
@@ -56,38 +89,50 @@ done
 # apt-get upgrade -y  # Optional: Uncomment if you want a full system upgrade (takes longer)
 
 echo "📥 Installing required system packages..."
-echo "⏱️  (Large packages may take 5-10 minutes - be patient)"
-# Allow extended timeout for package installation
-APT_GET_TIMEOUT="600"  # 10 minutes
-timeout $APT_GET_TIMEOUT apt-get install -y --no-install-recommends --no-install-suggests \
-  python3-pip \
-  python3-dev \
-  hostapd \
-  dnsmasq \
-  curl \
-  wget \
-  git \
-  nano \
-  net-tools \
-  alsa-utils \
-  alsa-tools \
-  bc \
-  libasound2-plugins \
-  libasound2 \
-  libasound2-dev \
-  libportaudio2 \
-  libportaudiocpp0 \
-  portaudio19-dev \
-  pulseaudio \
-  i2c-tools \
-  libblas-dev \
-  liblapack-dev \
-  libopenblas-dev \
-  libffi-dev \
-  libssl-dev \
-  libjack-jackd2-0
+echo "⏱️  (Large packages may take 10-20 minutes - be patient)"
 
-echo "✓ Audio and ReSpeaker HAT system libraries installed"
+# Install packages with retry logic
+for attempt in {1..3}; do
+  echo "[Attempt $attempt/3] Installing packages..."
+  if timeout 1200 apt-get install -y --no-install-recommends --no-install-suggests \
+    python3-pip \
+    python3-dev \
+    hostapd \
+    dnsmasq \
+    curl \
+    wget \
+    git \
+    nano \
+    net-tools \
+    alsa-utils \
+    alsa-tools \
+    bc \
+    libasound2-plugins \
+    libasound2 \
+    libasound2-dev \
+    libportaudio2 \
+    libportaudiocpp0 \
+    portaudio19-dev \
+    pulseaudio \
+    i2c-tools \
+    libblas-dev \
+    liblapack-dev \
+    libopenblas-dev \
+    libffi-dev \
+    libssl-dev \
+    libjack-jackd2-0; then
+    echo "✓ Audio and ReSpeaker HAT system libraries installed"
+    break
+  else
+    if [ $attempt -lt 3 ]; then
+      echo "⚠️  Installation attempt $attempt failed, retrying in 15 seconds..."
+      sleep 15
+    else
+      echo "❌ Package installation failed after 3 attempts"
+      exit 1
+    fi
+  fi
+done
 
 echo ""
 echo "📁 Step 2: Create Application Directory Structure"
@@ -183,7 +228,10 @@ pip install --prefer-binary numpy vosk RPi.GPIO
 # 2. Compile & Install Overlay
 echo "🔧 Installing ReSpeaker v2.0 Device Tree Overlays..."
 # Ensure headers are installed for current kernel
-apt-get install -y raspberrypi-kernel-headers device-tree-compiler
+echo "Installing kernel headers and device tree compiler..."
+if ! timeout 1200 apt-get install -y raspberrypi-kernel-headers device-tree-compiler; then
+  echo "⚠️  Kernel headers install failed, but continuing (may already be installed)..."
+fi
 
 cd /opt/evvos
 if [ ! -d "seeed-linux-dtoverlays" ]; then
