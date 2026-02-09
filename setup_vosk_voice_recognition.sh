@@ -346,7 +346,7 @@ class PixelRing:
             self.enabled = False
 
     def set_color(self, r: int, g: int, b: int, brightness: int = 5):
-        """Set all LEDs to same color"""
+        """Set all LEDs to same color (non-blocking, fast)"""
         if not self.enabled:
             return
         
@@ -357,28 +357,29 @@ class PixelRing:
             logger.debug(f"LED set_color error: {e}")
 
     def show(self, data: List[List[int]]):
-        """Send LED frame data via SPI"""
+        """Send LED frame data via SPI (optimized for speed)"""
         if not self.enabled or not self.spi:
             return
         
         try:
-            # Start frame (4 bytes of 0x00)
-            self.spi.xfer2([0x00] * 4)
+            # Pre-build the complete frame to minimize SPI calls
+            frame_data = [0x00, 0x00, 0x00, 0x00]  # Start frame
             
-            # LED frames
+            # Add LED frames
             for led in data:
-                # Format: 0xE0 | brightness (5 bits) + B + G + R
                 brightness = led[3] if len(led) > 3 else 5
-                frame = [
+                frame_data.extend([
                     0xE0 | (brightness & 0x1F),
                     led[2],  # Blue
                     led[1],  # Green
                     led[0],  # Red
-                ]
-                self.spi.xfer2(frame)
+                ])
             
-            # End frame (4 bytes of 0xFF)
-            self.spi.xfer2([0xFF] * 4)
+            # Add end frame
+            frame_data.extend([0xFF, 0xFF, 0xFF, 0xFF])
+            
+            # Single SPI transfer (faster than multiple transfers)
+            self.spi.xfer2(frame_data)
         except Exception as e:
             logger.debug(f"LED show error: {e}")
 
@@ -463,6 +464,56 @@ class VoiceRecognitionService:
         logger.info("=" * 70)
         logger.info("EVVOS Voice Recognition Service Starting")
         logger.info("=" * 70)
+
+    def match_voice_command(self, text: str) -> str:
+        """
+        Intelligently match recognized text to a voice command
+        Handles variations, partial matches, and key phrases
+        Returns: command name if matched, None otherwise
+        """
+        text = text.lower().strip()
+        words = text.split()
+        
+        # Define command matching patterns (keywords and phrases)
+        command_patterns = {
+            "start recording": ["start", "recording"],
+            "stop recording": ["stop", "recording"],
+            "emergency backup": ["emergency", "backup"],
+            "backup backup backup": ["backup"],  # Check for "backup" word
+            "mark incident": ["mark", "incident"],
+            "snapshot": ["snapshot"],
+            "confirm": ["confirm"],
+            "cancel": ["cancel"],
+        }
+        
+        # Priority ordering: longer/more specific commands first
+        priority_order = [
+            "emergency backup",
+            "start recording",
+            "stop recording",
+            "mark incident",
+            "backup backup backup",
+            "snapshot",
+            "confirm",
+            "cancel",
+        ]
+        
+        for cmd in priority_order:
+            keywords = command_patterns[cmd]
+            
+            # Special case: "backup backup backup" - check for multiple "backup" words
+            if cmd == "backup backup backup":
+                backup_count = words.count("backup")
+                if backup_count >= 2:  # At least 2 "backup" words
+                    logger.debug(f"Command match: '{cmd}' (found {backup_count} 'backup' words in: '{text}')")
+                    return cmd
+            
+            # Check if all keywords are present in the text (in order)
+            elif all(keyword in text for keyword in keywords):
+                logger.debug(f"Command match: '{cmd}' (keywords {keywords} in: '{text}')")
+                return cmd
+        
+        return None
 
     def get_manila_time(self) -> str:
         """Get current time in Asia/Manila timezone"""
@@ -574,9 +625,9 @@ class VoiceRecognitionService:
         consecutive_silence = 0
         max_silence_frames = 5  # ~1 second of silence
         
-        # Breathing animation state (non-blocking)
+        # Breathing animation state (non-blocking, fast)
         breathing_step = 0
-        breathing_max_steps = 20
+        breathing_max_steps = 50  # More steps = smoother & faster animation
         breathing_direction = 1  # 1 for fade in, -1 for fade out
         min_brightness = 3
         max_brightness = 20
@@ -610,16 +661,12 @@ class VoiceRecognitionService:
                         if text:
                             consecutive_silence = 0
                             
-                            # Check if any command matches
-                            command_matched = False
-                            for cmd in RECOGNIZED_COMMANDS:
-                                if cmd.lower() in text:
-                                    # Command detected!
-                                    self._on_command_detected(cmd, text, confidence)
-                                    command_matched = True
-                                    break
-                            
-                            if not command_matched and len(text) > 2:
+                            # Use intelligent command matching
+                            matched_command = self.match_voice_command(text)
+                            if matched_command:
+                                # Command detected!
+                                self._on_command_detected(matched_command, text, confidence)
+                            elif len(text) > 2:
                                 logger.debug(f"No command matched in: '{text}' (confidence: {confidence})")
                     else:
                         # Partial result
