@@ -15,124 +15,22 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 echo ""
-echo "📦 Step 1: System Update & Package Installation (with Lock Handling)"
-echo "====================================================================="
-
-# CRITICAL: Release dpkg lock from any blocking processes
-echo "Checking for blocking apt/dpkg processes..."
-for i in {1..30}; do
-  if ! lsof /var/lib/apt/lists/lock 2>/dev/null | grep -q .; then
-    echo "✓ No blocking apt processes detected"
-    break
-  fi
-  
-  if [ $i -eq 1 ]; then
-    echo "⏳ Waiting for dpkg lock to be released (apt-get is running)..."
-  fi
-  
-  if [ $i -eq 15 ]; then
-    echo "⚠️  Still waiting... Attempting to stop unattended-upgrades..."
-    systemctl stop unattended-upgrades 2>/dev/null || true
-    systemctl kill -s SIGKILL apt-get 2>/dev/null || true
-    killall -9 apt-get 2>/dev/null || true
-    sleep 5
-  fi
-  
-  if [ $i -lt 30 ]; then
-    sleep 2
-  else
-    echo "❌ Could not acquire dpkg lock after 60 seconds"
-    echo "   Try running: sudo killall -9 apt-get && sudo dpkg --configure -a"
-    exit 1
-  fi
-done
-
-# Force-configure any partially installed packages
-echo "Ensuring dpkg database is consistent..."
-dpkg --configure -a || true
-
-# Configure APT with timeout settings
-echo "Configuring APT timeout settings..."
-mkdir -p /etc/apt/apt.conf.d
-cat > /etc/apt/apt.conf.d/99-evvos-timeout << 'APTCONFIG'
-// EVVOS Apt Configuration - Timeout Protection
-APT::ForceIPv4 "true";
-APT::Get::AllowUnauthenticated "true";
-APT::Install-Recommends "false";
-APT::Install-Suggests "false";
-DPkg::Lock::Timeout "1200";
-APT::Acquire::Retries "5";
-APT::Acquire::http::Timeout "60";
-APT::Acquire::https::Timeout "60";
-APT::Acquire::ftp::Timeout "60";
-APT::Acquire::Timeout "60";
-APTCONFIG
-echo "✓ APT configured with timeout protection (lock wait: 20min)"
-
-# Update package lists with retries
-echo "Updating package lists..."
-for i in {1..5}; do
-  echo "[Attempt $i/5] Running apt-get update..."
-  if apt-get update; then
-    echo "✓ apt-get update successful"
-    break
-  fi
-  if [ $i -lt 5 ]; then
-    echo "⚠ Attempt $i failed, retrying in 10 seconds..."
-    sleep 10
-  else
-    echo "❌ apt-get update failed after 5 attempts"
-    exit 1
-  fi
-done
-
+echo "📦 Step 1: System Update & Package Installation"
+echo "=================================================="
+apt-get update
 # apt-get upgrade -y  # Optional: Uncomment if you want a full system upgrade (takes longer)
 
 echo "📥 Installing required system packages..."
-echo "⏱️  (Large packages may take 10-20 minutes - be patient)"
-
-# Install packages with retry logic
-for attempt in {1..3}; do
-  echo "[Attempt $attempt/3] Installing packages..."
-  if timeout 1200 apt-get install -y --no-install-recommends --no-install-suggests \
-    python3-pip \
-    python3-dev \
-    hostapd \
-    dnsmasq \
-    curl \
-    wget \
-    git \
-    nano \
-    net-tools \
-    alsa-utils \
-    alsa-tools \
-    bc \
-    libasound2-plugins \
-    libasound2 \
-    libasound2-dev \
-    libportaudio2 \
-    libportaudiocpp0 \
-    portaudio19-dev \
-    pulseaudio \
-    i2c-tools \
-    libblas-dev \
-    liblapack-dev \
-    libopenblas-dev \
-    libffi-dev \
-    libssl-dev \
-    libjack-jackd2-0; then
-    echo "✓ Audio and ReSpeaker HAT system libraries installed"
-    break
-  else
-    if [ $attempt -lt 3 ]; then
-      echo "⚠️  Installation attempt $attempt failed, retrying in 15 seconds..."
-      sleep 15
-    else
-      echo "❌ Package installation failed after 3 attempts"
-      exit 1
-    fi
-  fi
-done
+apt-get install -y \
+  python3-pip \
+  python3-dev \
+  hostapd \
+  dnsmasq \
+  curl \
+  wget \
+  git \
+  nano \
+  net-tools
 
 echo ""
 echo "📁 Step 2: Create Application Directory Structure"
@@ -151,207 +49,15 @@ python3 -m venv /opt/evvos/venv
 
 # Activate virtual environment and install packages
 source /opt/evvos/venv/bin/activate
-
-# Configure network for stability (DNS + pip timeout + wget/curl + network buffers)
-echo "Configuring network stability and timeouts..."
-mkdir -p /root/.pip
-
-# Configure pip - simplified, no timeouts/retries
-cat > /root/.pip/pip.conf << 'PIPCONFIG'
-[global]
-index-url = https://pypi.org/simple/
-no-cache-dir = true
-[install]
-prefer-binary = true
-PIPCONFIG
-echo "✓ Pip configured: PyPI binary preference only"
-
-# Configure wget with timeout and retries
-echo "Configuring wget timeout settings..."
-cat > /root/.wgetrc << 'WGETCONFIG'
-timeout = 600
-connect_timeout = 60
-retries = 5
-wait = 2
-WGETCONFIG
-echo "✓ Wget configured with 10min timeout, 60s connect timeout, 5 retries"
-
-# Configure curl defaults
-echo "Configuring curl timeout settings..."
-cat > /root/.curlrc << 'CURLCONFIG'
-max-time = 3600
-connect-timeout = 60
-retry = 5
-retry-delay = 2
-retry-max-time = 600
-CURLCONFIG
-echo "✓ Curl configured with 1hr max-time, 60s connect timeout, 5 retries"
-
-# Update DNS to Google's resolver for stability (primary + secondary)
-echo "Updating DNS to reliable servers..."
-cp /etc/resolv.conf /etc/resolv.conf.backup
-echo "nameserver 8.8.8.8" > /etc/resolv.conf          # Google Primary
-echo "nameserver 8.8.4.4" >> /etc/resolv.conf         # Google Secondary
-echo "nameserver 1.1.1.1" >> /etc/resolv.conf         # Cloudflare Primary
-echo "nameserver 1.0.0.1" >> /etc/resolv.conf         # Cloudflare Secondary
-echo "✓ DNS set to multiple reliable servers (Google + Cloudflare)"
-
-# Optimize network socket settings
-echo "Optimizing network socket settings..."
-echo "net.ipv4.tcp_retries2 = 15" | tee -a /etc/sysctl.conf
-echo "net.ipv4.tcp_syn_retries = 5" | tee -a /etc/sysctl.conf
-echo "net.core.somaxconn = 1024" | tee -a /etc/sysctl.conf
-echo "net.ipv4.tcp_max_syn_backlog = 2048" | tee -a /etc/sysctl.conf
-echo "net.core.netdev_max_backlog = 5000" | tee -a /etc/sysctl.conf
-sysctl -p > /dev/null 2>&1
-echo "✓ Network socket buffers optimized for large downloads"
-
-# Upgrade pip only
-echo "Upgrading pip..."
-pip install --upgrade pip
-
-# Install aiohttp for Supabase communication
-echo "Installing aiohttp..."
+pip install --upgrade pip setuptools wheel
 pip install aiohttp
 
 echo "✓ Virtual environment created at /opt/evvos/venv"
-echo "✓ Base Python packages installed"
+echo "✓ Python packages installed"
 
 echo ""
-echo "Step 3.5: ReSpeaker 2-Mics Pi HAT v2.0 Setup (TLV320AIC3104)"
-echo "============================================================"
-
-# 1. Install dependencies
-source /opt/evvos/venv/bin/activate
-pip install --prefer-binary numpy vosk RPi.GPIO
-
-# 2. Compile & Install Overlay
-echo "🔧 Installing ReSpeaker v2.0 Device Tree Overlays..."
-# Ensure headers are installed for current kernel
-echo "Installing kernel headers and device tree compiler..."
-if ! timeout 1200 apt-get install -y raspberrypi-kernel-headers device-tree-compiler; then
-  echo "⚠️  Kernel headers install failed, but continuing (may already be installed)..."
-fi
-
-cd /opt/evvos
-if [ ! -d "seeed-linux-dtoverlays" ]; then
-    git clone https://github.com/Seeed-Studio/seeed-linux-dtoverlays.git
-fi
-cd seeed-linux-dtoverlays
-
-# Compile specifically for v2.0
-echo "Compiling respeaker-2mic-v2_0 overlay..."
-dtc -@ -I dts -O dtb -o respeaker-2mic-v2_0.dtbo overlays/rpi/respeaker-2mic-v2_0-overlay.dts
-sudo cp respeaker-2mic-v2_0.dtbo /boot/firmware/overlays/respeaker-2mic-v2_0.dtbo
-
-# 3. Update config.txt
-CONFIG_PATH="/boot/firmware/config.txt"
-[ -f /boot/config.txt ] && CONFIG_PATH="/boot/config.txt"
-
-# Clean old audio configs
-sed -i '/dtoverlay=seeed-2mic-voicecard/d' "$CONFIG_PATH"
-sed -i '/dtoverlay=googlevoicehat-soundcard/d' "$CONFIG_PATH"
-sed -i '/dtparam=audio=on/d' "$CONFIG_PATH"
-
-# Enable I2C/I2S and add v2.0 overlay
-if ! grep -q "dtoverlay=respeaker-2mic-v2_0" "$CONFIG_PATH"; then
-    echo "dtparam=i2c_arm=on" >> "$CONFIG_PATH"
-    echo "dtparam=i2s=on" >> "$CONFIG_PATH"
-    echo "dtparam=spi=on" >> "$CONFIG_PATH"
-    echo "# ReSpeaker 2-Mics Pi HAT v2.0" >> "$CONFIG_PATH"
-    echo "dtoverlay=respeaker-2mic-v2_0" >> "$CONFIG_PATH"
-fi
-
-# 4. Configure ALSA
-cat > /etc/asound.conf << 'ASOUND'
-pcm.!default {
-    type asym
-    playback.pcm {
-        type plug
-        slave.pcm "hw:seeed2micvoicec"
-    }
-    capture.pcm {
-        type plug
-        slave.pcm "hw:seeed2micvoicec"
-    }
-}
-ctl.!default {
-    type hw
-    card seeed2micvoicec
-}
-ASOUND
-
-# 5. Create Audio Mixer Init Service (CRITICAL FOR v2.0)
-# The TLV320AIC3104 resets on power loss. We must re-apply settings on every boot.
-echo "Creating audio mixer initialization service..."
-cat > /usr/local/bin/evvos-init-audio.sh << 'AUDIO_INIT'
-#!/bin/bash
-# Initialize ReSpeaker 2-Mics Pi HAT v2.0 (TLV320AIC3104)
-
-# Wait for driver to load
-sleep 5
-CARD="seeed2micvoicec"
-
-echo "Initializing Mixer for $CARD..."
-
-# Reset logic
-amixer -c $CARD -q sset 'Reset' on || true
-
-# --- OUTPUT ROUTING (DAC_L1/R1) ---
-# Enable DACs
-amixer -c $CARD -q sset 'DAC' 127
-amixer -c $CARD -q sset 'Left DAC Mixer PCM' on
-amixer -c $CARD -q sset 'Right DAC Mixer PCM' on
-
-# Route DAC to Headphones/Line Out (Requested DAC_L1 setting)
-amixer -c $CARD -q sset 'HP' 127
-amixer -c $CARD -q sset 'HP DAC Volume' 127
-amixer -c $CARD -q sset 'HP Left Mixer DAC L1' on
-amixer -c $CARD -q sset 'HP Right Mixer DAC R1' on
-
-# --- INPUT ROUTING (ADC) ---
-# Route Mics to ADC (Critical for v2.0 hardware)
-amixer -c $CARD -q sset 'Left PGA Mixer Mic2L' on
-amixer -c $CARD -q sset 'Right PGA Mixer Mic2R' on
-
-# Gain Settings
-amixer -c $CARD -q sset 'PGA' 40      # Input Gain (0-127)
-amixer -c $CARD -q sset 'ADC' 127     # ADC Volume
-amixer -c $CARD -q sset 'AGC Left' on
-amixer -c $CARD -q sset 'AGC Right' on
-
-echo "✓ Audio Mixer Configured"
-AUDIO_INIT
-
-chmod +x /usr/local/bin/evvos-init-audio.sh
-
-# Create Systemd Unit for Audio Init
-cat > /etc/systemd/system/evvos-audio-init.service << 'UNIT'
-[Unit]
-Description=Initialize ReSpeaker Audio Mixer
-After=sound.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/evvos-init-audio.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-systemctl enable evvos-audio-init.service
-echo "✓ Audio Init Service created"
-
-# Setup Vosk Grammar
-mkdir -p /etc/evvos/vosk
-cat > /etc/evvos/vosk/grammar.json << 'GRAMMAR'
-["okay", "confirm", "cancel", "start", "stop", "help", "repeat", "clear"]
-GRAMMAR
-chmod 644 /etc/evvos/vosk/grammar.json
-echo "✓ Vosk command grammar configured (8 commands)"
-
-echo ""
+echo "📄 Step 4: Deploy Provisioning Script"
+echo "======================================"
 
 # Create the provisioning script with the complete application
 # Updated with latest disconnect logic, Manila timezone, and Supabase Edge Function integration
@@ -367,7 +73,6 @@ Pi then connects to user's hotspot to get internet access.
 import asyncio
 import json
 import logging
-import RPi.GPIO as GPIO
 import os
 import subprocess
 import sys
@@ -378,8 +83,6 @@ from typing import Optional, Dict, Any
 import hashlib
 import base64
 
-BUTTON_GPIO = 17
-
 try:
     import aiohttp
     from aiohttp import web
@@ -388,12 +91,6 @@ except ImportError as e:
     print("Run: pip install aiohttp")
     sys.exit(1)
 
-try:
-    import RPi.GPIO as GPIO
-except ImportError:
-    GPIO = None
-
-BUTTON_GPIO = 17  # ReSpeaker 2-Mics User Button
 # Configuration
 DEVICE_NAME = "EVVOS_0001"
 CREDS_FILE = "/etc/evvos/device_credentials.json"
@@ -434,7 +131,6 @@ class EVVOSWiFiProvisioner:
         self.dnsmasq_process = None
         # Philippines timezone is UTC+8
         self.manila_tz = timezone(timedelta(hours=8))
-        self._setup_button()
 
     def _get_manila_time(self) -> datetime:
         """Get current time in Asia/Manila timezone (UTC+8)"""
@@ -570,53 +266,6 @@ class EVVOSWiFiProvisioner:
         
         return False
 
-    def _start_voice_command_service(self) -> bool:
-        """Start the voice command service after successful provisioning"""
-        try:
-            logger.info("[VOICE] Starting voice command service...")
-            result = subprocess.run(
-                ["sudo", "systemctl", "start", "evvos-voice-command"],
-                check=False,
-                timeout=10,
-                capture_output=True
-            )
-            if result.returncode == 0:
-                logger.info("[VOICE] ✓ Voice command service started successfully")
-                return True
-            else:
-                logger.warning(f"[VOICE] Service start returned code {result.returncode}")
-                # Don't fail provisioning if voice service doesn't exist yet
-                return True
-        except subprocess.TimeoutExpired:
-            logger.warning("[VOICE] Voice command service start timed out")
-            return True  # Don't fail provisioning
-        except Exception as e:
-            logger.warning(f"[VOICE] Failed to start voice command service: {e}")
-            return True  # Don't fail provisioning
-
-    def _stop_voice_command_service(self) -> bool:
-        """Stop the voice command service when provisioning is reset"""
-        try:
-            logger.info("[VOICE] Stopping voice command service...")
-            result = subprocess.run(
-                ["sudo", "systemctl", "stop", "evvos-voice-command"],
-                check=False,
-                timeout=10,
-                capture_output=True
-            )
-            if result.returncode == 0 or result.returncode == 5:  # 5 = unit not found (already stopped)
-                logger.info("[VOICE] ✓ Voice command service stopped")
-                return True
-            else:
-                logger.warning(f"[VOICE] Service stop returned code {result.returncode}")
-                return True
-        except subprocess.TimeoutExpired:
-            logger.warning("[VOICE] Voice command service stop timed out")
-            return True
-        except Exception as e:
-            logger.warning(f"[VOICE] Failed to stop voice command service: {e}")
-            return True
-
     async def _handle_disconnect(self) -> None:
         """
         Handle device disconnect request.
@@ -684,10 +333,6 @@ class EVVOSWiFiProvisioner:
             # Step 4: Kill any lingering WiFi processes
             subprocess.run(["sudo", "killall", "-q", "wpa_supplicant"], capture_output=True)
             subprocess.run(["sudo", "killall", "-q", "dhclient"], capture_output=True)
-            
-            # Step 4.5: Stop voice command service when disconnecting
-            logger.info("[DISCONNECT] Stopping voice command service...")
-            self._stop_voice_command_service()
             
             # Step 5: Log disconnect completion
             logger.warning("[DISCONNECT] ========== DISCONNECT COMPLETED ==========")
@@ -1961,11 +1606,6 @@ cache-size=1000
                     # Update device status to connected after successful connection
                     if await self._update_device_status_connected(user_id):
                         logger.info("✓ Provisioning successful! Device now in 'connected' state.")
-                        
-                        # Step: Start voice command service now that provisioning is complete
-                        if self._start_voice_command_service():
-                            logger.info("✓ Voice command service is now running")
-                        
                         if os.path.exists(self.state_file):
                             os.remove(self.state_file)
                         return True
@@ -2096,65 +1736,12 @@ cache-size=1000
                             logger.error(f"[MONITOR] Error sending heartbeat: {e}")
                     else:
                         logger.debug("[MONITOR] No credentials available - skipping heartbeat")
+                            
             except Exception as e:
                 logger.error(f"[MONITOR] Unexpected error in connectivity monitor loop: {e}")
-                await asyncio.sleep(5)
-
-    def _setup_button(self):
-        """Initialize GPIO for ReSpeaker Button"""
-        if GPIO:
-            try:
-                GPIO.setmode(GPIO.BCM)
-                GPIO.setup(BUTTON_GPIO, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-                logger.info(f"✓ ReSpeaker Button initialized on GPIO {BUTTON_GPIO}")
-            except Exception as e:
-                logger.error(f"Failed to setup button GPIO: {e}")
-
-    async def _monitor_button(self):
-        """Monitor button for 5-second hold to factory reset"""
-        if not GPIO: return
-
-        logger.info("[BUTTON] Starting button monitor task...")
-        press_start = None
-
-        while True:
-            try:
-                # Button is Active LOW (False when pressed)
-                if GPIO.input(BUTTON_GPIO) == False:
-                    if press_start is None:
-                        press_start = time.time()
-                    
-                    if (time.time() - press_start) > 5.0:
-                        logger.warning("[BUTTON] ========== FACTORY RESET TRIGGERED ==========")
-                        await self._perform_factory_reset()
-                        press_start = None
-                        await asyncio.sleep(10)  # Give it time to restart
-                else:
-                    press_start = None
-                
-                await asyncio.sleep(0.1)
-            except Exception as e:
-                logger.error(f"[BUTTON] Button monitor error: {e}")
-                await asyncio.sleep(1)
-
-    async def _perform_factory_reset(self):
-        """Wipe credentials and restart both provisioning and voice command services"""
-        try:
-            logger.warning("[BUTTON] Deleting credentials...")
-            subprocess.run(["sudo", "rm", "-f", "/etc/evvos/device_credentials.json", "/tmp/evvos_ble_state.json"], check=False)
-            
-            logger.warning("[BUTTON] Restarting provisioning service...")
-            subprocess.run(["sudo", "systemctl", "restart", "evvos-provisioning"], check=False)
-            
-            logger.warning("[BUTTON] Stopping voice command service...")
-            subprocess.run(["sudo", "systemctl", "stop", "evvos-voice-command"], check=False)
-            
-            logger.warning("[BUTTON] ========== FACTORY RESET COMPLETE ==========")
-        except Exception as e:
-            logger.error(f"[BUTTON] Reset failed: {e}")
+                await asyncio.sleep(5)  # Wait before retrying to avoid rapid error loops
 
     async def run(self):
-        asyncio.create_task(self._monitor_button())
         """Main provisioning loop"""
         logger.info(f"EVVOS WiFi Hotspot Provisioning Agent Started (Device: {self.device_id})")
         logger.info("=" * 60)
@@ -2192,7 +1779,6 @@ async def main():
     await provisioner.run()
 
 
-
 if __name__ == "__main__":
     asyncio.run(main())
 PROVISIONING_SCRIPT_EOF
@@ -2225,267 +1811,13 @@ WantedBy=multi-user.target
 SERVICE_FILE
 
 chmod 644 /etc/systemd/system/evvos-provisioning.service
-echo "✓ Provisioning systemd service created"
+echo "✓ Systemd service created"
 
-echo ""
-echo "📋 Step 5.5: Deploy Voice Command Service"
-echo "=========================================="
-
-# Deploy voice command service that integrates with Supabase Real-time
-# This service:
-# 1. Listens for voice commands using Vosk + ReSpeaker HAT
-# 2. Writes recognized commands to Supabase voice_commands table
-# 3. Mobile app receives commands via Supabase Real-time subscription
-# 4. Starts automatically after provisioning completes
-
-mkdir -p /usr/local/bin
-
-echo "Deploying voice command service with Supabase Real-time integration..."
-
-# Try to download the voice command service from the project
-# This is the main implementation that handles Supabase communication
-if [ -f "/root/evvos_voice_command.py" ]; then
-    cp /root/evvos_voice_command.py /usr/local/bin/evvos-voice-command.py
-    echo "✓ Voice command service deployed from local file"
-elif curl -fsSL "https://raw.githubusercontent.com/YOUR-USERNAME/EVVOS/main/evvos_voice_command.py" -o /usr/local/bin/evvos-voice-command.py 2>/dev/null; then
-    echo "✓ Voice command service downloaded from GitHub"
-else
-    # Fallback: Create minimal working implementation
-    echo "⚠️  Using fallback voice command implementation"
-    cat > /usr/local/bin/evvos-voice-command.py << 'VOICE_CMD_EOF'
-#!/usr/bin/env python3
-import asyncio
-import json
-import logging
-import RPi.GPIO as GPIO
-import os
-import sys
-import signal
-import time
-import spidev  # Added for LED control
-
-# Ensure we are in the venv
-if sys.prefix == sys.base_prefix:
-    os.execv("/opt/evvos/venv/bin/python3", ["python3"] + sys.argv)
-
-import numpy as np
-import RPi.GPIO as GPIO
-from vosk import Model, KaldiRecognizer
-import queue
-import sounddevice as sd
-import aiohttp
-
-# Configuration
-LOGS_DIR = "/var/log/evvos"
-CREDS_FILE = "/etc/evvos/device_credentials.json"
-SUPABASE_URL = "https://zekbonbxwccgsfagrrph.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpla2JvbmJ4d2NjZ3NmYWdycnBoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzOTQyOTUsImV4cCI6MjA4Mzk3MDI5NX0.0ss5U-uXryhWGf89ucndqNK8-Bzj_GRZ-4-Xap6ytHg"
-
-# Logging Setup
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - [VoiceCmd] - %(levelname)s - %(message)s",
-    handlers=[logging.FileHandler(f"{LOGS_DIR}/voice_command.log"), logging.StreamHandler()]
-)
-logger = logging.getLogger("EVVOS_VOICE")
-
-# -----------------------------------------------------------------------------
-# LED CONTROLLER (APA102 for ReSpeaker 2-Mics)
-# -----------------------------------------------------------------------------
-class PixelController:
-    def __init__(self):
-        self.num_leds = 3
-        try:
-            self.spi = spidev.SpiDev()
-            self.spi.open(0, 0)  # Bus 0, Device 0
-            self.spi.max_speed_hz = 8000000
-            self.enabled = True
-        except Exception as e:
-            logger.error(f"Failed to init SPI for LEDs: {e}")
-            self.enabled = False
-
-    def show(self, data):
-        if not self.enabled: return
-        # APA102 Frame: Start(32x0) + LED_Frames + End(32x1)
-        # LED Frame: 111(3bits) + Brightness(5bits) + B + G + R
-        buffer = [0x00] * 4
-        for r, g, b in data:
-            buffer += [0xE0 | 0x05, b, g, r] # Brightness set to 5 (dim)
-        buffer += [0xFF] * 4
-        self.spi.xfer2(buffer)
-
-    def off(self):
-        self.show([(0,0,0)] * self.num_leds)
-
-    def listen_mode(self):
-        # Solid Blue (indicating Ready/Listening)
-        self.show([(0, 0, 100)] * self.num_leds)
-
-    def success_mode(self):
-        # Flash Green (Recognized)
-        for _ in range(2):
-            self.show([(0, 150, 0)] * self.num_leds)
-            time.sleep(0.1)
-            self.off()
-            time.sleep(0.1)
-        self.listen_mode() # Return to listening
-
-    def error_mode(self):
-        # Flash Red (Error/Unknown)
-        self.show([(150, 0, 0)] * self.num_leds)
-        time.sleep(0.5)
-        self.listen_mode()
-
-# -----------------------------------------------------------------------------
-# VOICE SERVICE
-# -----------------------------------------------------------------------------
-class EVVOSVoiceService:
-    def __init__(self):
-        self.model = Model(lang="en-us")
-        self.q = queue.Queue()
-        self.pixels = PixelController()
-        
-    def _audio_callback(self, indata, frames, time, status):
-        if status:
-            logger.warning(f"Audio Status: {status}")
-        self.q.put(bytes(indata))
-
-    def _get_user_id(self):
-        try:
-            with open(CREDS_FILE) as f:
-                data = json.load(f)
-                return data.get("user_id")
-        except:
-            return None
-
-    def _get_device_id(self):
-        try:
-            with open("/sys/class/net/wlan0/address") as f:
-                return f.read().strip().replace(":", "")
-        except:
-            return "unknown_device"
-
-    async def _send_command(self, user_id, command_text):
-        url = f"{SUPABASE_URL}/rest/v1/voice_commands"
-        headers = {
-            "apikey": SUPABASE_ANON_KEY,
-            "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
-        payload = {
-            "user_id": user_id,
-            "device_id": self._get_device_id(),
-            "command": command_text,
-            "status": "pending"
-        }
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=headers, json=payload) as resp:
-                    if resp.status in [200, 201]:
-                        logger.info(f"Command '{command_text}' sent successfully")
-                        return True
-                    else:
-                        logger.error(f"Supabase Error: {resp.status} - {await resp.text()}")
-                        return False
-        except Exception as e:
-            logger.error(f"Connection Error: {e}")
-            return False
-
-    async def run(self):
-        logger.info("Starting Voice Recognition Loop...")
-        
-        # Initial LED Test
-        self.pixels.off()
-        time.sleep(0.5)
-        self.pixels.listen() # Set to Blue
-
-        # Audio Config
-        device_info = sd.query_devices(kind='input')
-        samplerate = int(device_info['default_samplerate'])
-        
-        # Start Stream
-        with sd.RawInputStream(samplerate=samplerate, blocksize=8000, dtype='int16',
-                               channels=1, callback=self._audio_callback):
-            rec = KaldiRecognizer(self.model, samplerate)
-            
-            while True:
-                data = self.q.get()
-                if rec.AcceptWaveform(data):
-                    result = json.loads(rec.Result())
-                    text = result.get("text", "")
-                    
-                    if text:
-                        logger.info(f"Recognized: {text}")
-                        user_id = self._get_user_id()
-                        
-                        if user_id:
-                            # Success LED Animation
-                            self.pixels.success_mode()
-                            await self._send_command(user_id, text)
-                        else:
-                            logger.warning("No User ID found. Provisioning needed.")
-                            self.pixels.error_mode()
-                else:
-                    # Partial result - can be used for "thinking" animation if desired
-                    pass
-
-if __name__ == "__main__":
-    try:
-        service = EVVOSVoiceService()
-        asyncio.run(service.run())
-    except KeyboardInterrupt:
-        print("\nStopping...")
-VOICE_CMD_EOF
-fi
-
-chmod +x /usr/local/bin/evvos-voice-command.py
-echo "✓ Voice command service deployed"
-
-# Create systemd service for voice command
-cat > /etc/systemd/system/evvos-voice-command.service << 'VOICE_SERVICE_FILE'
-[Unit]
-Description=EVVOS Voice Command Service (Supabase Real-time)
-After=network.target evvos-provisioning.service
-Wants=evvos-provisioning.service
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/opt/evvos
-ExecStart=/opt/evvos/venv/bin/python3 /usr/local/bin/evvos-voice-command.py
-Restart=no
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=evvos-voice-command
-Environment="PATH=/opt/evvos/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-[Install]
-WantedBy=multi-user.target
-VOICE_SERVICE_FILE
-
-chmod 644 /etc/systemd/system/evvos-voice-command.service
-echo "✓ Voice command systemd service created (disabled by default)"
-
-echo ""
-echo "📊 Voice Command System Architecture:"
-echo "  1. Vosk recognizes voice → matches against grammar"
-echo "  2. Recognized command → POST to Supabase voice_commands table"
-echo "  3. Mobile app subscribed via Supabase Real-time"
-echo "  4. Mobile app receives INSERT event → processes command"
-echo "  5. Command executed immediately on mobile device"
-echo ""
-echo "⚡ Performance:"
-echo "  • On hotspot: ~100-300ms latency (same WiFi)"
-echo "  • On cellular: <5s cloud delivery via Supabase"
-echo "  • Offline capable: Commands queued locally"
 echo ""
 echo "🔧 Step 6: Enable and Start Service"
 echo "===================================="
 systemctl daemon-reload
 systemctl enable evvos-provisioning
-systemctl enable evvos-voice-command
 systemctl start evvos-provisioning
 
 echo ""
@@ -2496,108 +1828,11 @@ echo "📊 System Status:"
 systemctl status evvos-provisioning --no-pager
 echo ""
 echo "📖 Useful Commands:"
-echo "  Provisioning logs:              sudo journalctl -u evvos-provisioning -f"
-echo "  Voice command logs:             sudo journalctl -u evvos-voice-command -f"
-echo "  Restart provisioning service:   sudo systemctl restart evvos-provisioning"
-echo "  Provisioning service status:    sudo systemctl status evvos-provisioning"
-echo "  Voice command service status:   sudo systemctl status evvos-voice-command"
-echo "  View device ID:                 cat /sys/class/net/wlan0/address"
-echo ""
-echo "📝 ReSpeaker HAT Hardware Checks:"
-echo "  Check I2C detection:            i2cdetect -y 1"
-echo "  List audio devices:             arecord -l"
-echo "  Test audio recording:           arecord -D default -f cd -t wav test.wav"
-echo "  Check I2S status:               cat /proc/asound/cards"
-echo ""
-echo "📝 Service Behavior:"
-echo "  • WiFi Provisioning starts immediately on boot"
-echo "  • Voice Command Service starts ONLY after successful WiFi + internet"
-echo "  • Voice Command Service stops automatically when device is unpaired"
-echo "  • Provisioning restarts hotspot if WiFi connection fails"
-echo "  • Heartbeat sent every 60s when connected (for keep-alive)"
-echo "  • Audio input from ReSpeaker HAT (I2S interface)"
-echo "  • Voice commands recognized: okay, confirm, cancel, start, stop, help, repeat, clear"
-echo ""
-echo "🎯 Voice Command Execution Flow (Supabase Real-time):"
-echo "  ════════════════════════════════════════════════════"
-echo "  1. User speaks near Raspberry Pi with ReSpeaker HAT"
-echo "  2. Vosk recognizes voice command via microphone"
-echo "  3. Pi POSTs command to Supabase 'voice_commands' table:"
-echo "     POST /rest/v1/voice_commands"
-echo "     Body: { device_id, user_id, command, confidence, timestamp }"
-echo ""
-echo "  4. Mobile app receives via Supabase Real-time subscription:"
-echo "     Event: INSERT on voice_commands table (user_id filter)"
-echo ""
-echo "  5. Mobile app processes and executes command"
-echo "     Latency: ~100-300ms on hotspot, <5s on cellular"
-echo "  ════════════════════════════════════════════════════"
-echo ""
-echo "📊 Database Integration:"
-echo "  • Table: public.voice_commands"
-echo "  • Columns: id, device_id, user_id, command, confidence, status, timestamp"
-echo "  • Real-time: Enabled (postgres_changes subscription)"
-echo "  • RLS: Managed by Supabase Edge Functions"
-echo ""
-echo "🔗 Data Flow:"
-echo "  Pi (Voice Recognition)"
-echo "    ↓"
-echo "  Vosk (Grammar Match: okay, confirm, cancel, start, stop, help, repeat, clear)"
-echo "    ↓"
-echo "  asyncio + aiohttp (Async POST)"
-echo "    ↓"
-echo "  Supabase REST API (voice_commands table INSERT)"
-echo "    ↓"
-echo "  Supabase Real-time (postgres_changes event)"
-echo "    ↓"
-echo "  Mobile App (@supabase/supabase-js subscription)"
-echo "    ↓"
-echo "  Mobile App Handler (handleVoiceCommand())"
-echo "    ↓"
-echo "  Action Executed (show alert, send notification, etc.)"
-echo ""
-echo "🔐 Security:"
-echo "  • user_id filter ensures only authorized commands processed"
-echo "  • Supabase RLS policies protect device_credentials"
-echo "  • Edge Functions validate requests server-side"
-echo "  • No direct database write from mobile (Pi is trusted)"
-echo ""
-echo "⚠️  TROUBLESHOOTING VOICE COMMANDS:"
-echo "  If commands not received on mobile:"
-echo ""
-echo "  1. Check Pi is connected to WiFi and has internet:"
-echo "     ip addr show wlan0"
-echo "     curl https://google.com"
-echo ""
-echo "  2. Check voice command service is running:"
-echo "     sudo systemctl status evvos-voice-command"
-echo "     sudo journalctl -u evvos-voice-command -f"
-echo ""
-echo "  3. Check user_id is set in device_credentials.json:"
-echo "     cat /etc/evvos/device_credentials.json"
-echo ""
-echo "  4. Test direct Supabase POST (from Pi):"
-echo "     curl -X POST https://zekbonbxwccgsfagrrph.supabase.co/rest/v1/voice_commands \\"
-echo "       -H 'Content-Type: application/json' \\"
-echo "       -H 'Authorization: Bearer ANON_KEY' \\"
-echo "       -d '{\"device_id\":\"test\",\"user_id\":\"YOUR_USER_ID\",\"command\":\"test\"}'"
-echo ""
-echo "  5. Check mobile app is subscribed to voice_commands:"
-echo "     Mobile app logs should show: '[VoiceCommandListener] ✅ Subscribed to voice commands'"
-echo ""
-echo "🔧 Hardware Requirements Met:"
-echo "  • I2S overlay configured (device acts as master clock)"
-echo "  • I2C enabled (for HAT detection at address 0x18)"
-echo "  • NumPy 1.26.4 (pre-built, not compiled - prevents RAM crash)"
-echo "  • System libraries: OpenBLAS, PortAudio (prevents missing .so errors)"
-echo "  • DNS set to 8.8.8.8, pip timeout 1000s (stable downloads)"
-echo "  • Vosk with grammar optimization (light CPU usage)"
-echo ""
-echo "⚠️  IMPORTANT - Reboot Required:"
-echo "  Run: sudo reboot"
-echo "  I2S/I2C device tree changes require reboot to take effect."
+echo "  View logs:          sudo journalctl -u evvos-provisioning -f"
+echo "  Restart service:    sudo systemctl restart evvos-provisioning"
+echo "  Stop service:       sudo systemctl stop evvos-provisioning"
+echo "  View device ID:     cat /sys/class/net/wlan0/address"
 echo ""
 echo "🚀 The EVVOS_0001 WiFi hotspot should now be broadcasting!"
-echo "   Mobile app can scan and provision the device."
-echo "   Voice command recognition starts after provisioning completes."
+echo "   Mobile app can now connect and provision the device."
 echo ""
