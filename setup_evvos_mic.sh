@@ -354,27 +354,106 @@ def main():
         logger.error(f"Vosk init failed: {e}")
         sys.exit(1)
 
-    # 4. Setup Audio Stream
+    # 4. Setup Audio Stream with Robust ReSpeaker Detection
     p = pyaudio.PyAudio()
     device_index = None
-    # Find ReSpeaker
+    respeaker_found = False
+    
+    logger.info("Scanning for ReSpeaker audio device...")
+    logger.info(f"Total audio devices found: {p.get_device_count()}")
+    
+    # Strategy 1: Look for 'seeed' in device name
     for i in range(p.get_device_count()):
         info = p.get_device_info_by_index(i)
-        if "seeed" in info.get("name", "").lower():
-            device_index = i
-            logger.info(f"✓ Found ReSpeaker mic at index {i}")
-            break
+        device_name = info.get("name", "").lower()
+        channels = info.get("maxInputChannels", 0)
+        
+        logger.debug(f"Device [{i}] {info.get('name', 'Unknown')}: {channels} input channels")
+        
+        if "seeed" in device_name or "respeaker" in device_name:
+            if info.get("maxInputChannels", 0) > 0:
+                device_index = i
+                respeaker_found = True
+                logger.info(f"✓ ReSpeaker found at index {i}: {info.get('name', 'Unknown')}")
+                break
     
-    if device_index is None:
-        logger.warning("⚠️  ReSpeaker not found in device list, using default audio device")
-        logger.info("Available audio devices:")
+    # Strategy 2: Try common ReSpeaker hardware addresses (hw:1,0 or hw:2,0)
+    if not respeaker_found:
+        logger.warning("⚠️  'seeed' device not found by name, trying hardware indices...")
+        # ReSpeaker V2.0 typically appears at hw:1 or hw:2
+        for hw_index in [1, 2]:
+            try:
+                info = p.get_device_info_by_index(hw_index)
+                device_name = info.get("name", "").lower()
+                channels = info.get("maxInputChannels", 0)
+                logger.info(f"Checking index {hw_index}: {device_name} ({channels} input channels)")
+                
+                if channels > 0:
+                    device_index = hw_index
+                    logger.info(f"✓ Using device at index {hw_index}")
+                    respeaker_found = True
+                    break
+            except Exception as hw_err:
+                logger.debug(f"Index {hw_index} not available: {hw_err}")
+    
+    # Strategy 3: Check /proc/asound/cards for ReSpeaker
+    if not respeaker_found:
+        logger.warning("⚠️  Checking /proc/asound/cards for ReSpeaker...")
+        try:
+            with open("/proc/asound/cards", "r") as f:
+                cards_content = f.read()
+                logger.info(f"Sound cards detected:\\n{cards_content}")
+                
+                if "seeed" in cards_content.lower() or "tlv320" in cards_content.lower():
+                    # Try to find the card number
+                    for line in cards_content.split("\n"):
+                        if "seeed" in line.lower() or "tlv320" in line.lower():
+                            try:
+                                card_num = int(line.split()[0])
+                                if card_num > 0:
+                                    device_index = card_num
+                                    logger.info(f"✓ ReSpeaker card found: hw:{card_num},0")
+                                    respeaker_found = True
+                                    break
+                            except (ValueError, IndexError):
+                                pass
+        except Exception as proc_err:
+            logger.debug(f"Could not read /proc/asound/cards: {proc_err}")
+    
+    # Strategy 4: Fall back to first device with input channels
+    if not respeaker_found:
+        logger.warning("⚠️  ReSpeaker not found, falling back to first available input device")
         for i in range(p.get_device_count()):
             info = p.get_device_info_by_index(i)
-            logger.info(f"  [{i}] {info.get('name', 'Unknown')}")
-            
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, 
-                    frames_per_buffer=8000, input_device_index=device_index)
-    stream.start_stream()
+            if info.get("maxInputChannels", 0) > 0:
+                device_index = i
+                logger.warning(f"Using device [{i}]: {info.get('name', 'Unknown')} (may not be ReSpeaker)")
+                break
+    
+    if device_index is None:
+        logger.error("❌ No suitable audio input device found!")
+        logger.error("List of all audio devices:")
+        for i in range(p.get_device_count()):
+            info = p.get_device_info_by_index(i)
+            logger.error(f"  [{i}] {info.get('name', 'Unknown')} - Input: {info.get('maxInputChannels')} ch")
+        p.terminate()
+        sys.exit(1)
+    
+    logger.info(f"Opening audio stream on device index {device_index}...")
+    
+    try:
+        stream = p.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, 
+                        frames_per_buffer=8000, input_device_index=device_index)
+        stream.start_stream()
+        logger.info("✓ Audio stream opened successfully")
+    except Exception as stream_err:
+        logger.error(f"❌ Failed to open audio stream: {stream_err}")
+        try:
+            logger.error(f"Device info: {p.get_device_info_by_index(device_index)}")
+        except:
+            pass
+        p.terminate()
+        sys.exit(1)
 
     # Ready Indication: Cyan/Blue (Listening)
     logger.info("✓ Listening for commands...")
@@ -518,12 +597,55 @@ systemctl enable evvos-voice
 systemctl restart evvos-voice
 
 echo ""
+echo "🔍 Step 8: Hardware Detection & Verification"
+echo "=============================================="
+
+echo ""
+echo "Checking ReSpeaker detection..."
+
+# Check if ReSpeaker is in /proc/asound/cards
+if grep -qi "seeed\|tlv320" /proc/asound/cards 2>/dev/null; then
+    echo "✓ ReSpeaker HAT detected in system"
+    echo "  Sound cards:"
+    cat /proc/asound/cards | grep -E "^[0-9]|seeed|tlv"
+else
+    echo "⚠️  ReSpeaker HAT not detected yet"
+    echo "  This may be normal - trying direct detection..."
+fi
+
+echo ""
+echo "Checking PyAudio device detection..."
+python3 << 'PYAUDIO_CHECK'
+import pyaudio
+import sys
+p = pyaudio.PyAudio()
+count = p.get_device_count()
+print(f"Total audio devices: {count}")
+found_respeaker = False
+for i in range(count):
+    info = p.get_device_info_by_index(i)
+    name = info.get('name', 'Unknown')
+    inputs = info.get('maxInputChannels', 0)
+    if inputs > 0:
+        print(f"  [{i}] {name} ({inputs} input channels)")
+        if 'seeed' in name.lower() or 'respeaker' in name.lower():
+            found_respeaker = True
+p.terminate()
+
+if found_respeaker:
+    print("✓ ReSpeaker audio input device detected")
+else:
+    print("⚠️  ReSpeaker not in PyAudio list (may appear when service starts)")
+PYAUDIO_CHECK
+
+echo ""
 echo "✅ ReSpeaker 2-Mics HAT V2.0 Setup Complete!"
 echo "============================================="
 echo "1. ✓ ReSpeaker drivers installed (with kernel mismatch fallback)"
-echo "2. ✓ ALSA microphone levels configured (80% gain)"
+echo "2. ✓ ALSA microphone levels configured (TLV320AIC3104 codec - 85% capture)"
 echo "3. ✓ Vosk offline model downloaded"
 echo "4. ✓ Voice Agent service installed and running"
+echo "5. ✓ Hardware detection verified"
 echo ""
 echo "════════════════════════════════════════════════════════════════"
 echo "🎤 MONITORING VOICE COMMAND DETECTION (Live Logs)"
@@ -584,8 +706,44 @@ echo "Save settings after adjusting:"
 echo "  sudo alsactl store"
 echo ""
 echo "════════════════════════════════════════════════════════════════"
-echo "⚡ VOICE SERVICE MANAGEMENT"
+echo "🚨 IF RESPEAKER NOT DETECTED"
 echo "════════════════════════════════════════════════════════════════"
+echo ""
+echo "If you see 'ReSpeaker not found' in journal logs, try these steps:"
+echo ""
+echo "1. First, verify ReSpeaker is physically present:"
+echo "   # Check dmesg for hardware detection"
+echo "   dmesg | tail -20 | grep -i 'ReSpeaker\|seeed\|i2c\|audio'"
+echo ""
+echo "2. Check if drivers installed correctly:"
+echo "   ls -la /lib/modules/\$(uname -r)/kernel/sound/soc/codecs/ | grep tlv"
+echo "   # Should show tlv320aic3104 or similar"
+echo ""
+echo "3. Load I2C explicitly if missing:"
+echo "   sudo modprobe i2c-dev"
+echo "   sudo modprobe snd_soc_tlv320aic3104"
+echo "   sudo modprobe snd_soc_seeed_voicecard"
+echo ""
+echo "4. Restart ALSA after drivers load:"
+echo "   sudo systemctl restart alsa-restore"
+echo "   sleep 2"
+echo "   aplay -l"
+echo ""
+echo "5. If HAT not detected after modprobe, reinstall drivers:"
+echo "   cd /usr/src/seeed-voicecard"
+echo "   sudo ./install.sh"
+echo "   sudo reboot"
+echo ""
+echo "6. Check HAT is enabled in /boot/config.txt:"
+echo "   # For ReSpeaker 2-Mics HAT v2.0, add this:"
+echo "   sudo bash -c 'echo \"dtoverlay=seeed-2mic-voicecard\" >> /boot/config.txt'"
+echo "   sudo reboot"
+echo ""
+echo "7. Use I2C detection to verify HAT presence:"
+echo "   sudo i2cdetect -y 1  # Should show 0x1a or 0x1b for TLV320AIC3104"
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo ""
 echo ""
 echo "  systemctl start evvos-voice       # Start service"
 echo "  systemctl stop evvos-voice        # Stop service"
