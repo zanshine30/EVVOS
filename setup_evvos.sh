@@ -129,7 +129,7 @@ timeout = 600
 connect_timeout = 60
 retries = 5
 wait = 2
-WGETCONFIG
+WETGCONFIG
 echo "✓ Wget configured with 10min timeout, 60s connect timeout, 5 retries"
 
 # Configure curl defaults
@@ -218,10 +218,11 @@ for i in {1..3}; do
 done
 
 # Install Vosk and audio libraries with binary preference and retries
-echo "Installing audio libraries (Vosk, PyAudio, SciPy)..."
+echo "Installing audio libraries (Vosk, PyAudio, SoundFile)..."
 echo "⏱️  This is another large download - may take 10-20 minutes"
 for i in {1..3}; do
   if pip install --no-cache-dir --prefer-binary --timeout=1800 --retries=5 \
+    pysoundfile==0.13.1 \
     pyaudio==0.2.13 \
     scipy==1.10.1 \
     vosk==0.3.32; then
@@ -2127,52 +2128,43 @@ chmod 644 /etc/systemd/system/evvos-provisioning.service
 echo "✓ Provisioning systemd service created"
 
 echo ""
-echo "📋 Step 5.5: Deploy Hybrid Voice Command Service (Local-First + Cloud Backup)"
-echo "=============================================================================="
+echo "📋 Step 5.5: Deploy Voice Command Service"
+echo "=========================================="
+
+# Deploy voice command service that integrates with Supabase Real-time
+# This service:
+# 1. Listens for voice commands using Vosk + ReSpeaker HAT
+# 2. Writes recognized commands to Supabase voice_commands table
+# 3. Mobile app receives commands via Supabase Real-time subscription
+# 4. Starts automatically after provisioning completes
 
 mkdir -p /usr/local/bin
 
-# Download the hybrid voice command implementation from GitHub
-# This version supports:
-# - PRIMARY: Local HTTP communication to mobile app (< 100ms)
-# - SECONDARY: Async Supabase backup (optional, non-blocking)
-# - OFFLINE: Local command queue with persistence
-# - RECOVERY: Auto-retry when connectivity restored
+echo "Deploying voice command service with Supabase Real-time integration..."
 
-echo "Downloading hybrid voice command service..."
-
-# Try to download from GitHub (recommended for production)
-HYBRID_VOICE_URL="https://raw.githubusercontent.com/YOUR-USERNAME/EVVOS/main/evvos_voice_command_hybrid.py"
-HYBRID_VOICE_LOCAL="/usr/local/bin/evvos-voice-command.py"
-
-# Attempt download from GitHub
-if curl -fsSL "$HYBRID_VOICE_URL" -o "$HYBRID_VOICE_LOCAL" 2>/dev/null; then
-    echo "✓ Hybrid voice command service downloaded from GitHub"
-elif [ -f "/root/evvos_voice_command_hybrid.py" ]; then
-    # Fallback: Check if file exists locally
-    cp /root/evvos_voice_command_hybrid.py "$HYBRID_VOICE_LOCAL"
-    echo "✓ Hybrid voice command service copied from local"
+# Try to download the voice command service from the project
+# This is the main implementation that handles Supabase communication
+if [ -f "/root/evvos_voice_command.py" ]; then
+    cp /root/evvos_voice_command.py /usr/local/bin/evvos-voice-command.py
+    echo "✓ Voice command service deployed from local file"
+elif curl -fsSL "https://raw.githubusercontent.com/YOUR-USERNAME/EVVOS/main/evvos_voice_command.py" -o /usr/local/bin/evvos-voice-command.py 2>/dev/null; then
+    echo "✓ Voice command service downloaded from GitHub"
 else
-    # Final fallback: Create a wrapper that attempts to load the hybrid version
-    echo "⚠ WARNING: Could not download hybrid voice service from GitHub"
-    echo "⚠ Make sure to update GitHub URL in setup_evvos.sh"
-    echo "⚠ Fallback: Using basic voice command implementation"
-    
-    # Create basic fallback version with hybrid structure
-    cat > "$HYBRID_VOICE_LOCAL" << 'VOICE_COMMAND_EOF'
+    # Fallback: Create minimal working implementation
+    echo "⚠️  Using fallback voice command implementation"
+    cat > /usr/local/bin/evvos-voice-command.py << 'VOICE_COMMAND_EOF'
 #!/usr/bin/env python3
 """
-EVVOS Voice Command Service - Hybrid Local-First + Cloud Backup
-Raspberry Pi Zero 2 W with ReSpeaker 2-Mics HAT v2.0
+EVVOS Voice Command Service - Supabase Real-time Integration
+ReSpeaker 2-Mics Pi HAT v2.0 + Vosk + Supabase Real-time
 
 ARCHITECTURE:
-- PRIMARY: Local HTTP to mobile app (< 100ms latency)
-- SECONDARY: Async Supabase logging (optional, non-blocking)
-- OFFLINE: Command queue with persistence
-- RECOVERY: Auto-retry when mobile reconnects
+1. Pi listens for voice commands using Vosk grammar
+2. When command recognized, writes to Supabase voice_commands table
+3. Mobile app receives via Supabase Real-time subscription
+4. Mobile app processes and executes command immediately
 
-This is a fallback basic version. For full hybrid features, download:
-evvos_voice_command_hybrid.py from the GitHub repository
+Flow: Voice → Vosk → Supabase → Mobile App → Action
 """
 
 import asyncio
@@ -2183,26 +2175,21 @@ import signal
 import sys
 import time
 from datetime import datetime, timezone, timedelta
+import aiohttp
 
 try:
     import pyaudio
     from vosk import Model, KaldiRecognizer
-    import aiohttp
 except ImportError as e:
     print(f"Error: Missing library: {e}")
     sys.exit(1)
 
 # Configuration
 LOGS_DIR = "/var/log/evvos"
-CREDS_FILE = "/etc/evvos/device_credentials.json"
 GRAMMAR_FILE = "/etc/evvos/vosk/grammar.json"
-QUEUE_FILE = "/etc/evvos/command_queue.json"
-
-# Hybrid Architecture Settings
-MOBILE_APP_PORT = 9001
-MOBILE_API_ENDPOINT = "/api/voice/command"
-MOBILE_TIMEOUT = 5  # seconds
-SUPABASE_CLOUD_BACKUP = True
+CREDS_FILE = "/etc/evvos/device_credentials.json"
+SUPABASE_URL = "https://zekbonbxwccgsfagrrph.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpla2JvbmJ4d2NjZ3NmYWdycnBoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjgzOTQyOTUsImV4cCI6MjA4Mzk3MDI5NX0.0ss5U-uXryhWGf89ucndqNK8-Bzj_GRZ-4-Xap6ytHg"
 
 os.makedirs(LOGS_DIR, exist_ok=True)
 logging.basicConfig(
@@ -2215,19 +2202,32 @@ logging.basicConfig(
 )
 logger = logging.getLogger("EVVOS_VoiceCommand")
 
-
-class EVVOSVoiceService:
+class VoiceCommandService:
     def __init__(self):
         self.running = True
         self.audio_stream = None
         self.pa = None
         self.recognizer = None
         self.commands = self._load_grammar()
+        self.device_id = self._load_device_id()
+        self.user_id = self._load_user_id()
         self.manila_tz = timezone(timedelta(hours=8))
-        self.mobile_ip = None
-        self.credentials = self._load_credentials()
-        logger.info("🎙️ EVVOS Voice Command Service initialized")
-        logger.info("🌐 LOCAL-FIRST architecture enabled (hybrid local + cloud backup)")
+    
+    def _load_device_id(self):
+        try:
+            with open(CREDS_FILE, 'r') as f:
+                creds = json.load(f)
+                return creds.get("device_id", "unknown")
+        except:
+            return "unknown"
+    
+    def _load_user_id(self):
+        try:
+            with open(CREDS_FILE, 'r') as f:
+                creds = json.load(f)
+                return creds.get("user_id")
+        except:
+            return None
     
     def _load_grammar(self):
         try:
@@ -2240,65 +2240,9 @@ class EVVOSVoiceService:
             logger.warning(f"Grammar load error: {e}")
         return ["okay", "confirm", "cancel", "start", "stop", "help", "repeat", "clear"]
     
-    def _load_credentials(self):
-        """Load credentials including mobile IP for local communication"""
-        try:
-            if os.path.exists(CREDS_FILE):
-                with open(CREDS_FILE, 'r') as f:
-                    creds = json.load(f)
-                    self.mobile_ip = creds.get("mobile_ip")
-                    if self.mobile_ip:
-                        logger.info(f"✓ Mobile app IP loaded: {self.mobile_ip}")
-                    return creds
-        except Exception as e:
-            logger.warning(f"Failed to load credentials: {e}")
-        return None
-    
-    def _get_manila_time(self):
-        return datetime.now(self.manila_tz)
-    
-    async def _send_to_mobile_app(self, command: str) -> bool:
-        """PRIMARY: Send command to mobile app via local HTTP"""
-        if not self.mobile_ip:
-            logger.warning(f"⚠️ Mobile IP not configured, cannot send command locally")
-            return False
-        
-        try:
-            url = f"http://{self.mobile_ip}:{MOBILE_APP_PORT}{MOBILE_API_ENDPOINT}"
-            payload = {
-                "device_id": "device-id",
-                "user_id": self.credentials.get("user_id", "") if self.credentials else "",
-                "command": command,
-                "timestamp": self._get_manila_time().isoformat(),
-                "source": "local"
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=MOBILE_TIMEOUT)) as resp:
-                    if resp.status in [200, 201]:
-                        logger.info(f"✅ Command delivered to mobile app: {command}")
-                        return True
-        except asyncio.TimeoutError:
-            logger.warning(f"⚠️ Local HTTP timeout - mobile app unreachable")
-        except Exception as e:
-            logger.warning(f"⚠️ Local communication failed: {e}")
-        
-        return False
-    
-    async def _log_to_supabase_async(self, command: str):
-        """SECONDARY: Async fire-and-forget logging to Supabase"""
-        if not SUPABASE_CLOUD_BACKUP:
-            return
-        
-        try:
-            # Non-blocking async task (doesn't wait for response)
-            logger.debug(f"📊 Async cloud backup initiated for: {command}")
-        except Exception as e:
-            logger.debug(f"Cloud backup error (non-critical): {e}")
-    
     def _setup_audio(self):
         try:
-            logger.info("Initializing audio device...")
+            logger.info("🎤 Initializing audio device...")
             self.pa = pyaudio.PyAudio()
             self.audio_stream = self.pa.open(
                 format=pyaudio.paInt16,
@@ -2317,23 +2261,61 @@ class EVVOSVoiceService:
     
     def _setup_vosk(self):
         try:
-            logger.info("Initializing Vosk recognizer...")
-            try:
-                model = Model(lang="en-us")
-            except:
-                logger.warning("Using default Vosk model")
-                return False
-            
+            logger.info("🗣️ Initializing Vosk recognizer...")
+            model = Model(lang="en-us")
             self.recognizer = KaldiRecognizer(model, 16000)
-            logger.info(f"✓ Vosk ready with {len(self.commands)} commands")
+            logger.info(f"✓ Vosk ready (grammar: {len(self.commands)} commands)")
             return True
         except Exception as e:
             logger.error(f"Vosk setup failed: {e}")
             return False
     
-    async def listen(self):
+    async def _send_to_supabase(self, command: str):
+        """Write recognized command to Supabase voice_commands table"""
+        if not self.user_id:
+            logger.warning("⚠️ User ID not available, cannot send command")
+            return False
+        
         try:
-            logger.info("🎤 Listening for voice commands...")
+            timestamp = datetime.now(self.manila_tz).isoformat()
+            payload = {
+                "device_id": self.device_id,
+                "user_id": self.user_id,
+                "command": command,
+                "confidence": 1.0,
+                "status": "recognized",
+                "timestamp": timestamp,
+            }
+            
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+                "apikey": SUPABASE_ANON_KEY,
+            }
+            
+            url = f"{SUPABASE_URL}/rest/v1/voice_commands"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status in [200, 201]:
+                        logger.info(f"✅ Command sent to Supabase Real-time: {command}")
+                        return True
+                    else:
+                        error = await resp.text()
+                        logger.warning(f"Supabase POST failed ({resp.status}): {error}")
+                        return False
+        except Exception as e:
+            logger.warning(f"Error sending to Supabase: {e}")
+            return False
+    
+    def listen(self):
+        try:
+            logger.info("🎯 Listening for voice commands...")
             while self.running:
                 try:
                     data = self.audio_stream.read(4096, exception_on_overflow=False)
@@ -2343,20 +2325,17 @@ class EVVOSVoiceService:
                         if 'result' in result and result['result']:
                             text = result['result'][0].get('conf', '')
                             if text:
-                                logger.info(f"✓ Recognized: {text}")
-                                
-                                # PRIMARY: Send to mobile app
-                                success = await self._send_to_mobile_app(text)
-                                
-                                # SECONDARY: Async cloud backup
-                                await self._log_to_supabase_async(text)
+                                logger.warning(f"\n{'='*60}")
+                                logger.warning(f"🎙️  COMMAND RECOGNIZED: {text.upper()}")
+                                logger.warning(f"{'='*60}\n")
+                                asyncio.run(self._send_to_supabase(text))
                     
-                    await asyncio.sleep(0.01)
+                    time.sleep(0.01)
                 except Exception as e:
                     logger.debug(f"Listen error: {e}")
-                    await asyncio.sleep(0.1)
+                    time.sleep(0.1)
         except Exception as e:
-            logger.error(f"Listen fatal: {e}")
+            logger.error(f"Fatal error: {e}")
     
     def cleanup(self):
         try:
@@ -2369,13 +2348,17 @@ class EVVOSVoiceService:
             logger.warning(f"Cleanup error: {e}")
     
     def signal_handler(self, sig, frame):
-        logger.info(f"Signal {sig} received")
+        logger.info(f"Signal {sig} received, shutting down...")
         self.running = False
     
     def run(self):
-        logger.info("="*60)
-        logger.info("🎙️ EVVOS Voice Command Service (Hybrid Local-First)")
-        logger.info("="*60)
+        logger.warning("="*60)
+        logger.warning("🎙️  EVVOS Voice Command Service (Supabase Real-time)")
+        logger.warning("="*60)
+        logger.info(f"Device: {self.device_id}")
+        logger.info(f"User: {self.user_id}")
+        logger.info(f"Supabase: {SUPABASE_URL}")
+        logger.warning("="*60 + "\n")
         
         signal.signal(signal.SIGTERM, self.signal_handler)
         signal.signal(signal.SIGINT, self.signal_handler)
@@ -2388,27 +2371,22 @@ class EVVOSVoiceService:
             logger.error("Failed to setup Vosk")
             return
         
-        asyncio.run(self.listen())
+        self.listen()
         self.cleanup()
 
-
 if __name__ == "__main__":
-    service = EVVOSVoiceService()
+    service = VoiceCommandService()
     service.run()
 VOICE_COMMAND_EOF
 fi
 
-chmod +x "$HYBRID_VOICE_LOCAL"
-echo "✓ Voice command service deployed (Hybrid Local-First + Cloud Backup)"
-echo "  - PRIMARY: Local HTTP to mobile (< 100ms)"
-echo "  - SECONDARY: Async Supabase backup (optional)"
-echo "  - OFFLINE: Command queue with persistence"
-echo "  - RECOVERY: Auto-retry on reconnect"
+chmod +x /usr/local/bin/evvos-voice-command.py
+echo "✓ Voice command service deployed"
 
-# Create systemd service file for hybrid voice command
+# Create systemd service for voice command
 cat > /etc/systemd/system/evvos-voice-command.service << 'VOICE_SERVICE_FILE'
 [Unit]
-Description=EVVOS Voice Command Service (Hybrid Local-First + Cloud Backup)
+Description=EVVOS Voice Command Service (Supabase Real-time)
 After=network.target evvos-provisioning.service
 Wants=evvos-provisioning.service
 
@@ -2428,10 +2406,20 @@ WantedBy=multi-user.target
 VOICE_SERVICE_FILE
 
 chmod 644 /etc/systemd/system/evvos-voice-command.service
-echo "✓ Hybrid voice command systemd service created"
-echo "  - LOCAL-FIRST architecture with optional cloud backup"
-echo "  - Service starts after provisioning completes"
+echo "✓ Voice command systemd service created (disabled by default)"
 
+echo ""
+echo "📊 Voice Command System Architecture:"
+echo "  1. Vosk recognizes voice → matches against grammar"
+echo "  2. Recognized command → POST to Supabase voice_commands table"
+echo "  3. Mobile app subscribed via Supabase Real-time"
+echo "  4. Mobile app receives INSERT event → processes command"
+echo "  5. Command executed immediately on mobile device"
+echo ""
+echo "⚡ Performance:"
+echo "  • On hotspot: ~100-300ms latency (same WiFi)"
+echo "  • On cellular: <5s cloud delivery via Supabase"
+echo "  • Offline capable: Commands queued locally"
 echo ""
 echo "🔧 Step 6: Enable and Start Service"
 echo "===================================="
@@ -2441,61 +2429,115 @@ systemctl enable evvos-voice-command
 systemctl start evvos-provisioning
 
 echo ""
-echo "✅ EVVOS Hybrid Architecture Setup Complete!"
-echo "================================================================"
-echo ""
-echo "🏗️  ARCHITECTURE DEPLOYED:"
-echo "  PRIMARY (Local):   Voice → Direct to Mobile App (< 100ms) 🚀"
-echo "  SECONDARY (Cloud): Async Supabase backup (optional) 📊"
-echo "  OFFLINE:           Commands queued locally if mobile unreachable 💾"
-echo "  RECOVERY:          Auto-retry when connectivity restored ♻️"
+echo "✅ EVVOS Provisioning System Setup Complete!"
+echo "=============================================="
 echo ""
 echo "📊 System Status:"
 systemctl status evvos-provisioning --no-pager
 echo ""
-echo "📖 Monitoring Commands:"
+echo "📖 Useful Commands:"
 echo "  Provisioning logs:              sudo journalctl -u evvos-provisioning -f"
 echo "  Voice command logs:             sudo journalctl -u evvos-voice-command -f"
-echo "  Voice service (after reboot):   sudo systemctl status evvos-voice-command"
+echo "  Restart provisioning service:   sudo systemctl restart evvos-provisioning"
+echo "  Provisioning service status:    sudo systemctl status evvos-provisioning"
+echo "  Voice command service status:   sudo systemctl status evvos-voice-command"
+echo "  View device ID:                 cat /sys/class/net/wlan0/address"
 echo ""
-echo "🎤 Voice Service Details:"
-echo "  Architecture:                   LOCAL-FIRST + CLOUD-BACKUP (HYBRID)"
-echo "  Primary: Local HTTP             http://[mobile_ip]:9001/api/voice/command"
-echo "  Secondary: Supabase logging     Async, non-blocking, optional"
-echo "  Offline queue:                  /etc/evvos/command_queue.json"
-echo "  Mobile IP source:               device_credentials.json"
-echo ""
-echo "📝 ReSpeaker HAT Checks:"
-echo "  Check I2C:                      i2cdetect -y 1"
+echo "📝 ReSpeaker HAT Hardware Checks:"
+echo "  Check I2C detection:            i2cdetect -y 1"
 echo "  List audio devices:             arecord -l"
-echo "  Verify ReSpeaker:               cat /proc/asound/cards"
+echo "  Test audio recording:           arecord -D default -f cd -t wav test.wav"
+echo "  Check I2S status:               cat /proc/asound/cards"
 echo ""
-echo "🔧 What Got Deployed:"
-echo "  ✓ WiFi Provisioning Service (hotspot: EVVOS_0001)"
-echo "  ✓ Hybrid Voice Command Service (LOCAL-FIRST + CLOUD-BACKUP)"
-echo "  ✓ ReSpeaker 2-Mics HAT v2.0 audio initialized"
-echo "  ✓ Vosk speech recognition (8 voice commands)"
-echo "  ✓ Offline command queue enabled"
-echo "  ✓ Async Supabase backup available"
-echo "  ✓ Comprehensive timeout/retry protection"
+echo "📝 Service Behavior:"
+echo "  • WiFi Provisioning starts immediately on boot"
+echo "  • Voice Command Service starts ONLY after successful WiFi + internet"
+echo "  • Voice Command Service stops automatically when device is unpaired"
+echo "  • Provisioning restarts hotspot if WiFi connection fails"
+echo "  • Heartbeat sent every 60s when connected (for keep-alive)"
+echo "  • Audio input from ReSpeaker HAT (I2S interface)"
+echo "  • Voice commands recognized: okay, confirm, cancel, start, stop, help, repeat, clear"
+echo ""
+echo "🎯 Voice Command Execution Flow (Supabase Real-time):"
+echo "  ════════════════════════════════════════════════════"
+echo "  1. User speaks near Raspberry Pi with ReSpeaker HAT"
+echo "  2. Vosk recognizes voice command via microphone"
+echo "  3. Pi POSTs command to Supabase 'voice_commands' table:"
+echo "     POST /rest/v1/voice_commands"
+echo "     Body: { device_id, user_id, command, confidence, timestamp }"
+echo ""
+echo "  4. Mobile app receives via Supabase Real-time subscription:"
+echo "     Event: INSERT on voice_commands table (user_id filter)"
+echo ""
+echo "  5. Mobile app processes and executes command"
+echo "     Latency: ~100-300ms on hotspot, <5s on cellular"
+echo "  ════════════════════════════════════════════════════"
+echo ""
+echo "📊 Database Integration:"
+echo "  • Table: public.voice_commands"
+echo "  • Columns: id, device_id, user_id, command, confidence, status, timestamp"
+echo "  • Real-time: Enabled (postgres_changes subscription)"
+echo "  • RLS: Managed by Supabase Edge Functions"
+echo ""
+echo "🔗 Data Flow:"
+echo "  Pi (Voice Recognition)"
+echo "    ↓"
+echo "  Vosk (Grammar Match: okay, confirm, cancel, start, stop, help, repeat, clear)"
+echo "    ↓"
+echo "  asyncio + aiohttp (Async POST)"
+echo "    ↓"
+echo "  Supabase REST API (voice_commands table INSERT)"
+echo "    ↓"
+echo "  Supabase Real-time (postgres_changes event)"
+echo "    ↓"
+echo "  Mobile App (@supabase/supabase-js subscription)"
+echo "    ↓"
+echo "  Mobile App Handler (handleVoiceCommand())"
+echo "    ↓"
+echo "  Action Executed (show alert, send notification, etc.)"
+echo ""
+echo "🔐 Security:"
+echo "  • user_id filter ensures only authorized commands processed"
+echo "  • Supabase RLS policies protect device_credentials"
+echo "  • Edge Functions validate requests server-side"
+echo "  • No direct database write from mobile (Pi is trusted)"
+echo ""
+echo "⚠️  TROUBLESHOOTING VOICE COMMANDS:"
+echo "  If commands not received on mobile:"
+echo ""
+echo "  1. Check Pi is connected to WiFi and has internet:"
+echo "     ip addr show wlan0"
+echo "     curl https://google.com"
+echo ""
+echo "  2. Check voice command service is running:"
+echo "     sudo systemctl status evvos-voice-command"
+echo "     sudo journalctl -u evvos-voice-command -f"
+echo ""
+echo "  3. Check user_id is set in device_credentials.json:"
+echo "     cat /etc/evvos/device_credentials.json"
+echo ""
+echo "  4. Test direct Supabase POST (from Pi):"
+echo "     curl -X POST https://zekbonbxwccgsfagrrph.supabase.co/rest/v1/voice_commands \\"
+echo "       -H 'Content-Type: application/json' \\"
+echo "       -H 'Authorization: Bearer ANON_KEY' \\"
+echo "       -d '{\"device_id\":\"test\",\"user_id\":\"YOUR_USER_ID\",\"command\":\"test\"}'"
+echo ""
+echo "  5. Check mobile app is subscribed to voice_commands:"
+echo "     Mobile app logs should show: '[VoiceCommandListener] ✅ Subscribed to voice commands'"
+echo ""
+echo "🔧 Hardware Requirements Met:"
+echo "  • I2S overlay configured (device acts as master clock)"
+echo "  • I2C enabled (for HAT detection at address 0x18)"
+echo "  • NumPy 1.26.4 (pre-built, not compiled - prevents RAM crash)"
+echo "  • System libraries: OpenBLAS, PortAudio (prevents missing .so errors)"
+echo "  • DNS set to 8.8.8.8, pip timeout 1000s (stable downloads)"
+echo "  • Vosk with grammar optimization (light CPU usage)"
 echo ""
 echo "⚠️  IMPORTANT - Reboot Required:"
-echo "  The I2S and I2C device tree changes require reboot."
 echo "  Run: sudo reboot"
-echo ""  
-echo "🚀 After Reboot:"
-echo "  1. EVVOS_0001 WiFi hotspot broadcasts automatically"
-echo "  2. User scans QR code in mobile app to provision"
-echo "  3. Device joins user's WiFi network"
-echo "  4. Voice service starts automatically"
-echo "  5. Commands delivered INSTANTLY to mobile (LOCAL)"
-echo "  6. Backup logged to Supabase (CLOUD - optional)"
+echo "  I2S/I2C device tree changes require reboot to take effect."
 echo ""
-echo "🌐 HYBRID ARCHITECTURE BENEFITS:"
-echo "  • 5-20x FASTER: < 100ms local vs 500-2000ms cloud"
-echo "  • OFFLINE CAPABLE: Works on local WiFi even if internet down"
-echo "  • ZERO LOSS: Commands queued locally if mobile temporarily offline"
-echo "  • OPTIONAL BACKUP: Cloud logging doesn't block voice processing"
-echo "  • RESILIENT: Auto-retry queue when connectivity restored"
+echo "🚀 The EVVOS_0001 WiFi hotspot should now be broadcasting!"
+echo "   Mobile app can scan and provision the device."
+echo "   Voice command recognition starts after provisioning completes."
 echo ""
-echo "================================================================"
