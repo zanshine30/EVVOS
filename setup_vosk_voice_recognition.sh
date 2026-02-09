@@ -275,8 +275,9 @@ VOSK_MODEL_PATH = "/opt/evvos/vosk_model/current"
 SAMPLE_RATE = 16000
 AUDIO_CHUNK_SIZE = 2048  # Reduced from 4000 for faster recognition (0.128s per chunk vs 0.25s)
 
-# EVVOS command list (8 commands)
+# EVVOS command list (7 commands + 1 wake word)
 RECOGNIZED_COMMANDS = [
+    "WAKE WORD: evvos",
     "start recording",
     "stop recording",
     "emergency backup",
@@ -433,29 +434,34 @@ class VoiceRecognitionService:
         self.device_index = None
         self.manila_tz = timezone(timedelta(hours=8))
         
+        # Wake word and command state
+        self.active_listening = False  # False = idle (waiting for wake word), True = active (listening for command)
+        self.active_listening_start_time = None
+        self.active_listening_timeout = 5  # 5 seconds to say command after wake word
+        
         logger.info("=" * 70)
         logger.info("EVVOS Voice Recognition Service Starting")
+        logger.info("Listening mode: WAKE WORD + COMMAND (2-stage)")
         logger.info("=" * 70)
 
-    def match_voice_command(self, text: str, confidence: float = 0.0) -> str:
+    def match_voice_command(self, text: str, confidence: float = 0.0, mode: str = "command") -> str:
         """
-        Intelligently match recognized text to a voice command
-        Handles variations with optional confidence threshold
-        Returns: command name if matched, None otherwise
+        Match voice input based on mode
+        mode = "wake" = looking for "EVVOS" wake word
+        mode = "command" = looking for actual voice commands
+        Returns: matched command name, "wake", or None
         """
-        # For Vosk small model: confidence is often 0, so use very low threshold
-        # Only reject if confidence is explicitly negative (error state)
-        MIN_CONFIDENCE = -0.1  # Accept all results from Vosk (it returns 0 by default)
-        
-        # If confidence is invalid, log it but continue
-        if confidence < MIN_CONFIDENCE:
-            logger.debug(f"Invalid confidence ({confidence:.2f}): '{text}'")
-            return None
-        
         text = text.lower().strip()
         words = text.split()
         
-        # Define command matching patterns (keywords and phrases)
+        # WAKE WORD MODE - only listen for "EVVOS"
+        if mode == "wake":
+            if "evvos" in words:
+                logger.info(f"🎙️ WAKE WORD DETECTED: '{text}' - Entering active listening mode (5 sec)")
+                return "wake"
+            return None
+        
+        # COMMAND MODE - match actual commands (requires wake word was triggered)
         command_patterns = {
             "start recording": ["start", "recording"],
             "stop recording": ["stop", "recording"],
@@ -466,7 +472,6 @@ class VoiceRecognitionService:
             "cancel": ["cancel"],
         }
         
-        # Priority ordering: most specific/important first
         priority_order = [
             "start recording",
             "stop recording",
@@ -480,22 +485,21 @@ class VoiceRecognitionService:
         for cmd in priority_order:
             keywords = command_patterns[cmd]
             
-            # Special case: "emergency backup" - check for ANY of the trigger words (single words = easier to match)
+            # Special case: emergency backup - check for ANY trigger word
             if cmd == "emergency backup":
                 for keyword in keywords:
-                    # Exact word match (not substring) to avoid false positives
-                    if keyword in words:  # Check words list, not text string
+                    if keyword in words:
                         logger.info(f"✓ Command detected: '{cmd}' (trigger: '{keyword}' | full text: '{text}')")
                         return cmd
             
-            # For multi-word commands: check if ALL keywords are present
-            elif all(keyword in words for keyword in keywords):  # Check words list for better accuracy
+            # Multi-word commands: check if ALL keywords present
+            elif all(keyword in words for keyword in keywords):
                 logger.info(f"✓ Command detected: '{cmd}' (keywords: {keywords} | full text: '{text}')")
                 return cmd
         
-        # No match found - only log if text seems like an attempt
+        # No match found
         if len(text) > 2:
-            logger.debug(f"Text recognized but no match: '{text}' (words: {words})")
+            logger.debug(f"Text in active mode but no command match: '{text}' (words: {words})")
         return None
 
     def get_manila_time(self) -> str:
@@ -596,32 +600,41 @@ class VoiceRecognitionService:
             return False
 
     def process_voice_input(self):
-        """Main voice recognition loop"""
+        """Main voice recognition loop with 2-stage listening"""
         logger.info("🎤 Listening for voice commands...")
         logger.info("=" * 70)
-        logger.info("Recognized commands:")
-        for i, cmd in enumerate(RECOGNIZED_COMMANDS, 1):
-            logger.info(f"  {i}. {cmd}")
+        logger.info("STAGE 1: IDLE - Waiting for wake word 'EVVOS'")
+        logger.info("STAGE 2: ACTIVE - Listen for command (5 seconds)")
         logger.info("=" * 70)
         
         self.running = True
         consecutive_silence = 0
-        max_silence_frames = 5  # ~1 second of silence
+        max_silence_frames = 5
+        self.active_listening = False
+        self.active_listening_start_time = None
         
-        # Set LED to listening state once (solid cyan, no blinking overhead during listening)
-        self.pixels.set_color(*LED_COLORS["listening"], brightness=15)
-        
-        logger.info("Listening indicator on, ready for voice commands...")
+        # Set initial LED state (dim cyan = idle, waiting for wake word)
+        self.pixels.set_color(*LED_COLORS["listening"], brightness=8)
+        logger.info("LED: Dim cyan (idle)")
         
         try:
             while self.running:
                 try:
-                    # Read audio chunk from microphone (CRITICAL PATH - minimal overhead)
+                    # Read audio chunk from microphone (CRITICAL PATH)
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
+                    
+                    # Check if we've timed out in active listening mode
+                    if self.active_listening and self.active_listening_start_time:
+                        elapsed = time.time() - self.active_listening_start_time
+                        if elapsed > self.active_listening_timeout:
+                            logger.info("⏱️  Active listening timeout (5 sec) - returning to idle")
+                            self.active_listening = False
+                            # Switch back to idle LED
+                            self.pixels.set_color(*LED_COLORS["listening"], brightness=8)
+                            logger.info("LED: Dim cyan (idle)")
                     
                     # Process audio with Vosk recognizer
                     if self.recognizer.AcceptWaveform(data):
-                        # Final recognition result
                         result = json.loads(self.recognizer.Result())
                         text = result.get("text", "").strip().lower()
                         confidence = result.get("confidence", 0.0)
@@ -629,13 +642,27 @@ class VoiceRecognitionService:
                         if text:
                             consecutive_silence = 0
                             
-                            # Use intelligent command matching WITH confidence threshold
-                            matched_command = self.match_voice_command(text, confidence)
-                            if matched_command:
-                                # Command detected!
-                                self._on_command_detected(matched_command, text, confidence)
-                            elif len(text) > 2:
-                                logger.debug(f"No command matched in: '{text}' (confidence: {confidence})")
+                            # IDLE MODE: Listen for wake word
+                            if not self.active_listening:
+                                matched = self.match_voice_command(text, confidence, mode="wake")
+                                if matched == "wake":
+                                    # Wake word detected! Enter active listening mode
+                                    self.active_listening = True
+                                    self.active_listening_start_time = time.time()
+                                    # Switch to bright cyan = active listening
+                                    self.pixels.set_color(*LED_COLORS["listening"], brightness=15)
+                                    logger.info("LED: Bright cyan (active listening - 5 seconds)")
+                            
+                            # ACTIVE MODE: Listen for commands
+                            else:
+                                matched_command = self.match_voice_command(text, confidence, mode="command")
+                                if matched_command:
+                                    # Command detected!
+                                    self._on_command_detected(matched_command, text, confidence)
+                                    # Return to idle after command
+                                    self.active_listening = False
+                                    self.pixels.set_color(*LED_COLORS["listening"], brightness=8)
+                                    logger.info("LED: Dim cyan (idle)")
                     else:
                         # Partial result
                         partial = json.loads(self.recognizer.PartialResult())
@@ -873,24 +900,42 @@ echo "  • Service: evvos-voice.service"
 echo "  • Log File: $LOG_FILE"
 echo ""
 
-log_info "Recognized Voice Commands (8 total):"
-for cmd in "${RECOGNIZED_COMMANDS[@]}"; do
-    echo "  • $cmd"
+log_info "Recognized Voice Commands (2-Stage Wake Word System):"
+echo ""
+echo "  STAGE 1: Idle (waiting for wake word)"
+echo "  • Say: ${CYAN}\"EVVOS\"${NC} to activate"
+echo ""
+echo "  STAGE 2: Active (5 second listening window)"
+echo "  • Say any command:"
+for cmd in "${RECOGNIZED_COMMANDS[@]:1}"; do  # Skip first item (wake word)
+    echo "    - $cmd"
 done
 echo ""
-
-log_info "LED Feedback Colors:"
-echo "  • Cyan (listening): Waiting for voice input"
-echo "  • Green (detected): Command recognized"
-echo "  • Red (error): Service error occurred"
+echo "  Example: \"${CYAN}EVVOS${NC}\" → wait for beep → \"${GREEN}snapshot${NC}\""
 echo ""
 
-log_info "IMPORTANT: WATCH LIVE LOGS while testing:"
+log_info "LED Feedback States:"
+echo "  • ${CYAN}Dim cyan${NC}    = IDLE (waiting for 'EVVOS' wake word)"
+echo "  • ${CYAN}Bright cyan${NC} = ACTIVE (5 seconds to say command)"
+echo "  • ${GREEN}Green flashes${NC} = Command detected successfully"
+echo ""
+
+log_info "IMPORTANT: Testing the Wake Word System:"
 echo ""
 echo "  ${CYAN}sudo journalctl -u evvos-voice -f${NC}"
 echo ""
-echo "  When you speak a command, look for:"
-echo "  ${GREEN}[VOICE_COMMAND_DETECTED]${NC} 'COMMAND_NAME' detected in: '...' | Confidence: 0.85"
+echo "  1. Say: \"${CYAN}EVVOS${NC}\""
+echo "     Look for: ${GREEN}🎙️ WAKE WORD DETECTED${NC}"
+echo "     LED changes to bright cyan"
+echo ""
+echo "  2. You have 5 seconds to say a command:"
+echo "     Say: \"${GREEN}snapshot${NC}\""
+echo "     Look for: ${GREEN}✓ Command detected: 'snapshot'${NC}"
+echo "     LED flashes green 3 times"
+echo ""
+echo "  3. If you don't say a command in 5 seconds:"
+echo "     LED returns to dim cyan (idle)"
+echo "     Say \"${CYAN}EVVOS${NC}\" again to restart"
 echo ""
 
 log_info "Service Management:"
@@ -940,10 +985,18 @@ echo "  A: Check SPI is enabled (dtparam=spi=on in /boot/firmware/config.txt)"
 echo ""
 
 log_info "Next Steps:"
-echo "  1. Run: ${CYAN}sudo journalctl -u evvos-voice -f${NC}"
-echo "  2. Speak a command like: 'start recording' or 'snapshot'"
-echo "  3. Watch for green LED flash and log message"
-echo "  4. Adjust microphone gain if needed"
+echo "  1. Test the wake word system:"
+echo "     ${CYAN}sudo journalctl -u evvos-voice -f${NC}"
+echo ""
+echo "  2. Say: \"${CYAN}EVVOS${NC}\" (should see 🎙️ WAKE_WORD_DETECTED)"
+echo ""
+echo "  3. Within 5 seconds, say a command:"
+echo "     \"${GREEN}snapshot${NC}\" or \"${GREEN}help${NC}\" or \"${GREEN}start recording${NC}\""
+echo ""
+echo "  4. If command doesn't trigger:"
+echo "     • Check microphone gain: ${CYAN}amixer -c seeed2micvoicec contents${NC}"
+echo "     • Speak clearly and distinctly"
+echo "     • Wait for bright cyan LED before saying command"
 echo ""
 
 log_info "Integration:"
