@@ -222,7 +222,6 @@ echo "Installing audio libraries (Vosk, PyAudio, SoundFile)..."
 echo "⏱️  This is another large download - may take 10-20 minutes"
 for i in {1..3}; do
   if pip install --no-cache-dir --prefer-binary --timeout=1800 --retries=5 \
-    pysoundfile==0.13.1 \
     pyaudio==0.2.13 \
     scipy==1.10.1 \
     vosk==0.3.32; then
