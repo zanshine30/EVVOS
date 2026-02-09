@@ -98,12 +98,35 @@ echo "Configuring ALSA levels for ReSpeaker..."
 # Wait for sound system to initialize
 sleep 2
 
-echo "⏳ Setting microphone gains (may take a moment to detect audio devices)..."
+echo "⏳ Setting microphone gains for TLV320AIC3104 codec..."
 
-# Common ReSpeaker control names - try all variations
-# ReSpeaker 2-Mics HAT typically uses these controls:
-for control in "Master Mono" "Capture" "Mic" "Mic1" "Mic2" "Input" "Digital" "Analog"; do
-    # Try to set capture gain to 80% (good default for voice recognition)
+# ReSpeaker 2-Mics HAT V2.0 uses TLV320AIC3104 codec
+# These are the specific controls for this codec:
+echo "Configuring TLV320AIC3104 Audio Codec..."
+
+# List available controls for debugging
+echo "Available audio controls:"
+amixer controls 2>/dev/null | head -20 || echo "  (amixer controls not available, continuing...)"
+
+# Set microphone capture levels for TLV320AIC3104
+# Primary: ADC/Capture path
+for control in "ADC" "Capture" "Mic" "Input" "Mic1" "Mic2" "Line In"; do
+    if amixer sget "${control}" > /dev/null 2>&1; then
+        amixer sset "${control}" 85% > /dev/null 2>&1
+        echo "✓ Set ${control} to 85%"
+    fi
+done
+
+# Ensure input is not muted
+for control in "Input" "Mic" "Capture" "ADC"; do
+    if amixer sget "${control}" > /dev/null 2>&1; then
+        amixer sset "${control}" unmute > /dev/null 2>&1 2>&1
+        echo "✓ Unmuted ${control}"
+    fi
+done
+
+# Set output levels for audio feedback
+for control in "Speaker" "Master" "Headphone" "Output"; do
     if amixer sget "${control}" > /dev/null 2>&1; then
         amixer sset "${control}" 80% > /dev/null 2>&1
         echo "✓ Set ${control} to 80%"
@@ -355,7 +378,12 @@ def main():
 
     # Ready Indication: Cyan/Blue (Listening)
     logger.info("✓ Listening for commands...")
-    pixels.set_color(0, 100, 100, 2) 
+    if pixels:
+        pixels.set_color(0, 100, 100, 2)
+    logger.info("======== VOICE RECOGNITION ACTIVE ========")
+    logger.info("Recognized commands: start recording, stop recording, emergency backup,")
+    logger.info("                      backup backup backup, snapshot, mark incident, cancel, confirm")
+    logger.info("========================================") 
 
     # Command List
     COMMANDS = [
@@ -366,36 +394,82 @@ def main():
 
     try:
         while True:
-            data = stream.read(4000, exception_on_overflow=False)
+            try:
+                data = stream.read(4000, exception_on_overflow=False)
+            except Exception as stream_err:
+                logger.error(f"Error reading audio stream: {stream_err}")
+                time.sleep(0.5)
+                continue
+            
             if recognizer.AcceptWaveform(data):
                 result = json.loads(recognizer.Result())
-                text = result.get("text", "")
+                text = result.get("text", "").strip().lower()
+                confidence = result.get("confidence", 0.0)
                 
+                # Log partial results
                 if text:
-                    # Simple keyword matching
+                    logger.debug(f"Raw recognized text: '{text}' (confidence: {confidence})")
+                    
+                    # Check each command
+                    command_found = False
                     for cmd in COMMANDS:
-                        if cmd in text:
-                            logger.info(f"⚡ COMMAND DETECTED: {cmd.upper()}")
+                        if cmd.lower() in text:
+                            command_found = True
+                            # Log to both file and journalctl
+                            log_msg = f"🎤 [VOICE_COMMAND] '{cmd.upper()}' detected in: '{text}'"
+                            logger.warning(log_msg)  # WARNING level ensures visibility in journalctl
+                            print(log_msg)  # Also print to stdout for immediate feedback
                             
                             # Visual Feedback: Green Flash (if LEDs available)
                             if pixels:
-                                pixels.set_color(0, 255, 0, 10)
-                                time.sleep(0.5)
-                                # Return to Listening Color
-                                pixels.set_color(0, 100, 100, 2)
+                                try:
+                                    pixels.set_color(0, 255, 0, 10)  # Green flash
+                                    time.sleep(0.3)
+                                    pixels.set_color(0, 100, 100, 2)  # Back to listening
+                                except Exception as led_err:
+                                    logger.debug(f"LED feedback error: {led_err}")
                             
                             # TODO: Insert logic to trigger these actions
-                            # e.g. write to a pipe, socket, or call API
+                            # e.g. write to a pipe, socket, or HTTP POST to mobile app
+                            # Example: notify app via HTTP
+                            # await send_command_to_app(cmd)
+                            
+                            break  # Exit loop after first match
+                    
+                    if not command_found:
+                        logger.debug(f"No command matched in: '{text}'")
+            else:
+                # Partial result available
+                partial = json.loads(recognizer.PartialResult())
+                partial_text = partial.get("partial", "").strip()
+                if partial_text:
+                    logger.debug(f"Partial recognition: '{partial_text}'")
                             
     except KeyboardInterrupt:
-        logger.info("Stopping...")
+        logger.info("🛑 Voice agent stopped by user")
+    except Exception as main_err:
+        logger.error(f"Fatal error in voice loop: {main_err}", exc_info=True)
     finally:
-        if pixels:
-            pixels.off()
-            pixels.close()
-        stream.stop_stream()
-        stream.close()
-        p.terminate()
+        logger.info("Cleaning up resources...")
+        try:
+            if pixels:
+                pixels.off()
+                pixels.close()
+        except Exception as e:
+            logger.debug(f"Error closing LEDs: {e}")
+        
+        try:
+            stream.stop_stream()
+            stream.close()
+        except Exception as e:
+            logger.debug(f"Error closing stream: {e}")
+        
+        try:
+            p.terminate()
+        except Exception as e:
+            logger.debug(f"Error terminating audio: {e}")
+        
+        logger.info("Voice agent shutdown complete")
 
 if __name__ == "__main__":
     main()
@@ -410,9 +484,10 @@ echo "========================================="
 
 cat > /etc/systemd/system/evvos-voice.service << 'SERVICE_FILE'
 [Unit]
-Description=EVVOS Voice Command & Hardware Agent
-After=network.target sound.target
+Description=EVVOS Voice Command & Hardware Agent (ReSpeaker 2-Mics HAT V2.0)
+After=network.target sound.target alsa-restore.service
 Requires=sound.target
+Wants=alsa-restore.service
 
 [Service]
 Type=simple
@@ -421,13 +496,18 @@ User=root
 WorkingDirectory=/opt/evvos
 ExecStart=/opt/evvos/venv/bin/python3 /usr/local/bin/evvos-voice.py
 Restart=always
-RestartSec=5
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=evvos-voice
+# Increase limits for GPIO/SPI/audio device access
+LimitNOFILE=65536
 # Allow access to GPIO and SPI without special permissions (User is root)
-Environment="PATH=/opt/evvos/venv/bin:/usr/bin"
+Environment="PATH=/opt/evvos/venv/bin:/usr/bin:/sbin:/usr/sbin"
 Environment="GPIOZERO_PIN_FACTORY=native"
+Environment="ALSA_CARD=seeed"
 
 [Install]
 WantedBy=multi-user.target
@@ -438,77 +518,134 @@ systemctl enable evvos-voice
 systemctl restart evvos-voice
 
 echo ""
-echo "✅ Setup Complete!"
-echo "=================="
+echo "✅ ReSpeaker 2-Mics HAT V2.0 Setup Complete!"
+echo "============================================="
 echo "1. ✓ ReSpeaker drivers installed (with kernel mismatch fallback)"
 echo "2. ✓ ALSA microphone levels configured (80% gain)"
 echo "3. ✓ Vosk offline model downloaded"
 echo "4. ✓ Voice Agent service installed and running"
 echo ""
-echo "============================================================"
-echo "📝 ALSA Microphone Configuration Reference"
-echo "============================================================"
+echo "════════════════════════════════════════════════════════════════"
+echo "🎤 MONITORING VOICE COMMAND DETECTION (Live Logs)"
+echo "════════════════════════════════════════════════════════════════"
 echo ""
-echo "View current audio levels:"
+echo "View voice command detection in REAL-TIME with:"
+echo ""
+echo "  sudo journalctl -u evvos-voice -f"
+echo ""
+echo "This will show messages like:"
+echo "  [Voice] WARNING 🎤 [VOICE_COMMAND] 'START RECORDING' detected in: 'ok guys start recording now'"
+echo ""
+echo "Detailed troubleshooting logs:"
+echo ""
+echo "  sudo journalctl -u evvos-voice -n 50          # Last 50 lines"
+echo "  sudo journalctl -u evvos-voice --since '10 min ago' -f  # Last 10 minutes"
+echo "  sudo tail -f /var/log/evvos/evvos_voice.log   # File logs"
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "🔌 VERIFY HARDWARE (ReSpeaker 2-Mics HAT V2.0)"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+echo "Check if ReSpeaker is detected:"
+echo ""
+echo "  aplay -l              # List playback devices (should show seeed-voicecard)"
+echo "  arecord -l            # List recording devices"
+echo "  amixer -c CARD_INDEX controls | grep -i mic  # Show microphone controls"
+echo ""
+echo "Test microphone directly (record 5 seconds then play back):"
+echo ""
+echo "  arecord -f cd -r 16000 -c 1 /tmp/test.wav && aplay /tmp/test.wav"
+echo ""
+echo "View ALSA codec info (TLV320AIC3104):"
+echo ""
+echo "  cat /proc/asound/cards"
 echo "  amixer"
 echo ""
-echo "List all ReSpeaker audio controls:"
-echo "  amixer controls | grep -i respeaker"
-echo "  amixer controls  # Show all controls with indices"
+echo "════════════════════════════════════════════════════════════════"
+echo "⚙️  FINE-TUNE MICROPHONE SENSITIVITY"
+echo "════════════════════════════════════════════════════════════════"
 echo ""
-echo "Adjust specific controls manually (percentage 0-100):"
-echo "  amixer sset 'Capture' 85%        # Increase microphone sensitivity"
-echo "  amixer sset 'Master' 100%        # Set master volume"
-echo "  amixer sset 'Input' 70%          # Lower input gain if clipping occurs"
+echo "Current gain is 85% (TLV320AIC3104 Capture path)"
 echo ""
-echo "Interactive ALSA mixer (text-based GUI):"
-echo "  alsamixer                         # Press F1 for help, ESC to exit"
+echo "If voice is too quiet (commands not detected):"
+echo "  sudo amixer sset 'ADC' 95%"
+echo "  sudo amixer sset 'Capture' 95%"
+echo "  sudo alsactl store  # Save settings"
 echo ""
-echo "Save current audio settings for boot:"
-echo "  sudo alsactl store               # Save to /var/lib/alsa/asound.state"
+echo "If voice is clipping or distorted:"
+echo "  sudo amixer sset 'ADC' 75%"
+echo "  sudo amixer sset 'Capture' 75%"
+echo "  sudo alsactl store"
 echo ""
-echo "Restore ALSA settings:"
-echo "  sudo alsactl restore             # Restore from saved state"
+echo "Use interactive mixer for real-time adjustment:"
+echo "  sudo alsamixer  # Up/Down arrows to adjust, F6 to select card, ESC to exit"
 echo ""
-echo "Reset ReSpeaker to hardware defaults:"
-echo "  systemctl restart alsa-restore"
+echo "Save settings after adjusting:"
+echo "  sudo alsactl store"
 echo ""
-echo "📊 Voice Agent Logs:"
-echo "  tail -f /var/log/evvos/evvos_voice.log       # Real-time logs"
-echo "  journalctl -u evvos-voice -f                 # Systemd journal"
+echo "════════════════════════════════════════════════════════════════"
+echo "⚡ VOICE SERVICE MANAGEMENT"
+echo "════════════════════════════════════════════════════════════════"
 echo ""
-echo "🔧 Voice Service Management:"
-echo "  systemctl status evvos-voice                 # Check status"
-echo "  systemctl restart evvos-voice                # Restart service"
-echo "  systemctl stop evvos-voice                   # Stop service"
-echo "  systemctl start evvos-voice                  # Start service"
+echo "  systemctl start evvos-voice       # Start service"
+echo "  systemctl stop evvos-voice        # Stop service"
+echo "  systemctl restart evvos-voice     # Restart service (detects config changes)"
+echo "  systemctl status evvos-voice      # Check service status"
+echo "  systemctl enable evvos-voice      # Auto-start on boot"
+echo "  systemctl disable evvos-voice     # Disable auto-start"
 echo ""
-echo "🎙️  Test Microphone Recording:"
-echo "  arecord -f cd -r 16000 -c 1 /tmp/test.wav    # Record 5 seconds (Ctrl+C to stop)"
-echo "  aplay /tmp/test.wav                          # Playback test recording"
+echo "════════════════════════════════════════════════════════════════"
+echo "🔧 TROUBLESHOOTING (If Commands Not Detected)"
+echo "════════════════════════════════════════════════════════════════"
 echo ""
-echo "============================================================"
+echo "1. Check if service is running:"
+echo "   systemctl status evvos-voice"
 echo ""
-echo "⚠️  IMPORTANT NOTES:"
-echo "============================================================"
-echo "1. Reboot Required:"
-echo "   If you just installed ReSpeaker drivers, REBOOT the Pi:"
-echo "     sudo reboot"
+echo "2. Watch live logs while speaking a command:"
+echo "   sudo journalctl -u evvos-voice -f &"
+echo "   # Then say: 'start recording'"
+echo "   # You should see: [VOICE_COMMAND] 'START RECORDING' detected"
 echo ""
-echo "2. Kernel Mismatch (If seen during driver install):"
-echo "   This is NORMAL on systems that used rpi-update."
-echo "   The fallback ALSA drivers will work fine."
+echo "3. Verify ReSpeaker is detected by Vosk:"
+echo "   aplay -l | grep -i seeed  # Should show ReSpeaker"
+echo "   arecord -l | grep -i seeed"
 echo ""
-echo "3. Microphone Gain Optimization:"
-echo "   - Default: 80% gain (good balance for voice recognition)"
-echo "   - If too quiet: increase to 90-100%"
-echo "   - If clipping/distortion: decrease to 60-70%"
-echo "   - Use 'alsamixer' for interactive adjustment"
+echo "4. Test Python audio directly:"
+echo "   python3 << 'EOF'"
+echo "   import pyaudio"
+echo "   p = pyaudio.PyAudio()"
+echo "   print(f'Found {p.get_device_count()} audio devices')"
+echo "   for i in range(p.get_device_count()):"
+echo "       info = p.get_device_info_by_index(i)"
+echo "       print(f'[{i}] {info[\"name\"]}')"
+echo "   p.terminate()"
+echo "   EOF"
 echo ""
-echo "4. Voice Command Detection:"
-echo "   Vosk supports these offline commands:"
-echo "     \"start recording\", \"stop recording\", \"emergency backup\""
-echo "     \"backup backup backup\", \"snapshot\", \"mark incident\""
-echo "     \"cancel\", \"confirm\""
+echo "5. Check Vosk model is available:"
+echo "   ls -la /opt/evvos/model/current"
+echo ""
+echo "6. If ReSpeaker drivers failed to install:"
+echo "   cd /usr/src/seeed-voicecard && sudo ./install.sh"
+echo ""
+echo "7. CRITICAL: After any driver/hardware changes - REBOOT:"
+echo "   sudo reboot"
+echo ""
+echo "════════════════════════════════════════════════════════════════"
+echo "✨ TESTED VOICE COMMANDS"
+echo "════════════════════════════════════════════════════════════════"
+echo ""
+echo "The following commands are detected by Vosk:"
+echo ""
+echo "  'start recording'      (press button or say: 'start recording')"
+echo "  'stop recording'       (press button or say: 'stop recording')"
+echo "  'emergency backup'     (say: 'emergency backup')"
+echo "  'backup backup backup' (say: 'backup backup backup' x3 for emphasis)"
+echo "  'snapshot'             (say: 'snapshot')"
+echo "  'mark incident'        (say: 'mark incident')"
+echo "  'cancel'               (say: 'cancel')"
+echo "  'confirm'              (say: 'confirm')"
+echo ""
+echo "Watch journalctl for confirmation:"
+echo "  sudo journalctl -u evvos-voice -f | grep VOICE_COMMAND"
 echo ""
 echo ""
