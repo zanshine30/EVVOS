@@ -437,12 +437,20 @@ class VoiceRecognitionService:
         logger.info("EVVOS Voice Recognition Service Starting")
         logger.info("=" * 70)
 
-    def match_voice_command(self, text: str) -> str:
+    def match_voice_command(self, text: str, confidence: float = 0.0) -> str:
         """
         Intelligently match recognized text to a voice command
-        Handles variations, partial matches, and key phrases
+        Handles variations with confidence threshold to reduce false positives
         Returns: command name if matched, None otherwise
         """
+        # Minimum confidence threshold - lower = more sensitive, higher = more accurate
+        MIN_CONFIDENCE = 0.5
+        
+        # If confidence too low, reject immediately
+        if confidence < MIN_CONFIDENCE:
+            logger.debug(f"Confidence too low ({confidence:.2f} < {MIN_CONFIDENCE}): '{text}'")
+            return None
+        
         text = text.lower().strip()
         words = text.split()
         
@@ -450,14 +458,14 @@ class VoiceRecognitionService:
         command_patterns = {
             "start recording": ["start", "recording"],
             "stop recording": ["stop", "recording"],
-            "emergency backup": ["help", "alert", "emergency", "backup"],  # Multiple triggers for Emergency Backup
+            "emergency backup": ["help", "alert", "emergency", "backup"],
             "mark incident": ["mark", "incident"],
             "snapshot": ["snapshot"],
             "confirm": ["confirm"],
             "cancel": ["cancel"],
         }
         
-        # Priority ordering: longer/more specific commands first
+        # Priority ordering: most specific/important first
         priority_order = [
             "start recording",
             "stop recording",
@@ -471,19 +479,21 @@ class VoiceRecognitionService:
         for cmd in priority_order:
             keywords = command_patterns[cmd]
             
-            # Special case: "emergency backup" - check for ANY of the trigger words
+            # Special case: "emergency backup" - check for ANY of the trigger words (single words = easier to match)
             if cmd == "emergency backup":
-                # Check if any trigger word is present
                 for keyword in keywords:
-                    if keyword in text:
-                        logger.debug(f"Command match: '{cmd}' (trigger word '{keyword}' in: '{text}')")
+                    # Exact word match (not substring) to avoid false positives
+                    if keyword in words:  # Check words list, not text string
+                        logger.debug(f"✓ Match: '{cmd}' (confidence: {confidence:.2f}, trigger: '{keyword}' in words: {words})")
                         return cmd
             
-            # Check if all keywords are present in the text (in order)
-            elif all(keyword in text for keyword in keywords):
-                logger.debug(f"Command match: '{cmd}' (keywords {keywords} in: '{text}')")
+            # For multi-word commands: check if ALL keywords are present
+            elif all(keyword in words for keyword in keywords):  # Check words list for better accuracy
+                logger.debug(f"✓ Match: '{cmd}' (confidence: {confidence:.2f}, keywords: {keywords} in words: {words})")
                 return cmd
         
+        # No match found
+        logger.debug(f"✗ No match (confidence: {confidence:.2f}): '{text}'")
         return None
 
     def get_manila_time(self) -> str:
@@ -596,8 +606,8 @@ class VoiceRecognitionService:
         consecutive_silence = 0
         max_silence_frames = 5  # ~1 second of silence
         
-        # Set LED to listening state once (no blinking overhead during listening)
-        self.pixels.set_color(*LED_COLORS["listening"], brightness=1)
+        # Set LED to listening state once (solid cyan, no blinking overhead during listening)
+        self.pixels.set_color(*LED_COLORS["listening"], brightness=5)
         
         logger.info("Listening indicator on, ready for voice commands...")
         
@@ -617,8 +627,8 @@ class VoiceRecognitionService:
                         if text:
                             consecutive_silence = 0
                             
-                            # Use intelligent command matching
-                            matched_command = self.match_voice_command(text)
+                            # Use intelligent command matching WITH confidence threshold
+                            matched_command = self.match_voice_command(text, confidence)
                             if matched_command:
                                 # Command detected!
                                 self._on_command_detected(matched_command, text, confidence)
