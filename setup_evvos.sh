@@ -71,6 +71,8 @@ timeout $APT_GET_TIMEOUT apt-get install -y --no-install-recommends --no-install
   net-tools \
   alsa-utils \
   alsa-tools \
+  bc \
+  libasound2-plugins \
   libasound2 \
   libasound2-dev \
   libportaudio2 \
@@ -174,67 +176,44 @@ echo ""
 echo "Step 3.5: ReSpeaker 2-Mics Pi HAT v2.0 Setup (TLV320AIC3104)"
 echo "============================================================"
 
-# Install audio processing libraries
-echo "Installing audio processing libraries..."
+# 1. Install dependencies
 source /opt/evvos/venv/bin/activate
-pip install --prefer-binary numpy vosk
+pip install --prefer-binary numpy vosk RPi.GPIO
 
-# ---------------------------------------------------------
-# CRITICAL FIX: Install v2.0 Specific Overlay (TLV320AIC3104)
-# ---------------------------------------------------------
+# 2. Compile & Install Overlay
 echo "🔧 Installing ReSpeaker v2.0 Device Tree Overlays..."
-
-# Install build tools required for compiling the overlay
+# Ensure headers are installed for current kernel
 apt-get install -y raspberrypi-kernel-headers device-tree-compiler
 
 cd /opt/evvos
-
-# Clone the overlay repository (NOT the voicecard repo)
 if [ ! -d "seeed-linux-dtoverlays" ]; then
-    echo "Cloning Seeed Linux Overlays repository..."
     git clone https://github.com/Seeed-Studio/seeed-linux-dtoverlays.git
-    cd seeed-linux-dtoverlays
-    
-    # Compile the v2.0 specific overlay
-    echo "Compiling respeaker-2mic-v2_0 overlay..."
-    make overlays/rpi/respeaker-2mic-v2_0-overlay.dtbo
-    
-    # Install the overlay to the boot directory
-    echo "Installing overlay to /boot/firmware/overlays..."
-    sudo cp overlays/rpi/respeaker-2mic-v2_0-overlay.dtbo /boot/firmware/overlays/respeaker-2mic-v2_0.dtbo
-    
-    echo "✓ ReSpeaker v2.0 overlay installed"
-else
-    echo "✓ Seeed Overlays repo already exists"
 fi
+cd seeed-linux-dtoverlays
 
-# ---------------------------------------------------------
-# FIX: Audio Configuration (Config.txt & ALSA)
-# ---------------------------------------------------------
+# Compile specifically for v2.0
+echo "Compiling respeaker-2mic-v2_0 overlay..."
+dtc -@ -I dts -O dtb -o respeaker-2mic-v2_0.dtbo overlays/rpi/respeaker-2mic-v2_0-overlay.dts
+sudo cp respeaker-2mic-v2_0.dtbo /boot/firmware/overlays/respeaker-2mic-v2_0.dtbo
 
-# Detect config.txt path
-if [ -f /boot/firmware/config.txt ]; then
-  CONFIG_PATH="/boot/firmware/config.txt"
-elif [ -f /boot/config.txt ]; then
-  CONFIG_PATH="/boot/config.txt"
-fi
+# 3. Update config.txt
+CONFIG_PATH="/boot/firmware/config.txt"
+[ -f /boot/config.txt ] && CONFIG_PATH="/boot/config.txt"
 
-# Remove old overlays if they exist to prevent conflicts
+# Clean old audio configs
 sed -i '/dtoverlay=seeed-2mic-voicecard/d' "$CONFIG_PATH"
-sed -i '/dtoverlay=i2s-mmap/d' "$CONFIG_PATH"
 sed -i '/dtoverlay=googlevoicehat-soundcard/d' "$CONFIG_PATH"
+sed -i '/dtparam=audio=on/d' "$CONFIG_PATH"
 
-# Add the correct v2.0 overlay
+# Enable I2C/I2S and add v2.0 overlay
 if ! grep -q "dtoverlay=respeaker-2mic-v2_0" "$CONFIG_PATH"; then
-    echo "" >> "$CONFIG_PATH"
-    echo "# ReSpeaker 2-Mics Pi HAT v2.0 (TLV320AIC3104)" >> "$CONFIG_PATH"
+    echo "dtparam=i2c_arm=on" >> "$CONFIG_PATH"
+    echo "dtparam=i2s=on" >> "$CONFIG_PATH"
+    echo "# ReSpeaker 2-Mics Pi HAT v2.0" >> "$CONFIG_PATH"
     echo "dtoverlay=respeaker-2mic-v2_0" >> "$CONFIG_PATH"
-    echo "✓ Added respeaker-2mic-v2_0 overlay to config.txt"
 fi
 
-# FIX: Update asound.conf to use the correct card name
-# The v2.0 overlay registers the card as "seeed2micvoicec"
-echo "Configuring ALSA..."
+# 4. Configure ALSA
 cat > /etc/asound.conf << 'ASOUND'
 pcm.!default {
     type asym
@@ -247,18 +226,76 @@ pcm.!default {
         slave.pcm "hw:seeed2micvoicec"
     }
 }
-
 ctl.!default {
     type hw
     card seeed2micvoicec
 }
 ASOUND
-echo "✓ ALSA configuration updated for ReSpeaker v2.0"
 
-# Setup Vosk voice command grammar
-echo "Setting up Vosk command grammar..."
+# 5. Create Audio Mixer Init Service (CRITICAL FOR v2.0)
+# The TLV320AIC3104 resets on power loss. We must re-apply settings on every boot.
+echo "Creating audio mixer initialization service..."
+cat > /usr/local/bin/evvos-init-audio.sh << 'AUDIO_INIT'
+#!/bin/bash
+# Initialize ReSpeaker 2-Mics Pi HAT v2.0 (TLV320AIC3104)
+
+# Wait for driver to load
+sleep 5
+CARD="seeed2micvoicec"
+
+echo "Initializing Mixer for $CARD..."
+
+# Reset logic
+amixer -c $CARD -q sset 'Reset' on || true
+
+# --- OUTPUT ROUTING (DAC_L1/R1) ---
+# Enable DACs
+amixer -c $CARD -q sset 'DAC' 127
+amixer -c $CARD -q sset 'Left DAC Mixer PCM' on
+amixer -c $CARD -q sset 'Right DAC Mixer PCM' on
+
+# Route DAC to Headphones/Line Out (Requested DAC_L1 setting)
+amixer -c $CARD -q sset 'HP' 127
+amixer -c $CARD -q sset 'HP DAC Volume' 127
+amixer -c $CARD -q sset 'HP Left Mixer DAC L1' on
+amixer -c $CARD -q sset 'HP Right Mixer DAC R1' on
+
+# --- INPUT ROUTING (ADC) ---
+# Route Mics to ADC (Critical for v2.0 hardware)
+amixer -c $CARD -q sset 'Left PGA Mixer Mic2L' on
+amixer -c $CARD -q sset 'Right PGA Mixer Mic2R' on
+
+# Gain Settings
+amixer -c $CARD -q sset 'PGA' 40      # Input Gain (0-127)
+amixer -c $CARD -q sset 'ADC' 127     # ADC Volume
+amixer -c $CARD -q sset 'AGC Left' on
+amixer -c $CARD -q sset 'AGC Right' on
+
+echo "✓ Audio Mixer Configured"
+AUDIO_INIT
+
+chmod +x /usr/local/bin/evvos-init-audio.sh
+
+# Create Systemd Unit for Audio Init
+cat > /etc/systemd/system/evvos-audio-init.service << 'UNIT'
+[Unit]
+Description=Initialize ReSpeaker Audio Mixer
+After=sound.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/evvos-init-audio.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl enable evvos-audio-init.service
+echo "✓ Audio Init Service created"
+
+# Setup Vosk Grammar
 mkdir -p /etc/evvos/vosk
-
 cat > /etc/evvos/vosk/grammar.json << 'GRAMMAR'
 ["okay", "confirm", "cancel", "start", "stop", "help", "repeat", "clear"]
 GRAMMAR
@@ -2195,6 +2232,7 @@ class VoiceCommandService:
             self.audio_process = subprocess.Popen(
                 [
                     "arecord",
+                    "-D", "default",
                     "-r", "16000",      # Sample rate
                     "-c", "1",          # Mono
                     "-f", "S16_LE",     # 16-bit signed little-endian
