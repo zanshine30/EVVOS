@@ -171,87 +171,89 @@ echo "✓ Virtual environment created at /opt/evvos/venv"
 echo "✓ Base Python packages installed"
 
 echo ""
-echo "Step 3.5: ReSpeaker 2-Mics Pi HAT v2.0 Setup"
-echo "============================================="
+echo "Step 3.5: ReSpeaker 2-Mics Pi HAT v2.0 Setup (TLV320AIC3104)"
+echo "============================================================"
 
-# Install audio processing libraries with binary preference
-echo "Installing audio processing libraries for ReSpeaker HAT..."
+# Install audio processing libraries
+echo "Installing audio processing libraries..."
 source /opt/evvos/venv/bin/activate
+pip install --prefer-binary numpy vosk
 
-# Install NumPy (required by Vosk)
-echo "Installing NumPy..."
-pip install --prefer-binary numpy
+# ---------------------------------------------------------
+# CRITICAL FIX: Install v2.0 Specific Overlay (TLV320AIC3104)
+# ---------------------------------------------------------
+echo "🔧 Installing ReSpeaker v2.0 Device Tree Overlays..."
 
-# Install Vosk for speech recognition
-echo "Installing Vosk speech recognition engine..."
-pip install --prefer-binary vosk
+# Install build tools required for compiling the overlay
+apt-get install -y raspberrypi-kernel-headers device-tree-compiler
 
-echo "✓ Voice command dependencies installed"
+cd /opt/evvos
 
-# Verify system audio libraries
-echo "Verifying system audio libraries..."
-if ldconfig -p | grep -q libopenblas.so.0; then
-  echo "✓ OpenBLAS library verified"
+# Clone the overlay repository (NOT the voicecard repo)
+if [ ! -d "seeed-linux-dtoverlays" ]; then
+    echo "Cloning Seeed Linux Overlays repository..."
+    git clone https://github.com/Seeed-Studio/seeed-linux-dtoverlays.git
+    cd seeed-linux-dtoverlays
+    
+    # Compile the v2.0 specific overlay
+    echo "Compiling respeaker-2mic-v2_0 overlay..."
+    make overlays/rpi/respeaker-2mic-v2_0-overlay.dtbo
+    
+    # Install the overlay to the boot directory
+    echo "Installing overlay to /boot/firmware/overlays..."
+    sudo cp overlays/rpi/respeaker-2mic-v2_0-overlay.dtbo /boot/firmware/overlays/respeaker-2mic-v2_0.dtbo
+    
+    echo "✓ ReSpeaker v2.0 overlay installed"
 else
-  echo "⚠ OpenBLAS library not found"
+    echo "✓ Seeed Overlays repo already exists"
 fi
 
-if ldconfig -p | grep -q libportaudio.so; then
-  echo "✓ PortAudio library verified"
-else
-  echo "⚠ PortAudio library not found"
+# ---------------------------------------------------------
+# FIX: Audio Configuration (Config.txt & ALSA)
+# ---------------------------------------------------------
+
+# Detect config.txt path
+if [ -f /boot/firmware/config.txt ]; then
+  CONFIG_PATH="/boot/firmware/config.txt"
+elif [ -f /boot/config.txt ]; then
+  CONFIG_PATH="/boot/config.txt"
 fi
 
-# Configure I2S and Audio Device for ReSpeaker HAT
-echo "Configuring Raspberry Pi I2S and Audio Devices..."
+# Remove old overlays if they exist to prevent conflicts
+sed -i '/dtoverlay=seeed-2mic-voicecard/d' "$CONFIG_PATH"
+sed -i '/dtoverlay=i2s-mmap/d' "$CONFIG_PATH"
+sed -i '/dtoverlay=googlevoicehat-soundcard/d' "$CONFIG_PATH"
 
-# Backup original config.txt
-if [ ! -f /boot/firmware/config.txt.backup ]; then
-  cp /boot/firmware/config.txt /boot/firmware/config.txt.backup
-  echo "✓ Original config.txt backed up"
+# Add the correct v2.0 overlay
+if ! grep -q "dtoverlay=respeaker-2mic-v2_0" "$CONFIG_PATH"; then
+    echo "" >> "$CONFIG_PATH"
+    echo "# ReSpeaker 2-Mics Pi HAT v2.0 (TLV320AIC3104)" >> "$CONFIG_PATH"
+    echo "dtoverlay=respeaker-2mic-v2_0" >> "$CONFIG_PATH"
+    echo "✓ Added respeaker-2mic-v2_0 overlay to config.txt"
 fi
 
-# Add I2S overlay for ReSpeaker HAT
-if ! grep -q "dtoverlay=i2s-mmap" /boot/firmware/config.txt; then
-  echo "" >> /boot/firmware/config.txt
-  echo "# ReSpeaker 2-Mics Pi HAT v2.0 - I2S Configuration" >> /boot/firmware/config.txt
-  echo "dtoverlay=i2s-mmap" >> /boot/firmware/config.txt
-  echo "dtparam=i2s=on" >> /boot/firmware/config.txt
-  echo "✓ I2S overlay added to config.txt"
-fi
-
-# Enable I2C for HAT detection
-if ! grep -q "dtparam=i2c_arm=on" /boot/firmware/config.txt; then
-  echo "dtparam=i2c_arm=on" >> /boot/firmware/config.txt
-  echo "✓ I2C enabled in config.txt"
-fi
-
-# Create ALSA configuration for ReSpeaker HAT
-echo "Configuring ALSA for ReSpeaker HAT..."
+# FIX: Update asound.conf to use the correct card name
+# The v2.0 overlay registers the card as "seeed2micvoicec"
+echo "Configuring ALSA..."
 cat > /etc/asound.conf << 'ASOUND'
 pcm.!default {
-    type hw
-    card 0
+    type asym
+    playback.pcm {
+        type plug
+        slave.pcm "hw:seeed2micvoicec"
+    }
+    capture.pcm {
+        type plug
+        slave.pcm "hw:seeed2micvoicec"
+    }
 }
 
 ctl.!default {
     type hw
-    card 0
-}
-
-pcm.speaker {
-    type hw
-    card 0
-    device 0
-}
-
-pcm.headphones {
-    type hw
-    card 0
-    device 0
+    card seeed2micvoicec
 }
 ASOUND
-echo "✓ ALSA configuration created"
+echo "✓ ALSA configuration updated for ReSpeaker v2.0"
 
 # Setup Vosk voice command grammar
 echo "Setting up Vosk command grammar..."
