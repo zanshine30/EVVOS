@@ -5,7 +5,7 @@
 
 set -e  # Exit on error
 
-echo "🔧 EVVOS WiFi Provisioning System - Fresh Setup"
+echo "🔧 EVVOS WiFi Provisioning System - Fresh Setup (NEW)"
 echo "=================================================="
 
 # Check if running as root
