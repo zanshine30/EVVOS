@@ -600,10 +600,11 @@ class VoiceRecognitionService:
         
         # Simple blink animation state (minimal overhead, no interference)
         blink_counter = 0
-        blink_interval = 8  # Blink every 8 chunks (~2 seconds)
         blink_state = True  # True = on, False = off
+        blink_on_interval = 4   # ON for 1 second (4 chunks × 0.25s)
+        blink_off_interval = 8  # OFF for 2 seconds (8 chunks × 0.25s)
         
-        logger.info("Starting simple blink listening indicator...")
+        logger.info("Starting simple blink listening indicator (1s on, 2s off)...")
         
         try:
             while self.running:
@@ -611,18 +612,23 @@ class VoiceRecognitionService:
                     # Read audio chunk from microphone (PRIORITY - no LED overhead before this)
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
                     
-                    # Update LED blink effect (very minimal, happens rarely)
+                    # Update LED blink effect (asymmetric: 1s on, 2s off)
                     blink_counter += 1
-                    if blink_counter >= blink_interval:
-                        blink_counter = 0
-                        blink_state = not blink_state  # Toggle on/off
-                        
-                        if blink_state:
-                            # Blink ON (cyan listening indicator)
+                    
+                    if blink_state:
+                        # Currently ON - check if time to turn OFF
+                        if blink_counter >= blink_on_interval:
+                            blink_counter = 0
+                            blink_state = False
+                            # Turn LED completely OFF
+                            self.pixels.set_color(0, 0, 0, 0)
+                    else:
+                        # Currently OFF - check if time to turn ON
+                        if blink_counter >= blink_off_interval:
+                            blink_counter = 0
+                            blink_state = True
+                            # Turn LED ON (cyan listening indicator)
                             self.pixels.set_color(*LED_COLORS["listening"], brightness=12)
-                        else:
-                            # Blink OFF (dim)
-                            self.pixels.set_color(*LED_COLORS["listening"], brightness=5)
                     
                     # Process audio with Vosk recognizer
                     if self.recognizer.AcceptWaveform(data):
