@@ -387,6 +387,53 @@ class PixelRing:
         if self.enabled:
             self.set_color(0, 0, 0, 0)
 
+    def breathe(self, r: int, g: int, b: int, duration: float = 2.0, steps: int = 20):
+        """
+        Create a breathing (pulsing) effect
+        duration: time for one full breath cycle (in/out)
+        steps: number of brightness levels in the pulse
+        """
+        if not self.enabled:
+            return
+        
+        try:
+            min_brightness = 3
+            max_brightness = 20
+            
+            # Fade in
+            for i in range(steps):
+                brightness = int(min_brightness + (max_brightness - min_brightness) * (i / steps))
+                self.set_color(r, g, b, brightness)
+                time.sleep(duration / (2 * steps))
+            
+            # Fade out
+            for i in range(steps, 0, -1):
+                brightness = int(min_brightness + (max_brightness - min_brightness) * (i / steps))
+                self.set_color(r, g, b, brightness)
+                time.sleep(duration / (2 * steps))
+        except Exception as e:
+            logger.debug(f"LED breathe error: {e}")
+
+    def flash(self, r: int, g: int, b: int, times: int = 3, flash_duration: float = 0.15):
+        """
+        Flash a color multiple times
+        times: number of flashes
+        flash_duration: duration of each flash
+        """
+        if not self.enabled:
+            return
+        
+        try:
+            for i in range(times):
+                # Flash on
+                self.set_color(r, g, b, LED_BRIGHTNESS["recognized"])
+                time.sleep(flash_duration)
+                # Flash off
+                self.set_color(0, 0, 0, 0)
+                time.sleep(flash_duration * 0.5)
+        except Exception as e:
+            logger.debug(f"LED flash error: {e}")
+
     def close(self):
         """Cleanup SPI"""
         if self.enabled and self.spi:
@@ -523,16 +570,22 @@ class VoiceRecognitionService:
             logger.info(f"  {i}. {cmd}")
         logger.info("=" * 70)
         
-        # Show listening indicator
-        self.pixels.set_color(*LED_COLORS["listening"], brightness=LED_BRIGHTNESS["listening"])
-        
         self.running = True
         consecutive_silence = 0
         max_silence_frames = 5  # ~1 second of silence
+        breathing_active = False
         
         try:
             while self.running:
                 try:
+                    # Show breathing cyan indicator (listening)
+                    if not breathing_active:
+                        logger.info("Starting breathing cyan listening indicator...")
+                        breathing_active = True
+                    
+                    # Do one breath cycle while listening for audio
+                    self.pixels.breathe(*LED_COLORS["listening"], duration=2.0, steps=15)
+                    
                     # Read audio chunk from microphone
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
                     
@@ -557,10 +610,6 @@ class VoiceRecognitionService:
                             
                             if not command_matched and len(text) > 2:
                                 logger.debug(f"No command matched in: '{text}' (confidence: {confidence})")
-                        
-                        # Reset listening indicator after brief recognition
-                        time.sleep(0.2)
-                        self.pixels.set_color(*LED_COLORS["listening"], brightness=LED_BRIGHTNESS["listening"])
                     else:
                         # Partial result
                         partial = json.loads(self.recognizer.PartialResult())
@@ -585,8 +634,8 @@ class VoiceRecognitionService:
     def _on_command_detected(self, command: str, full_text: str, confidence: float):
         """Handler for detected voice command"""
         
-        # Flash green LED (command recognized)
-        self.pixels.set_color(*LED_COLORS["recognized"], brightness=LED_BRIGHTNESS["recognized"])
+        # Flash green LED 3 times to indicate command recognized
+        self.pixels.flash(*LED_COLORS["recognized"], times=3, flash_duration=0.2)
         
         # Log command detection
         timestamp = self.get_manila_time()
@@ -611,12 +660,6 @@ class VoiceRecognitionService:
         # TODO: Send command to mobile app or internal service
         # Example: POST to local API, write to pipe, etc.
         logger.info(f"Command '{command}' ready for processing")
-        
-        # Keep green flash visible for 0.7 seconds
-        time.sleep(0.7)
-        
-        # Reset LED back to listening state (cyan)
-        self.pixels.set_color(*LED_COLORS["listening"], brightness=LED_BRIGHTNESS["listening"])
 
     def shutdown(self):
         """Cleanup resources"""
