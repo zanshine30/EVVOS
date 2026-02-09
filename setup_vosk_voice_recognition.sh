@@ -627,7 +627,7 @@ class VoiceRecognitionService:
         
         # Breathing animation state (non-blocking, fast)
         breathing_step = 0
-        breathing_max_steps = 50  # More steps = smoother & faster animation
+        breathing_max_steps = 5  # Fewer steps = faster breathing cycle
         breathing_direction = 1  # 1 for fade in, -1 for fade out
         min_brightness = 3
         max_brightness = 20
