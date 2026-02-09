@@ -573,18 +573,29 @@ class VoiceRecognitionService:
         self.running = True
         consecutive_silence = 0
         max_silence_frames = 5  # ~1 second of silence
-        breathing_active = False
+        
+        # Breathing animation state (non-blocking)
+        breathing_step = 0
+        breathing_max_steps = 20
+        breathing_direction = 1  # 1 for fade in, -1 for fade out
+        min_brightness = 3
+        max_brightness = 20
+        
+        logger.info("Starting breathing cyan listening indicator...")
         
         try:
             while self.running:
                 try:
-                    # Show breathing cyan indicator (listening)
-                    if not breathing_active:
-                        logger.info("Starting breathing cyan listening indicator...")
-                        breathing_active = True
+                    # Update LED breathing effect (non-blocking, one step at a time)
+                    brightness = int(min_brightness + (max_brightness - min_brightness) * (breathing_step / breathing_max_steps))
+                    self.pixels.set_color(*LED_COLORS["listening"], brightness=brightness)
                     
-                    # Do one breath cycle while listening for audio
-                    self.pixels.breathe(*LED_COLORS["listening"], duration=2.0, steps=15)
+                    # Update breathing animation state
+                    breathing_step += breathing_direction
+                    if breathing_step >= breathing_max_steps:
+                        breathing_direction = -1
+                    elif breathing_step <= 0:
+                        breathing_direction = 1
                     
                     # Read audio chunk from microphone
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
