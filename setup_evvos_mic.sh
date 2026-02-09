@@ -98,40 +98,52 @@ echo "Configuring ALSA levels for ReSpeaker..."
 # Wait for sound system to initialize
 sleep 2
 
-echo "⏳ Setting microphone gains for TLV320AIC3104 codec..."
+echo "⏳ Configuring TLV320AIC3104 Audio Codec (seeed2micvoicec)..."
 
 # ReSpeaker 2-Mics HAT V2.0 uses TLV320AIC3104 codec
-# These are the specific controls for this codec:
-echo "Configuring TLV320AIC3104 Audio Codec..."
+# Correct device name: seeed2micvoicec
+CARD_NAME="seeed2micvoicec"
 
-# List available controls for debugging
-echo "Available audio controls:"
-amixer controls 2>/dev/null | head -20 || echo "  (amixer controls not available, continuing...)"
+echo "Applying TLV320AIC3104 mixer configuration..."
 
-# Set microphone capture levels for TLV320AIC3104
-# Primary: ADC/Capture path
-for control in "ADC" "Capture" "Mic" "Input" "Mic1" "Mic2" "Line In"; do
-    if amixer sget "${control}" > /dev/null 2>&1; then
-        amixer sset "${control}" 85% > /dev/null 2>&1
-        echo "✓ Set ${control} to 85%"
+# Check if card exists
+if ! amixer -c "${CARD_NAME}" info > /dev/null 2>&1; then
+    echo "⚠️  Card '${CARD_NAME}' not found. Waiting for device to appear..."
+    sleep 3
+    if ! amixer -c "${CARD_NAME}" info > /dev/null 2>&1; then
+        echo "❌ Card '${CARD_NAME}' still not available. Device may not be detected."
+        echo "    Continuing with generic ALSA configuration..."
     fi
-done
+fi
 
-# Ensure input is not muted
-for control in "Input" "Mic" "Capture" "ADC"; do
-    if amixer sget "${control}" > /dev/null 2>&1; then
-        amixer sset "${control}" unmute > /dev/null 2>&1 2>&1
-        echo "✓ Unmuted ${control}"
-    fi
-done
+# ===== PLAYBACK PATH (DAC/Headphone) =====
+echo "Configuring playback path (DAC -> Headphone)..."
 
-# Set output levels for audio feedback
-for control in "Speaker" "Master" "Headphone" "Output"; do
-    if amixer sget "${control}" > /dev/null 2>&1; then
-        amixer sset "${control}" 80% > /dev/null 2>&1
-        echo "✓ Set ${control} to 80%"
-    fi
-done
+# 1. Select the DAC input
+amixer -c "${CARD_NAME}" sset 'Left DAC Mux' 'DAC_L1' 2>/dev/null && echo "✓ Left DAC Mux -> DAC_L1"
+amixer -c "${CARD_NAME}" sset 'Right DAC Mux' 'DAC_R1' 2>/dev/null && echo "✓ Right DAC Mux -> DAC_R1"
+
+# 2. Connect the DAC to the Headphone Mixer
+amixer -c "${CARD_NAME}" sset 'Left HP Mixer DACL1' on 2>/dev/null && echo "✓ Left HP Mixer DACL1 ON"
+amixer -c "${CARD_NAME}" sset 'Right HP Mixer DACR1' on 2>/dev/null && echo "✓ Right HP Mixer DACR1 ON"
+
+# 3. Turn on the Master Headphone Switch and Volume
+amixer -c "${CARD_NAME}" sset 'HP Playback' on 2>/dev/null && echo "✓ HP Playback ON"
+amixer -c "${CARD_NAME}" sset 'HP' 100 2>/dev/null && echo "✓ HP Volume -> 100%"
+amixer -c "${CARD_NAME}" sset 'PCM' 100 2>/dev/null && echo "✓ PCM Volume -> 100%"
+
+# ===== CAPTURE PATH (Microphone -> PGA -> ADC) =====
+echo "Configuring capture path (Mic -> PGA -> ADC)..."
+
+# 1. Connect the Mic pins to the Programmable Gain Amplifier (PGA)
+amixer -c "${CARD_NAME}" sset 'Left PGA Mixer Mic2L' on 2>/dev/null && echo "✓ Left PGA Mixer Mic2L ON"
+amixer -c "${CARD_NAME}" sset 'Right PGA Mixer Mic2R' on 2>/dev/null && echo "✓ Right PGA Mixer Mic2R ON"
+
+# 2. Turn on the Capture Switch
+amixer -c "${CARD_NAME}" sset 'PGA Capture' on 2>/dev/null && echo "✓ PGA Capture ON"
+
+# 3. Set the Gain. 25-30 is optimal for speech recognition
+amixer -c "${CARD_NAME}" sset 'PGA' 25 2>/dev/null && echo "✓ PGA Gain -> 25 (optimal for voice)"
 
 # Save ALSA state for persistence across reboots
 echo "Saving ALSA state..."
@@ -370,7 +382,7 @@ def main():
         
         logger.debug(f"Device [{i}] {info.get('name', 'Unknown')}: {channels} input channels")
         
-        if "seeed" in device_name or "respeaker" in device_name:
+        if any(name in device_name for name in ["seeed", "respeaker", "voicecard", "2-mic"]):
             if info.get("maxInputChannels", 0) > 0:
                 device_index = i
                 respeaker_found = True
@@ -687,20 +699,22 @@ echo "════════════════════════�
 echo "⚙️  FINE-TUNE MICROPHONE SENSITIVITY"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
-echo "Current gain is 85% (TLV320AIC3104 Capture path)"
+echo "Current gain is 25 (seeded2micvoicec PGA) - optimal for voice recognition"
 echo ""
 echo "If voice is too quiet (commands not detected):"
-echo "  sudo amixer sset 'ADC' 95%"
-echo "  sudo amixer sset 'Capture' 95%"
+echo "  sudo amixer -c seeed2micvoicec sset 'PGA' 28"
+echo "  sudo amixer -c seeed2micvoicec sset 'PGA' unmute"
 echo "  sudo alsactl store  # Save settings"
 echo ""
 echo "If voice is clipping or distorted:"
-echo "  sudo amixer sset 'ADC' 75%"
-echo "  sudo amixer sset 'Capture' 75%"
+echo "  sudo amixer -c seeed2micvoicec sset 'PGA' 20"
 echo "  sudo alsactl store"
 echo ""
+echo "View current configuration:"
+echo "  sudo amixer -c seeed2micvoicec"
+echo ""
 echo "Use interactive mixer for real-time adjustment:"
-echo "  sudo alsamixer  # Up/Down arrows to adjust, F6 to select card, ESC to exit"
+echo "  sudo alsamixer -c seeed2micvoicec  # F5 to adjust PGA, F6 to select card, ESC to exit"
 echo ""
 echo "Save settings after adjusting:"
 echo "  sudo alsactl store"
