@@ -109,18 +109,15 @@ source /opt/evvos/venv/bin/activate
 echo "Configuring network stability and timeouts..."
 mkdir -p /root/.pip
 
-# Configure pip with extended timeouts and retries
+# Configure pip - simplified, no timeouts/retries
 cat > /root/.pip/pip.conf << 'PIPCONFIG'
 [global]
 index-url = https://pypi.org/simple/
-timeout = 1800
-retries = 5
 no-cache-dir = true
 [install]
 prefer-binary = true
-no-deps = false
 PIPCONFIG
-echo "✓ Pip configured: PyPI only, 1800s timeout, 5 retries, binary preference"
+echo "✓ Pip configured: PyPI binary preference only"
 
 # Configure wget with timeout and retries
 echo "Configuring wget timeout settings..."
@@ -162,31 +159,13 @@ echo "net.core.netdev_max_backlog = 5000" | tee -a /etc/sysctl.conf
 sysctl -p > /dev/null 2>&1
 echo "✓ Network socket buffers optimized for large downloads"
 
-# Upgrade pip with retry logic
-echo "Upgrading pip (this may take a few minutes)..."
-for i in {1..3}; do
-  if pip install --upgrade pip setuptools wheel --timeout=1800 --retries=5; then
-    echo "✓ pip, setuptools, wheel upgraded successfully"
-    break
-  fi
-  if [ $i -lt 3 ]; then
-    echo "⚠ Attempt $i failed, retrying in 10 seconds..."
-    sleep 10
-  fi
-done
+# Upgrade pip only
+echo "Upgrading pip..."
+pip install --upgrade pip
 
-# Install aiohttp with retry
+# Install aiohttp for Supabase communication
 echo "Installing aiohttp..."
-for i in {1..3}; do
-  if pip install aiohttp --timeout=1800 --retries=5; then
-    echo "✓ aiohttp installed"
-    break
-  fi
-  if [ $i -lt 3 ]; then
-    echo "⚠ Attempt $i failed, retrying in 10 seconds..."
-    sleep 10
-  fi
-done
+pip install aiohttp
 
 echo "✓ Virtual environment created at /opt/evvos/venv"
 echo "✓ Base Python packages installed"
@@ -199,50 +178,15 @@ echo "============================================="
 echo "Installing audio processing libraries for ReSpeaker HAT..."
 source /opt/evvos/venv/bin/activate
 
-# NumPy must be pre-built - Pi Zero 2 W cannot compile it
-echo "Installing NumPy 1.26.4 (pre-built, not compiled)..."
-echo "⏱️  Large download (~100MB) - this may take 5-15 minutes depending on WiFi speed"
-echo "⏳ Please be patient - DO NOT interrupt this!"
-for i in {1..3}; do
-  if pip install --no-cache-dir --prefer-binary numpy==1.26.4 --timeout=1800 --retries=5; then
-    echo "✓ NumPy 1.26.4 installed successfully"
-    break
-  fi
-  if [ $i -lt 3 ]; then
-    echo "⚠ Attempt $i failed, retrying in 15 seconds..."
-    sleep 15
-  else
-    echo "❌ NumPy installation failed after 3 attempts"
-    exit 1
-  fi
-done
+# Install NumPy (required by Vosk)
+echo "Installing NumPy..."
+pip install --prefer-binary numpy
 
-# Install Vosk and scipy with binary preference and retries
-# NOTE: PyAudio is NOT installed via pip because 0.2.13 requires compilation
-# The system already has libportaudio2 from Step 1, which provides the audio library
-echo "Installing Vosk and numerical libraries..."
-echo "⏱️  This download may take 5-10 minutes"
-for i in {1..3}; do
-  if pip install --no-cache-dir --prefer-binary --timeout=1800 --retries=5 \
-    scipy==1.10.1 \
-    vosk==0.3.32; then
-    echo "✓ Core audio libraries installed successfully"
-    break
-  fi
-  if [ $i -lt 3 ]; then
-    echo "⚠ Attempt $i failed, retrying in 15 seconds..."
-    sleep 15
-  else
-    echo "❌ Library installation failed after 3 attempts"
-    exit 1
-  fi
-done
+# Install Vosk for speech recognition
+echo "Installing Vosk speech recognition engine..."
+pip install --prefer-binary vosk
 
-# PyAudio is already available via system packages (libportaudio2)
-# The voice service will use PortAudio directly through the system libraries
-echo "✓ System audio framework (PortAudio) already installed"
-
-echo "✓ Audio and Vosk libraries installed"
+echo "✓ Voice command dependencies installed"
 
 # Verify system audio libraries
 echo "Verifying system audio libraries..."
