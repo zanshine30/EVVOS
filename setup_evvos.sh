@@ -203,11 +203,11 @@ class EVVOSWiFiProvisioner:
         # Disconnect from WiFi if connected
         logger.warning("[BUTTON] Step 2: Disconnecting from WiFi...")
         try:
-            subprocess.run(["sudo", "nmcli", "device", "disconnect", "wlan0"], 
+            subprocess.run(["nmcli", "device", "disconnect", "wlan0"], 
                          capture_output=True, timeout=5)
-            subprocess.run(["sudo", "killall", "-q", "wpa_supplicant"], 
+            subprocess.run(["killall", "-q", "wpa_supplicant"], 
                          capture_output=True, timeout=5)
-            subprocess.run(["sudo", "killall", "-q", "dhclient"], 
+            subprocess.run(["killall", "-q", "dhclient"], 
                          capture_output=True, timeout=5)
         except Exception as e:
             logger.warning(f"[BUTTON] Could not disconnect WiFi: {e}")
@@ -215,7 +215,7 @@ class EVVOSWiFiProvisioner:
         # Reset WiFi interface to hotspot mode
         logger.warning("[BUTTON] Step 3: Resetting interface for hotspot mode...")
         try:
-            subprocess.run(["sudo", "ip", "addr", "flush", "dev", "wlan0"], 
+            subprocess.run(["ip", "addr", "flush", "dev", "wlan0"], 
                          capture_output=True, timeout=5)
         except Exception as e:
             logger.warning(f"[BUTTON] Could not flush IP: {e}")
@@ -231,7 +231,7 @@ class EVVOSWiFiProvisioner:
         # Restart provisioning service
         logger.warning("[BUTTON] Step 5: Restarting evvos-provisioning service...")
         try:
-            subprocess.run(["sudo", "systemctl", "restart", "evvos-provisioning"], 
+            subprocess.run(["systemctl", "restart", "evvos-provisioning"], 
                          timeout=10)
             logger.warning("[BUTTON] ✓ Service restart command sent")
         except Exception as e:
@@ -402,7 +402,7 @@ class EVVOSWiFiProvisioner:
             
             # Step 3: Clean up network interface and state
             logger.info("[DISCONNECT] Cleaning up network interface...")
-            subprocess.run(["sudo", "ip", "addr", "flush", "dev", "wlan0"], capture_output=True)
+            subprocess.run(["ip", "addr", "flush", "dev", "wlan0"], capture_output=True)
             
             if os.path.exists(self.state_file):
                 try:
@@ -412,8 +412,8 @@ class EVVOSWiFiProvisioner:
                     logger.warning(f"[DISCONNECT] Failed to delete state file: {e}")
             
             # Step 4: Kill any lingering WiFi processes
-            subprocess.run(["sudo", "killall", "-q", "wpa_supplicant"], capture_output=True)
-            subprocess.run(["sudo", "killall", "-q", "dhclient"], capture_output=True)
+            subprocess.run(["killall", "-q", "wpa_supplicant"], capture_output=True)
+            subprocess.run(["killall", "-q", "dhclient"], capture_output=True)
             
             # Step 5: Log disconnect completion
             logger.warning("[DISCONNECT] ========== DISCONNECT COMPLETED ==========")
@@ -424,11 +424,13 @@ class EVVOSWiFiProvisioner:
             
             # Step 6: Restart the provisioning service
             logger.warning("[DISCONNECT] Restarting provisioning service...")
+            await asyncio.sleep(1)  # Brief delay to ensure cleanup is complete
             try:
-                subprocess.run(["sudo", "systemctl", "restart", "evvos-provisioning"], timeout=5)
-                logger.warning("[DISCONNECT] ✓ Service restart command sent")
+                subprocess.run(["systemctl", "restart", "evvos-provisioning"], timeout=10, check=True)
+                logger.warning("[DISCONNECT] ✓ Service restart command sent successfully")
             except Exception as e:
                 logger.error(f"[DISCONNECT] Failed to restart service: {e}")
+                logger.warning("[DISCONNECT] Attempting alternative restart method...")
                 logger.warning("[DISCONNECT] The script will continue and attempt to restart manually...")
             
         except Exception as e:
@@ -443,28 +445,28 @@ class EVVOSWiFiProvisioner:
             wifi_interface = "wlan0"
 
             # 1. CLEANUP: Kill lingering processes from Hotspot mode
-            subprocess.run(["sudo", "killall", "-q", "wpa_supplicant"], capture_output=True)
-            subprocess.run(["sudo", "killall", "-q", "dhclient"], capture_output=True)
+            subprocess.run(["killall", "-q", "wpa_supplicant"], capture_output=True)
+            subprocess.run(["killall", "-q", "dhclient"], capture_output=True)
             
             # Remove old lease files to force fresh IP
-            subprocess.run(["sudo", "rm", "-f", "/var/lib/dhcp/dhclient.leases"], capture_output=True)
+            subprocess.run(["rm", "-f", "/var/lib/dhcp/dhclient.leases"], capture_output=True)
             
             # 2. FLUSH IP: Clear the 192.168.50.1 address
             logger.info("Flushing old IP configuration...")
-            subprocess.run(["sudo", "ip", "addr", "flush", "dev", wifi_interface], capture_output=True)
+            subprocess.run(["ip", "addr", "flush", "dev", wifi_interface], capture_output=True)
             
             # Bring interface UP
-            subprocess.run(["sudo", "ip", "link", "set", wifi_interface, "up"], check=True, timeout=5)
+            subprocess.run(["ip", "link", "set", wifi_interface, "up"], check=True, timeout=5)
             await asyncio.sleep(2)
 
             # Try nmcli first
             try:
                 # Ensure device is managed
-                subprocess.run(["sudo", "nmcli", "device", "set", wifi_interface, "managed", "yes"], capture_output=True)
+                subprocess.run(["nmcli", "device", "set", wifi_interface, "managed", "yes"], capture_output=True)
                 
                 subprocess.run(
                     [
-                        "sudo", "nmcli", "device", "wifi", "connect", ssid,
+                        "nmcli", "device", "wifi", "connect", ssid,
                         "password", password, "ifname", wifi_interface,
                     ],
                     check=True,
@@ -493,24 +495,24 @@ network={{
                     with open(wpa_file, "w") as f:
                         f.write(wpa_config)
                     
-                    # Start wpa_supplicant manually (with sudo)
+                    # Start wpa_supplicant manually (no sudo needed, already running as root)
                     logger.info("Starting wpa_supplicant daemon...")
                     subprocess.run(
-                        ["sudo", "wpa_supplicant", "-B", "-i", wifi_interface, "-c", wpa_file],
+                        ["wpa_supplicant", "-B", "-i", wifi_interface, "-c", wpa_file],
                         check=True,
                         timeout=10,
                         capture_output=True
                     )
                     
-                    # 3. REQUEST IP: Run dhclient with sudo and longer timeout
+                    # 3. REQUEST IP: Run dhclient and longer timeout
                     logger.info("Requesting IP address via DHCP (dhclient)...")
                     
                     # Release any theoretical hold
-                    subprocess.run(["sudo", "dhclient", "-r", wifi_interface], capture_output=True)
+                    subprocess.run(["dhclient", "-r", wifi_interface], capture_output=True)
                     
                     # Request new lease (increased timeout to 30s)
                     dhcp_result = subprocess.run(
-                        ["sudo", "dhclient", "-v", wifi_interface],
+                        ["dhclient", "-v", wifi_interface],
                         timeout=30,
                         capture_output=True,
                         text=True
@@ -865,25 +867,25 @@ network={{
             # Disconnect from any existing WiFi networks
             logger.info("Disconnecting from home WiFi...")
             subprocess.run(
-                ["sudo", "nmcli", "device", "disconnect", "wlan0"],
+                ["nmcli", "device", "disconnect", "wlan0"],
                 capture_output=True,
                 timeout=5,
             )
             time.sleep(1)
             
             # Aggressively kill any lingering processes
-            subprocess.run(["sudo", "killall", "-9", "dnsmasq"], capture_output=True, timeout=5)
-            subprocess.run(["sudo", "killall", "-9", "hostapd"], capture_output=True, timeout=5)
+            subprocess.run(["killall", "-9", "dnsmasq"], capture_output=True, timeout=5)
+            subprocess.run(["killall", "-9", "hostapd"], capture_output=True, timeout=5)
             time.sleep(2)
             
             # Stop system services
-            subprocess.run(["sudo", "systemctl", "stop", "hostapd"], capture_output=True, timeout=5)
-            subprocess.run(["sudo", "systemctl", "stop", "dnsmasq"], capture_output=True, timeout=5)
+            subprocess.run(["systemctl", "stop", "hostapd"], capture_output=True, timeout=5)
+            subprocess.run(["systemctl", "stop", "dnsmasq"], capture_output=True, timeout=5)
             time.sleep(2)
             
             # Reset interface
             subprocess.run(
-                ["sudo", "ip", "link", "set", "wlan0", "down"],
+                ["ip", "link", "set", "wlan0", "down"],
                 capture_output=True,
                 timeout=5,
             )
@@ -891,19 +893,19 @@ network={{
             
             # Set static IP
             subprocess.run(
-                ["sudo", "ip", "addr", "flush", "dev", "wlan0"],
+                ["ip", "addr", "flush", "dev", "wlan0"],
                 capture_output=True,
                 timeout=5,
             )
             subprocess.run(
-                ["sudo", "ip", "addr", "add", "192.168.50.1/24", "dev", "wlan0"],
+                ["ip", "addr", "add", "192.168.50.1/24", "dev", "wlan0"],
                 capture_output=True,
                 timeout=5,
             )
             
             # Bring interface up
             subprocess.run(
-                ["sudo", "ip", "link", "set", "wlan0", "up"],
+                ["ip", "link", "set", "wlan0", "up"],
                 capture_output=True,
                 timeout=5,
             )
@@ -1542,8 +1544,8 @@ cache-size=1000
                 except subprocess.TimeoutExpired:
                     self.hostapd_process.kill()
             
-            subprocess.run(["sudo", "systemctl", "stop", "hostapd"], capture_output=True, timeout=5)
-            subprocess.run(["sudo", "systemctl", "stop", "dnsmasq"], capture_output=True, timeout=5)
+            subprocess.run(["systemctl", "stop", "hostapd"], capture_output=True, timeout=5)
+            subprocess.run(["systemctl", "stop", "dnsmasq"], capture_output=True, timeout=5)
             
             logger.info("Hotspot stopped")
             
@@ -1653,7 +1655,7 @@ cache-size=1000
                     self.received_credentials = None
                     
                     # 3. Force clean the interface before returning to AP mode
-                    subprocess.run(["sudo", "ip", "addr", "flush", "dev", "wlan0"], capture_output=True)
+                    subprocess.run(["ip", "addr", "flush", "dev", "wlan0"], capture_output=True)
                     
                     logger.info("Restarting in AP mode for credential retry...")
                     return await self._provision_with_hotspot() 
