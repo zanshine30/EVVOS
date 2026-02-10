@@ -54,7 +54,7 @@ log_section() {
 # PREFLIGHT CHECKS
 # ============================================================================
 
-log_section "Preflight System Checks"
+log_section "Preflight System Checks (NEW)"
 
 if [ "$EUID" -ne 0 ]; then 
     log_error "This script must be run as root"
@@ -123,9 +123,20 @@ log_success "Package lists updated"
 
 log_info "Installing PicoVoice build dependencies..."
 apt-get install -y \
+    build-essential \
     python3-pip \
+    python3-dev \
     wget \
-    curl || log_warning "Some packages may have failed"
+    curl \
+    git \
+    pkg-config \
+    portaudio19-dev \
+    libasound2-dev \
+    libatlas-base-dev \
+    libffi-dev \
+    libssl-dev \
+    libsndfile1 \
+    libportaudio2 || log_warning "Some packages may have failed"
 
 log_success "Build dependencies installed"
 
@@ -155,6 +166,19 @@ log_success "Virtual environment activated"
 log_section "Step 4: Install Python PicoVoice Packages"
 
 log_info "Installing PicoVoice Rhino SDK and build tools..."
+
+# Use disk-based temporary build directory to avoid exhausting RAM during wheel
+# builds on low-memory devices. This places pip/compile temp files on the SD card
+# for the duration of heavy installs and restores TMPDIR afterwards.
+BUILD_TMP="/opt/evvos/pip_build_tmp"
+mkdir -p "$BUILD_TMP"
+chown "$(whoami)" "$BUILD_TMP" 2>/dev/null || true
+OLD_TMPDIR="${TMPDIR:-}"
+export TMPDIR="$BUILD_TMP"
+export TMP="$BUILD_TMP"
+export TEMP="$BUILD_TMP"
+log_info "Using disk temp dir for builds: $BUILD_TMP"
+
 if pip install --upgrade --no-cache-dir pip setuptools wheel picovoice pvrhino; then
     log_success "PicoVoice Rhino SDK and build tools installed"
 else
@@ -166,9 +190,15 @@ log_info "Installing PyAudio for microphone access..."
 if pip install --no-cache-dir pyaudio; then
     log_success "PyAudio installed"
 else
-    log_error "PyAudio installation failed. Attempting rebuild..."
-    log_info "Rebuilding PyAudio with verbose output..."
-    pip install --no-cache-dir --verbose pyaudio 2>&1 | tail -20 || log_warning "PyAudio rebuild reported issues"
+    log_warning "PyAudio pip install failed - installing build deps and retrying"
+    apt-get install -y portaudio19-dev libasound2-dev libsndfile1 || log_warning "Failed to install system audio deps"
+    log_info "Retrying PyAudio build (verbose)..."
+    if pip install --no-cache-dir --verbose pyaudio 2>&1 | tail -20; then
+        log_success "PyAudio rebuilt and installed"
+    else
+        log_warning "PyAudio rebuild failed - installing system package python3-pyaudio as fallback"
+        apt-get install -y python3-pyaudio || log_warning "Failed to install system python3-pyaudio"
+    fi
 fi
 
 log_info "Installing audio processing and integration libraries..."
@@ -186,6 +216,21 @@ pip install --no-cache-dir \
     spidev 2>/dev/null || log_warning "GPIO libraries optional (LED support)"
 
 log_success "All Python packages installed"
+
+# Restore TMPDIR and clean up temporary build folder
+if [ -n "$OLD_TMPDIR" ]; then
+    export TMPDIR="$OLD_TMPDIR"
+    export TMP="$OLD_TMPDIR"
+    export TEMP="$OLD_TMPDIR"
+else
+    unset TMPDIR TMP TEMP
+fi
+
+# Optionally remove build temp to free disk space
+if [ -d "$BUILD_TMP" ]; then
+    rm -rf "$BUILD_TMP" || log_warning "Failed to remove temporary build dir: $BUILD_TMP"
+    log_info "Removed temporary build dir: $BUILD_TMP"
+fi
 
 # Verify PyAudio installation
 log_info "Verifying PyAudio installation..."
