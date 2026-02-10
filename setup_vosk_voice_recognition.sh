@@ -107,6 +107,88 @@ apt-get install -y \
 log_success "System dependencies installed"
 
 # ============================================================================
+# STEP 1.5: CONFIGURE TLV320AIC3104 AUDIO CODEC (ReSpeaker 2-Mics HAT)
+# ============================================================================
+
+log_section "Step 1.5: Optimize TLV320AIC3104 Audio Codec Settings"
+
+log_info "Configuring ReSpeaker 2-Mics HAT V2.0 audio codec..."
+log_info "Target: Set PGA (Capture) gain to ~50%, disable AGC for clean input"
+
+# Try to find the correct ALSA card for ReSpeaker
+RESPEAKER_CARD=$(arecord -l 2>/dev/null | grep -i seeed | grep -oP '(?<=card )\d+' | head -1)
+
+if [ -z "$RESPEAKER_CARD" ]; then
+    log_warning "Could not auto-detect ReSpeaker card. Trying default seeed2micvoicec..."
+    RESPEAKER_CARD="seeed2micvoicec"
+else
+    log_info "Found ReSpeaker on ALSA card: $RESPEAKER_CARD"
+fi
+
+# Function to safely set alsamixer control
+set_mixer_control() {
+    local card="$1"
+    local control="$2"
+    local value="$3"
+    
+    if amixer -c "$card" sset "$control" "$value" 2>/dev/null; then
+        log_success "  ✓ $control = $value"
+        return 0
+    else
+        log_warning "  ⚠ Could not set $control (may not exist)"
+        return 1
+    fi
+}
+
+log_info "Adjusting capture gains and noise settings..."
+
+# Set PGA (Programmable Gain Amplifier) to 50% to avoid clipping
+# This is critical - default is often 100% which causes static/clipping
+set_mixer_control "$RESPEAKER_CARD" "PGA" "50%"
+
+# Alternative: if PGA not found, try other common names
+if [ $? -ne 0 ]; then
+    log_info "  Trying alternative control names..."
+    set_mixer_control "$RESPEAKER_CARD" "Capture" "50%" || \
+    set_mixer_control "$RESPEAKER_CARD" "ADC Level" "50%" || \
+    set_mixer_control "$RESPEAKER_CARD" "Input Level" "50%"
+fi
+
+# Disable AGC (Automatic Gain Control) - causes "pumping" effect on budget codecs
+log_info "Disabling AGC (Automatic Gain Control) to prevent breathing effect..."
+set_mixer_control "$RESPEAKER_CARD" "AGC" "off" || \
+set_mixer_control "$RESPEAKER_CARD" "AGC Switch" "off" || \
+set_mixer_control "$RESPEAKER_CARD" "AGC Enable" "off" || \
+set_mixer_control "$RESPEAKER_CARD" "Auto Gain Control" "off"
+
+# Optional: Enhance microphone boost if available (helps weak signals)
+log_info "Optimizing microphone settings..."
+set_mixer_control "$RESPEAKER_CARD" "MIC Boost" "on" || \
+set_mixer_control "$RESPEAKER_CARD" "Mic Boost" "on" || true
+
+# Optional: Enable Noise Suppression in hardware if available
+set_mixer_control "$RESPEAKER_CARD" "Noise Suppression" "on" || \
+set_mixer_control "$RESPEAKER_CARD" "Noise Gate" "on" || true
+
+# Save the configuration so it persists after reboot
+log_info "Saving audio configuration to ALSA state file..."
+if alsactl store; then
+    log_success "Audio configuration saved (will persist after reboot)"
+else
+    log_warning "Could not save ALSA state - settings may reset after reboot"
+fi
+
+# Verify configuration
+log_info "Verifying audio codec settings..."
+amixer -c "$RESPEAKER_CARD" scontrols 2>/dev/null | head -10 | sed 's/^/  /'
+
+log_success "Audio codec optimization complete"
+log_info ""
+log_info "IMPORTANT: Test audio quality with:"
+log_info "  arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav"
+log_info ""
+
+# ============================================================================
 # STEP 2: ENSURE VIRTUAL ENVIRONMENT EXISTS
 # ============================================================================
 
@@ -928,6 +1010,160 @@ chmod +x /usr/local/bin/evvos-voice-service.py
 log_success "Voice recognition service script created"
 
 # ============================================================================
+# STEP 5.5: CREATE AUDIO CODEC TUNING UTILITY
+# ============================================================================
+
+log_section "Step 5.5: Create Audio Codec Tuning Utility"
+
+cat > /usr/local/bin/evvos-tune-audio << 'AUDIO_TUNE_EOF'
+#!/bin/bash
+# EVVOS Audio Codec Tuning Utility
+# Interactive tool to adjust TLV320AIC3104 (ReSpeaker 2-Mics HAT V2.0) settings
+# Run with: sudo evvos-tune-audio
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+echo -e "${CYAN}"
+echo "╔════════════════════════════════════════════════════════════╗"
+echo "║  EVVOS Audio Codec Tuning Utility (TLV320AIC3104)          ║"
+echo "║  ReSpeaker 2-Mics HAT V2.0 Audio Quality Optimization      ║"
+echo "╚════════════════════════════════════════════════════════════╝"
+echo -e "${NC}"
+
+if [ "$EUID" -ne 0 ]; then 
+    echo -e "${RED}✗${NC} This script must be run as root"
+    echo "Usage: sudo evvos-tune-audio"
+    exit 1
+fi
+
+# Find ReSpeaker card
+RESPEAKER_CARD=$(arecord -l 2>/dev/null | grep -i seeed | grep -oP '(?<=card )\d+' | head -1)
+if [ -z "$RESPEAKER_CARD" ]; then
+    RESPEAKER_CARD="seeed2micvoicec"
+fi
+
+echo -e "${BLUE}Using ALSA card: $RESPEAKER_CARD${NC}"
+echo ""
+
+# Display current settings
+echo -e "${GREEN}Current Audio Settings:${NC}"
+amixer -c "$RESPEAKER_CARD" scontrols 2>/dev/null | sed 's/^/  /'
+echo ""
+
+# Main menu
+while true; do
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}Audio Codec Tuning Menu${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "1) Set PGA (Capture Gain) - Recommended: 40-60%"
+    echo "2) Set Microphone Boost - Enhance weak signals"
+    echo "3) Enable/Disable AGC - Disable recommended (prevents pumping)"
+    echo "4) Enable/Disable Noise Suppression"
+    echo "5) Show all available controls"
+    echo "6) Test microphone (record 3 seconds)"
+    echo "7) Save settings (persistent after reboot)"
+    echo "8) Reset to defaults"
+    echo "9) Exit"
+    echo ""
+    read -p "Select option (1-9): " option
+    
+    case $option in
+        1)
+            echo ""
+            read -p "Enter PGA gain percentage (0-100, default 50): " pga_val
+            pga_val=${pga_val:-50}
+            amixer -c "$RESPEAKER_CARD" sset "PGA" "$pga_val%" 2>/dev/null && \
+                echo -e "${GREEN}✓${NC} PGA set to $pga_val%" || \
+                echo -e "${RED}✗${NC} Failed to set PGA"
+            echo ""
+            ;;
+        2)
+            echo ""
+            read -p "Enable Microphone Boost? (on/off, default on): " boost_val
+            boost_val=${boost_val:-on}
+            amixer -c "$RESPEAKER_CARD" sset "MIC Boost" "$boost_val" 2>/dev/null || \
+            amixer -c "$RESPEAKER_CARD" sset "Mic Boost" "$boost_val" 2>/dev/null && \
+                echo -e "${GREEN}✓${NC} MIC Boost set to $boost_val" || \
+                echo -e "${YELLOW}⚠${NC} MIC Boost control not found"
+            echo ""
+            ;;
+        3)
+            echo ""
+            read -p "Disable AGC (Automatic Gain Control)? (on/off, default off): " agc_val
+            agc_val=${agc_val:-off}
+            amixer -c "$RESPEAKER_CARD" sset "AGC" "$agc_val" 2>/dev/null || \
+            amixer -c "$RESPEAKER_CARD" sset "AGC Switch" "$agc_val" 2>/dev/null && \
+                echo -e "${GREEN}✓${NC} AGC set to $agc_val" || \
+                echo -e "${YELLOW}⚠${NC} AGC control not found (codec may not have one)"
+            echo ""
+            ;;
+        4)
+            echo ""
+            read -p "Enable Noise Suppression? (on/off, default on): " ns_val
+            ns_val=${ns_val:-on}
+            amixer -c "$RESPEAKER_CARD" sset "Noise Suppression" "$ns_val" 2>/dev/null || \
+            amixer -c "$RESPEAKER_CARD" sset "Noise Gate" "$ns_val" 2>/dev/null && \
+                echo -e "${GREEN}✓${NC} Noise Suppression set to $ns_val" || \
+                echo -e "${YELLOW}⚠${NC} Noise Suppression control not found"
+            echo ""
+            ;;
+        5)
+            echo ""
+            echo -e "${GREEN}All Available Mixer Controls:${NC}"
+            amixer -c "$RESPEAKER_CARD" scontrols 2>/dev/null | sed 's/^/  /'
+            echo ""
+            read -p "Press Enter to continue..."
+            echo ""
+            ;;
+        6)
+            echo ""
+            echo -e "${CYAN}Recording 3 seconds of audio from microphone...${NC}"
+            echo "Speak clearly into the microphone!"
+            arecord -c 1 -r 16000 -f S16_LE -d 3 /tmp/evvos_test.wav 2>/dev/null
+            echo -e "${CYAN}Playing back recorded audio...${NC}"
+            aplay /tmp/evvos_test.wav 2>/dev/null
+            echo -e "${GREEN}✓${NC} Test complete"
+            echo ""
+            ;;
+        7)
+            echo ""
+            alsactl store && echo -e "${GREEN}✓${NC} Settings saved (persistent)" || \
+                echo -e "${RED}✗${NC} Failed to save settings"
+            echo ""
+            ;;
+        8)
+            echo ""
+            echo -e "${YELLOW}Resetting audio settings to defaults...${NC}"
+            amixer -c "$RESPEAKER_CARD" reset 2>/dev/null && \
+                echo -e "${GREEN}✓${NC} Reset complete" || \
+                echo -e "${YELLOW}⚠${NC} Could not fully reset"
+            echo ""
+            ;;
+        9)
+            echo ""
+            echo -e "${GREEN}Goodbye!${NC}"
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}Invalid option. Please select 1-9.${NC}"
+            echo ""
+            ;;
+    esac
+done
+AUDIO_TUNE_EOF
+
+chmod +x /usr/local/bin/evvos-tune-audio
+log_success "Audio tuning utility created (/usr/local/bin/evvos-tune-audio)"
+
+# ============================================================================
 # STEP 6: CREATE SYSTEMD SERVICE UNIT
 # ============================================================================
 
@@ -1123,10 +1359,24 @@ echo "  3. Watch for green LED flash and log message"
 echo "  4. Adjust microphone gain if needed"
 echo ""
 
+log_info "Audio Quality Tuning:"
+echo "  • Audio codec optimized at setup: PGA ~50%, AGC disabled"
+echo "  • Run interactive tuner: ${CYAN}sudo evvos-tune-audio${NC}"
+echo "  • Test recording: ${CYAN}arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav${NC}"
+echo "  • Verify no clipping: audio should hit green/yellow, never red"
+echo ""
+
+log_info "Audio Processing Enhancements:"
+echo "  • WebRTC VAD: Skips silent frames (reduces noise, CPU load)"
+echo "  • Noise Reduction: Stationary noise suppression (noisereduce library)"
+echo "  • Both enabled by default in voice service"
+echo ""
+
 log_info "Integration:"
 echo "  • This service runs automatically on boot"
 echo "  • Logs all detected commands to journalctl"
 echo "  • Ready for integration with provisioning service"
+echo "  • WebRTC processing improves recognition in noisy environments"
 echo ""
 
 echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
