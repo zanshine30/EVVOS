@@ -315,11 +315,27 @@ fi
 # STEP 6: REBOOT NOTICE
 # ============================================================================
 
-log_section "Step 6: Device Tree Configuration Complete"
+log_section "Step 6: Reboot Required"
 
 echo ""
-log_success "✓ Device tree overlay and boot parameters configured"
+log_warning "A system REBOOT is REQUIRED for device tree changes to take effect"
 echo ""
+log_info "After rebooting, run this command to configure ALSA audio:"
+echo ""
+echo "  sudo bash setup_respeaker_enhanced.sh --configure-alsa"
+echo ""
+log_info "OR reboot now and we'll continue automatically:"
+echo ""
+read -p "Reboot now? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    log_info "Rebooting in 5 seconds..."
+    sleep 5
+    reboot
+else
+    log_info "Remember to reboot before continuing ALSA configuration"
+    exit 0
+fi
 
 # ============================================================================
 # STEP 7: ALSA AUDIO CONFIGURATION (After Reboot)
@@ -572,22 +588,3 @@ echo ""
 
 echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
 echo ""
-
-# ============================================================================
-# REBOOT SYSTEM (All setup complete)
-# ============================================================================
-
-log_section "Complete - Rebooting System in 10 Seconds"
-
-echo ""
-log_success "✓ All ReSpeaker setup steps completed successfully"
-echo ""
-log_warning "🔄 System will reboot in 10 seconds to apply device tree changes..."
-log_info "After reboot:"
-echo "  • Device tree configuration takes effect"
-echo "  • ReSpeaker HAT will be fully operational"
-echo "  • You can run setup_evvos.sh immediately"
-echo ""
-log_info "Rebooting now..."
-sleep 10
-reboot
