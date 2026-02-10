@@ -107,88 +107,6 @@ apt-get install -y \
 log_success "System dependencies installed"
 
 # ============================================================================
-# STEP 1.5: CONFIGURE TLV320AIC3104 AUDIO CODEC (ReSpeaker 2-Mics HAT)
-# ============================================================================
-
-log_section "Step 1.5: Optimize TLV320AIC3104 Audio Codec Settings"
-
-log_info "Configuring ReSpeaker 2-Mics HAT V2.0 audio codec..."
-log_info "Target: Set PGA (Capture) gain to ~50%, disable AGC for clean input"
-
-# Try to find the correct ALSA card for ReSpeaker
-RESPEAKER_CARD=$(arecord -l 2>/dev/null | grep -i seeed | grep -oP '(?<=card )\d+' | head -1)
-
-if [ -z "$RESPEAKER_CARD" ]; then
-    log_warning "Could not auto-detect ReSpeaker card. Trying default seeed2micvoicec..."
-    RESPEAKER_CARD="seeed2micvoicec"
-else
-    log_info "Found ReSpeaker on ALSA card: $RESPEAKER_CARD"
-fi
-
-# Function to safely set alsamixer control
-set_mixer_control() {
-    local card="$1"
-    local control="$2"
-    local value="$3"
-    
-    if amixer -c "$card" sset "$control" "$value" 2>/dev/null; then
-        log_success "  ✓ $control = $value"
-        return 0
-    else
-        log_warning "  ⚠ Could not set $control (may not exist)"
-        return 1
-    fi
-}
-
-log_info "Adjusting capture gains and noise settings..."
-
-# Set PGA (Programmable Gain Amplifier) to 50% to avoid clipping
-# This is critical - default is often 100% which causes static/clipping
-set_mixer_control "$RESPEAKER_CARD" "PGA" "50%"
-
-# Alternative: if PGA not found, try other common names
-if [ $? -ne 0 ]; then
-    log_info "  Trying alternative control names..."
-    set_mixer_control "$RESPEAKER_CARD" "Capture" "50%" || \
-    set_mixer_control "$RESPEAKER_CARD" "ADC Level" "50%" || \
-    set_mixer_control "$RESPEAKER_CARD" "Input Level" "50%"
-fi
-
-# Disable AGC (Automatic Gain Control) - causes "pumping" effect on budget codecs
-log_info "Disabling AGC (Automatic Gain Control) to prevent breathing effect..."
-set_mixer_control "$RESPEAKER_CARD" "AGC" "off" || \
-set_mixer_control "$RESPEAKER_CARD" "AGC Switch" "off" || \
-set_mixer_control "$RESPEAKER_CARD" "AGC Enable" "off" || \
-set_mixer_control "$RESPEAKER_CARD" "Auto Gain Control" "off"
-
-# Optional: Enhance microphone boost if available (helps weak signals)
-log_info "Optimizing microphone settings..."
-set_mixer_control "$RESPEAKER_CARD" "MIC Boost" "on" || \
-set_mixer_control "$RESPEAKER_CARD" "Mic Boost" "on" || true
-
-# Optional: Enable Noise Suppression in hardware if available
-set_mixer_control "$RESPEAKER_CARD" "Noise Suppression" "on" || \
-set_mixer_control "$RESPEAKER_CARD" "Noise Gate" "on" || true
-
-# Save the configuration so it persists after reboot
-log_info "Saving audio configuration to ALSA state file..."
-if alsactl store; then
-    log_success "Audio configuration saved (will persist after reboot)"
-else
-    log_warning "Could not save ALSA state - settings may reset after reboot"
-fi
-
-# Verify configuration
-log_info "Verifying audio codec settings..."
-amixer -c "$RESPEAKER_CARD" scontrols 2>/dev/null | head -10 | sed 's/^/  /'
-
-log_success "Audio codec optimization complete"
-log_info ""
-log_info "IMPORTANT: Test audio quality with:"
-log_info "  arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav"
-log_info ""
-
-# ============================================================================
 # STEP 2: ENSURE VIRTUAL ENVIRONMENT EXISTS
 # ============================================================================
 
@@ -239,19 +157,9 @@ pip install --no-cache-dir \
     RPi.GPIO \
     spidev \
     numpy \
-    requests \
-    webrtcvad \
-    noisereduce \
-    scipy
+    requests
 
 log_success "All Python packages installed"
-
-log_info "Attempting to install librnnoise for advanced noise suppression (optional)..."
-if pip install --no-cache-dir librnnoise 2>/dev/null; then
-    log_success "librnnoise installed (optional noise suppression enabled)"
-else
-    log_warning "librnnoise installation skipped (optional, system will use noisereduce)"
-fi
 
 # Verify PyAudio installation
 log_info "Verifying PyAudio installation..."
@@ -357,18 +265,6 @@ try:
 except ImportError:
     print("WARNING: spidev not found. LED feedback disabled.")
     spidev = None
-
-try:
-    import webrtcvad
-except ImportError:
-    print("WARNING: webrtcvad not found. Voice Activity Detection disabled.")
-    webrtcvad = None
-
-try:
-    import noisereduce as nr
-except ImportError:
-    print("WARNING: noisereduce not found. Noise suppression disabled.")
-    nr = None
 
 # ============================================================================
 # CONFIGURATION
@@ -525,7 +421,7 @@ class PixelRing:
 # ============================================================================
 
 class VoiceRecognitionService:
-    """Main voice recognition service with WebRTC VAD and noise suppression"""
+    """Main voice recognition service"""
     
     def __init__(self):
         self.model = None
@@ -536,21 +432,6 @@ class VoiceRecognitionService:
         self.running = False
         self.device_index = None
         self.manila_tz = timezone(timedelta(hours=8))
-        
-        # WebRTC VAD configuration
-        self.vad = None
-        self.vad_mode = 2  # 0=quality, 1=low bitrate, 2=aggressive, 3=very aggressive
-        if webrtcvad:
-            try:
-                self.vad = webrtcvad.Vad(self.vad_mode)
-                logger.info(f"✓ WebRTC VAD initialized (mode {self.vad_mode})")
-            except Exception as e:
-                logger.warning(f"Failed to initialize VAD: {e}")
-                self.vad = None
-        
-        # Audio buffer for noise reduction processing
-        self.audio_buffer = []
-        self.buffer_size = 32000  # ~2 seconds at 16kHz for batch noise reduction
         
         logger.info("=" * 70)
         logger.info("EVVOS Voice Recognition Service Starting")
@@ -714,84 +595,6 @@ class VoiceRecognitionService:
             logger.error(f"Failed to open audio stream: {e}")
             return False
 
-    def preprocess_audio(self, data: bytes) -> bool:
-        """
-        Preprocess audio using WebRTC VAD and noise reduction.
-        Returns True if voice activity detected, False if silent.
-        Modifies audio buffer for noise reduction.
-        """
-        if not self.vad:
-            return True  # No VAD, pass through all audio
-        
-        try:
-            # VAD expects 16-bit PCM audio at specific frame sizes
-            # For 16kHz: 10ms=160 samples, 20ms=320 samples, 30ms=480 samples
-            # AUDIO_CHUNK_SIZE=2048 at 16kHz = 128ms, so we need to split it
-            
-            # Feed chunks of 20ms (320 samples = 640 bytes) to VAD
-            frame_size = int(SAMPLE_RATE * 0.02)  # 20ms frame = 320 samples at 16kHz
-            frame_bytes = frame_size * 2  # 16-bit = 2 bytes per sample
-            
-            has_voice = False
-            
-            # Process audio in 20ms chunks for VAD
-            for i in range(0, len(data), frame_bytes):
-                chunk = data[i:i+frame_bytes]
-                if len(chunk) < frame_bytes:
-                    break
-                
-                try:
-                    is_speech = self.vad.is_speech(chunk, SAMPLE_RATE)
-                    if is_speech:
-                        has_voice = True
-                except Exception as e:
-                    logger.debug(f"VAD error on chunk: {e}")
-            
-            # Add audio to buffer for batch noise reduction
-            import numpy as np
-            audio_int16 = np.frombuffer(data, dtype=np.int16)
-            self.audio_buffer.extend(audio_int16.tolist())
-            
-            # Keep buffer size bounded (don't let it grow indefinitely)
-            if len(self.audio_buffer) > self.buffer_size:
-                self.audio_buffer = self.audio_buffer[-self.buffer_size:]
-            
-            return has_voice
-            
-        except Exception as e:
-            logger.debug(f"Audio preprocessing error: {e}")
-            return True  # On error, pass through
-
-    def apply_noise_reduction(self, data: bytes) -> bytes:
-        """
-        Apply noise reduction to audio using noisereduce library or scipy.
-        Returns processed audio bytes.
-        """
-        if not nr:
-            return data
-        
-        try:
-            import numpy as np
-            
-            # Convert bytes to numpy array for processing
-            audio_int16 = np.frombuffer(data, dtype=np.int16)
-            
-            # Normalize to float32 [-1, 1] range for processing
-            audio_float = audio_int16.astype(np.float32) / 32768.0
-            
-            # Apply noise reduction (stationary noise reduction)
-            # reduce_noise() expects audio in float format
-            reduced = nr.reduce_noise(y=audio_float, sr=SAMPLE_RATE, stationary=True, prop_decrease=1.0)
-            
-            # Convert back to int16
-            audio_processed = (reduced * 32768.0).astype(np.int16)
-            
-            return audio_processed.tobytes()
-            
-        except Exception as e:
-            logger.debug(f"Noise reduction error: {e}")
-            return data  # Return original on error
-
     def process_voice_input(self):
         """Main voice recognition loop"""
         logger.info("🎤 Listening for voice commands...")
@@ -816,19 +619,7 @@ class VoiceRecognitionService:
                     # Read audio chunk from microphone (CRITICAL PATH - minimal overhead)
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
                     
-                    # STEP 1: Voice Activity Detection (VAD) - skip silent frames
-                    has_voice = self.preprocess_audio(data)
-                    
-                    if not has_voice and self.vad:
-                        # Voice activity not detected - skip this chunk to reduce noise
-                        consecutive_silence += 1
-                        continue
-                    
-                    # STEP 2: Noise Reduction - improve SNR before Vosk
-                    if nr:
-                        data = self.apply_noise_reduction(data)
-                    
-                    # STEP 3: Process audio with Vosk recognizer
+                    # Process audio with Vosk recognizer
                     if self.recognizer.AcceptWaveform(data):
                         # Final recognition result
                         result = json.loads(self.recognizer.Result())
@@ -892,58 +683,8 @@ class VoiceRecognitionService:
         except Exception as e:
             logger.debug(f"systemd-cat error: {e}")
         
-        # Attempt to send the command to the deployed Edge Function (recommended)
-        # Preferred env vars:
-        #   INSERT_VOICE_FN_URL (your deployed insert-voice-command function URL)
-        #   SUPABASE_VOICE_USER_ID (the target user id to attribute the command)
-        # Fallback: if no edge function URL is set, will attempt direct PostgREST insert
-        try:
-            edge_fn = os.environ.get('INSERT_VOICE_FN_URL') or os.environ.get('SUPABASE_EDGE_FUNCTION_URL')
-            supabase_url = os.environ.get('SUPABASE_URL')
-            supabase_key = os.environ.get('SUPABASE_KEY')
-            target_user_id = os.environ.get('SUPABASE_VOICE_USER_ID')
-
-            payload = {
-                'user_id': target_user_id,
-                'command': command,
-                'device_id': os.uname().nodename if hasattr(os, 'uname') else os.environ.get('HOSTNAME', 'evvos-device'),
-                'processed': False,
-            }
-
-            import requests
-
-            if edge_fn and target_user_id:
-                try:
-                    logger.info(f"Posting voice command to Edge Function: {edge_fn}")
-                    resp = requests.post(edge_fn, json=payload, headers={'Content-Type': 'application/json'}, timeout=5)
-                    if resp.ok:
-                        logger.info(f"Edge function accepted voice command for user {target_user_id}: {command}")
-                    else:
-                        logger.warning(f"Edge function returned {resp.status_code}: {resp.text}")
-                except Exception as e:
-                    logger.debug(f"Edge function call error: {e}")
-
-            elif supabase_url and supabase_key and target_user_id:
-                try:
-                    headers = {
-                        'Content-Type': 'application/json',
-                        'apikey': supabase_key,
-                        'Authorization': f'Bearer {supabase_key}',
-                    }
-                    rest_url = f"{supabase_url.rstrip('/')}/rest/v1/voice_commands"
-                    logger.info(f"Posting voice command directly to PostgREST: {rest_url}")
-                    resp = requests.post(rest_url, json=payload, headers=headers, timeout=5)
-                    if resp.status_code in (200, 201, 204):
-                        logger.info(f"Inserted voice command into Supabase for user {target_user_id}: {command}")
-                    else:
-                        logger.warning(f"Supabase insert failed ({resp.status_code}): {resp.text}")
-                except Exception as e:
-                    logger.debug(f"Supabase HTTP insert error: {e}")
-            else:
-                logger.debug("No edge function or Supabase REST config found; skipping DB insert of voice command")
-        except Exception as e:
-            logger.debug(f"Error preparing DB insert: {e}")
-
+        # TODO: Send command to mobile app or internal service
+        # Example: POST to local API, write to pipe, etc.
         logger.info(f"Command '{command}' ready for processing")
 
     def shutdown(self):
@@ -1008,160 +749,6 @@ VOICE_SERVICE_EOF
 
 chmod +x /usr/local/bin/evvos-voice-service.py
 log_success "Voice recognition service script created"
-
-# ============================================================================
-# STEP 5.5: CREATE AUDIO CODEC TUNING UTILITY
-# ============================================================================
-
-log_section "Step 5.5: Create Audio Codec Tuning Utility"
-
-cat > /usr/local/bin/evvos-tune-audio << 'AUDIO_TUNE_EOF'
-#!/bin/bash
-# EVVOS Audio Codec Tuning Utility
-# Interactive tool to adjust TLV320AIC3104 (ReSpeaker 2-Mics HAT V2.0) settings
-# Run with: sudo evvos-tune-audio
-
-set -e
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-NC='\033[0m'
-
-echo -e "${CYAN}"
-echo "╔════════════════════════════════════════════════════════════╗"
-echo "║  EVVOS Audio Codec Tuning Utility (TLV320AIC3104)          ║"
-echo "║  ReSpeaker 2-Mics HAT V2.0 Audio Quality Optimization      ║"
-echo "╚════════════════════════════════════════════════════════════╝"
-echo -e "${NC}"
-
-if [ "$EUID" -ne 0 ]; then 
-    echo -e "${RED}✗${NC} This script must be run as root"
-    echo "Usage: sudo evvos-tune-audio"
-    exit 1
-fi
-
-# Find ReSpeaker card
-RESPEAKER_CARD=$(arecord -l 2>/dev/null | grep -i seeed | grep -oP '(?<=card )\d+' | head -1)
-if [ -z "$RESPEAKER_CARD" ]; then
-    RESPEAKER_CARD="seeed2micvoicec"
-fi
-
-echo -e "${BLUE}Using ALSA card: $RESPEAKER_CARD${NC}"
-echo ""
-
-# Display current settings
-echo -e "${GREEN}Current Audio Settings:${NC}"
-amixer -c "$RESPEAKER_CARD" scontrols 2>/dev/null | sed 's/^/  /'
-echo ""
-
-# Main menu
-while true; do
-    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
-    echo -e "${CYAN}Audio Codec Tuning Menu${NC}"
-    echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo "1) Set PGA (Capture Gain) - Recommended: 40-60%"
-    echo "2) Set Microphone Boost - Enhance weak signals"
-    echo "3) Enable/Disable AGC - Disable recommended (prevents pumping)"
-    echo "4) Enable/Disable Noise Suppression"
-    echo "5) Show all available controls"
-    echo "6) Test microphone (record 3 seconds)"
-    echo "7) Save settings (persistent after reboot)"
-    echo "8) Reset to defaults"
-    echo "9) Exit"
-    echo ""
-    read -p "Select option (1-9): " option
-    
-    case $option in
-        1)
-            echo ""
-            read -p "Enter PGA gain percentage (0-100, default 50): " pga_val
-            pga_val=${pga_val:-50}
-            amixer -c "$RESPEAKER_CARD" sset "PGA" "$pga_val%" 2>/dev/null && \
-                echo -e "${GREEN}✓${NC} PGA set to $pga_val%" || \
-                echo -e "${RED}✗${NC} Failed to set PGA"
-            echo ""
-            ;;
-        2)
-            echo ""
-            read -p "Enable Microphone Boost? (on/off, default on): " boost_val
-            boost_val=${boost_val:-on}
-            amixer -c "$RESPEAKER_CARD" sset "MIC Boost" "$boost_val" 2>/dev/null || \
-            amixer -c "$RESPEAKER_CARD" sset "Mic Boost" "$boost_val" 2>/dev/null && \
-                echo -e "${GREEN}✓${NC} MIC Boost set to $boost_val" || \
-                echo -e "${YELLOW}⚠${NC} MIC Boost control not found"
-            echo ""
-            ;;
-        3)
-            echo ""
-            read -p "Disable AGC (Automatic Gain Control)? (on/off, default off): " agc_val
-            agc_val=${agc_val:-off}
-            amixer -c "$RESPEAKER_CARD" sset "AGC" "$agc_val" 2>/dev/null || \
-            amixer -c "$RESPEAKER_CARD" sset "AGC Switch" "$agc_val" 2>/dev/null && \
-                echo -e "${GREEN}✓${NC} AGC set to $agc_val" || \
-                echo -e "${YELLOW}⚠${NC} AGC control not found (codec may not have one)"
-            echo ""
-            ;;
-        4)
-            echo ""
-            read -p "Enable Noise Suppression? (on/off, default on): " ns_val
-            ns_val=${ns_val:-on}
-            amixer -c "$RESPEAKER_CARD" sset "Noise Suppression" "$ns_val" 2>/dev/null || \
-            amixer -c "$RESPEAKER_CARD" sset "Noise Gate" "$ns_val" 2>/dev/null && \
-                echo -e "${GREEN}✓${NC} Noise Suppression set to $ns_val" || \
-                echo -e "${YELLOW}⚠${NC} Noise Suppression control not found"
-            echo ""
-            ;;
-        5)
-            echo ""
-            echo -e "${GREEN}All Available Mixer Controls:${NC}"
-            amixer -c "$RESPEAKER_CARD" scontrols 2>/dev/null | sed 's/^/  /'
-            echo ""
-            read -p "Press Enter to continue..."
-            echo ""
-            ;;
-        6)
-            echo ""
-            echo -e "${CYAN}Recording 3 seconds of audio from microphone...${NC}"
-            echo "Speak clearly into the microphone!"
-            arecord -c 1 -r 16000 -f S16_LE -d 3 /tmp/evvos_test.wav 2>/dev/null
-            echo -e "${CYAN}Playing back recorded audio...${NC}"
-            aplay /tmp/evvos_test.wav 2>/dev/null
-            echo -e "${GREEN}✓${NC} Test complete"
-            echo ""
-            ;;
-        7)
-            echo ""
-            alsactl store && echo -e "${GREEN}✓${NC} Settings saved (persistent)" || \
-                echo -e "${RED}✗${NC} Failed to save settings"
-            echo ""
-            ;;
-        8)
-            echo ""
-            echo -e "${YELLOW}Resetting audio settings to defaults...${NC}"
-            amixer -c "$RESPEAKER_CARD" reset 2>/dev/null && \
-                echo -e "${GREEN}✓${NC} Reset complete" || \
-                echo -e "${YELLOW}⚠${NC} Could not fully reset"
-            echo ""
-            ;;
-        9)
-            echo ""
-            echo -e "${GREEN}Goodbye!${NC}"
-            exit 0
-            ;;
-        *)
-            echo -e "${RED}Invalid option. Please select 1-9.${NC}"
-            echo ""
-            ;;
-    esac
-done
-AUDIO_TUNE_EOF
-
-chmod +x /usr/local/bin/evvos-tune-audio
-log_success "Audio tuning utility created (/usr/local/bin/evvos-tune-audio)"
 
 # ============================================================================
 # STEP 6: CREATE SYSTEMD SERVICE UNIT
@@ -1359,24 +946,10 @@ echo "  3. Watch for green LED flash and log message"
 echo "  4. Adjust microphone gain if needed"
 echo ""
 
-log_info "Audio Quality Tuning:"
-echo "  • Audio codec optimized at setup: PGA ~50%, AGC disabled"
-echo "  • Run interactive tuner: ${CYAN}sudo evvos-tune-audio${NC}"
-echo "  • Test recording: ${CYAN}arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav${NC}"
-echo "  • Verify no clipping: audio should hit green/yellow, never red"
-echo ""
-
-log_info "Audio Processing Enhancements:"
-echo "  • WebRTC VAD: Skips silent frames (reduces noise, CPU load)"
-echo "  • Noise Reduction: Stationary noise suppression (noisereduce library)"
-echo "  • Both enabled by default in voice service"
-echo ""
-
 log_info "Integration:"
 echo "  • This service runs automatically on boot"
 echo "  • Logs all detected commands to journalctl"
 echo "  • Ready for integration with provisioning service"
-echo "  • WebRTC processing improves recognition in noisy environments"
 echo ""
 
 echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
