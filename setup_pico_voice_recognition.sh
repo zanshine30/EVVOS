@@ -154,15 +154,12 @@ log_success "Virtual environment activated"
 
 log_section "Step 4: Install Python PicoVoice Packages"
 
-log_info "Upgrading pip, setuptools, wheel..."
-pip install --upgrade pip setuptools wheel
-
-log_info "Installing PicoVoice Rhino SDK..."
-if pip install --no-cache-dir picovoice pvrhino; then
-    log_success "PicoVoice Rhino SDK installed"
+log_info "Installing PicoVoice Rhino SDK and build tools..."
+if pip install --upgrade --no-cache-dir pip setuptools wheel picovoice pvrhino; then
+    log_success "PicoVoice Rhino SDK and build tools installed"
 else
     log_warning "Primary PicoVoice install reported issues, trying alternative..."
-    pip install --no-cache-dir picovoice || log_warning "PicoVoice installation completed with warnings"
+    pip install --upgrade --no-cache-dir pip setuptools wheel picovoice || log_warning "PicoVoice installation completed with warnings"
 fi
 
 log_info "Installing PyAudio for microphone access..."
