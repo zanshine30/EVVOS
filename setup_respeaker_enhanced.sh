@@ -315,27 +315,21 @@ fi
 # STEP 6: REBOOT NOTICE
 # ============================================================================
 
-log_section "Step 6: Reboot Required"
+log_section "Step 6: Auto-Reboot Required"
 
 echo ""
-log_warning "A system REBOOT is REQUIRED for device tree changes to take effect"
+log_warning "⚠ System REBOOT required for device tree changes to take effect"
 echo ""
-log_info "After rebooting, run this command to configure ALSA audio:"
+log_info "🔄 Automatic reboot starting in 10 seconds..."
 echo ""
-echo "  sudo bash setup_respeaker_enhanced.sh --configure-alsa"
+log_info "After reboot:"
+echo "  • System will continue ALSA audio configuration automatically"
+echo "  • ReSpeaker HAT will be detected and configured"
+echo "  • Next setup scripts can be executed immediately"
 echo ""
-log_info "OR reboot now and we'll continue automatically:"
-echo ""
-read -p "Reboot now? (y/n) " -n 1 -r
-echo
-if [[ $REPLY =~ ^[Yy]$ ]]; then
-    log_info "Rebooting in 5 seconds..."
-    sleep 5
-    reboot
-else
-    log_info "Remember to reboot before continuing ALSA configuration"
-    exit 0
-fi
+log_info "Rebooting now..."
+sleep 10
+reboot
 
 # ============================================================================
 # STEP 7: ALSA AUDIO CONFIGURATION (After Reboot)
