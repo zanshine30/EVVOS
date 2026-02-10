@@ -157,9 +157,19 @@ pip install --no-cache-dir \
     RPi.GPIO \
     spidev \
     numpy \
-    requests
+    requests \
+    webrtcvad \
+    noisereduce \
+    scipy
 
 log_success "All Python packages installed"
+
+log_info "Attempting to install librnnoise for advanced noise suppression (optional)..."
+if pip install --no-cache-dir librnnoise 2>/dev/null; then
+    log_success "librnnoise installed (optional noise suppression enabled)"
+else
+    log_warning "librnnoise installation skipped (optional, system will use noisereduce)"
+fi
 
 # Verify PyAudio installation
 log_info "Verifying PyAudio installation..."
@@ -265,6 +275,18 @@ try:
 except ImportError:
     print("WARNING: spidev not found. LED feedback disabled.")
     spidev = None
+
+try:
+    import webrtcvad
+except ImportError:
+    print("WARNING: webrtcvad not found. Voice Activity Detection disabled.")
+    webrtcvad = None
+
+try:
+    import noisereduce as nr
+except ImportError:
+    print("WARNING: noisereduce not found. Noise suppression disabled.")
+    nr = None
 
 # ============================================================================
 # CONFIGURATION
@@ -421,7 +443,7 @@ class PixelRing:
 # ============================================================================
 
 class VoiceRecognitionService:
-    """Main voice recognition service"""
+    """Main voice recognition service with WebRTC VAD and noise suppression"""
     
     def __init__(self):
         self.model = None
@@ -432,6 +454,21 @@ class VoiceRecognitionService:
         self.running = False
         self.device_index = None
         self.manila_tz = timezone(timedelta(hours=8))
+        
+        # WebRTC VAD configuration
+        self.vad = None
+        self.vad_mode = 2  # 0=quality, 1=low bitrate, 2=aggressive, 3=very aggressive
+        if webrtcvad:
+            try:
+                self.vad = webrtcvad.Vad(self.vad_mode)
+                logger.info(f"✓ WebRTC VAD initialized (mode {self.vad_mode})")
+            except Exception as e:
+                logger.warning(f"Failed to initialize VAD: {e}")
+                self.vad = None
+        
+        # Audio buffer for noise reduction processing
+        self.audio_buffer = []
+        self.buffer_size = 32000  # ~2 seconds at 16kHz for batch noise reduction
         
         logger.info("=" * 70)
         logger.info("EVVOS Voice Recognition Service Starting")
@@ -595,6 +632,84 @@ class VoiceRecognitionService:
             logger.error(f"Failed to open audio stream: {e}")
             return False
 
+    def preprocess_audio(self, data: bytes) -> bool:
+        """
+        Preprocess audio using WebRTC VAD and noise reduction.
+        Returns True if voice activity detected, False if silent.
+        Modifies audio buffer for noise reduction.
+        """
+        if not self.vad:
+            return True  # No VAD, pass through all audio
+        
+        try:
+            # VAD expects 16-bit PCM audio at specific frame sizes
+            # For 16kHz: 10ms=160 samples, 20ms=320 samples, 30ms=480 samples
+            # AUDIO_CHUNK_SIZE=2048 at 16kHz = 128ms, so we need to split it
+            
+            # Feed chunks of 20ms (320 samples = 640 bytes) to VAD
+            frame_size = int(SAMPLE_RATE * 0.02)  # 20ms frame = 320 samples at 16kHz
+            frame_bytes = frame_size * 2  # 16-bit = 2 bytes per sample
+            
+            has_voice = False
+            
+            # Process audio in 20ms chunks for VAD
+            for i in range(0, len(data), frame_bytes):
+                chunk = data[i:i+frame_bytes]
+                if len(chunk) < frame_bytes:
+                    break
+                
+                try:
+                    is_speech = self.vad.is_speech(chunk, SAMPLE_RATE)
+                    if is_speech:
+                        has_voice = True
+                except Exception as e:
+                    logger.debug(f"VAD error on chunk: {e}")
+            
+            # Add audio to buffer for batch noise reduction
+            import numpy as np
+            audio_int16 = np.frombuffer(data, dtype=np.int16)
+            self.audio_buffer.extend(audio_int16.tolist())
+            
+            # Keep buffer size bounded (don't let it grow indefinitely)
+            if len(self.audio_buffer) > self.buffer_size:
+                self.audio_buffer = self.audio_buffer[-self.buffer_size:]
+            
+            return has_voice
+            
+        except Exception as e:
+            logger.debug(f"Audio preprocessing error: {e}")
+            return True  # On error, pass through
+
+    def apply_noise_reduction(self, data: bytes) -> bytes:
+        """
+        Apply noise reduction to audio using noisereduce library or scipy.
+        Returns processed audio bytes.
+        """
+        if not nr:
+            return data
+        
+        try:
+            import numpy as np
+            
+            # Convert bytes to numpy array for processing
+            audio_int16 = np.frombuffer(data, dtype=np.int16)
+            
+            # Normalize to float32 [-1, 1] range for processing
+            audio_float = audio_int16.astype(np.float32) / 32768.0
+            
+            # Apply noise reduction (stationary noise reduction)
+            # reduce_noise() expects audio in float format
+            reduced = nr.reduce_noise(y=audio_float, sr=SAMPLE_RATE, stationary=True, prop_decrease=1.0)
+            
+            # Convert back to int16
+            audio_processed = (reduced * 32768.0).astype(np.int16)
+            
+            return audio_processed.tobytes()
+            
+        except Exception as e:
+            logger.debug(f"Noise reduction error: {e}")
+            return data  # Return original on error
+
     def process_voice_input(self):
         """Main voice recognition loop"""
         logger.info("🎤 Listening for voice commands...")
@@ -619,7 +734,19 @@ class VoiceRecognitionService:
                     # Read audio chunk from microphone (CRITICAL PATH - minimal overhead)
                     data = self.stream.read(AUDIO_CHUNK_SIZE, exception_on_overflow=False)
                     
-                    # Process audio with Vosk recognizer
+                    # STEP 1: Voice Activity Detection (VAD) - skip silent frames
+                    has_voice = self.preprocess_audio(data)
+                    
+                    if not has_voice and self.vad:
+                        # Voice activity not detected - skip this chunk to reduce noise
+                        consecutive_silence += 1
+                        continue
+                    
+                    # STEP 2: Noise Reduction - improve SNR before Vosk
+                    if nr:
+                        data = self.apply_noise_reduction(data)
+                    
+                    # STEP 3: Process audio with Vosk recognizer
                     if self.recognizer.AcceptWaveform(data):
                         # Final recognition result
                         result = json.loads(self.recognizer.Result())
@@ -683,8 +810,58 @@ class VoiceRecognitionService:
         except Exception as e:
             logger.debug(f"systemd-cat error: {e}")
         
-        # TODO: Send command to mobile app or internal service
-        # Example: POST to local API, write to pipe, etc.
+        # Attempt to send the command to the deployed Edge Function (recommended)
+        # Preferred env vars:
+        #   INSERT_VOICE_FN_URL (your deployed insert-voice-command function URL)
+        #   SUPABASE_VOICE_USER_ID (the target user id to attribute the command)
+        # Fallback: if no edge function URL is set, will attempt direct PostgREST insert
+        try:
+            edge_fn = os.environ.get('INSERT_VOICE_FN_URL') or os.environ.get('SUPABASE_EDGE_FUNCTION_URL')
+            supabase_url = os.environ.get('SUPABASE_URL')
+            supabase_key = os.environ.get('SUPABASE_KEY')
+            target_user_id = os.environ.get('SUPABASE_VOICE_USER_ID')
+
+            payload = {
+                'user_id': target_user_id,
+                'command': command,
+                'device_id': os.uname().nodename if hasattr(os, 'uname') else os.environ.get('HOSTNAME', 'evvos-device'),
+                'processed': False,
+            }
+
+            import requests
+
+            if edge_fn and target_user_id:
+                try:
+                    logger.info(f"Posting voice command to Edge Function: {edge_fn}")
+                    resp = requests.post(edge_fn, json=payload, headers={'Content-Type': 'application/json'}, timeout=5)
+                    if resp.ok:
+                        logger.info(f"Edge function accepted voice command for user {target_user_id}: {command}")
+                    else:
+                        logger.warning(f"Edge function returned {resp.status_code}: {resp.text}")
+                except Exception as e:
+                    logger.debug(f"Edge function call error: {e}")
+
+            elif supabase_url and supabase_key and target_user_id:
+                try:
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'apikey': supabase_key,
+                        'Authorization': f'Bearer {supabase_key}',
+                    }
+                    rest_url = f"{supabase_url.rstrip('/')}/rest/v1/voice_commands"
+                    logger.info(f"Posting voice command directly to PostgREST: {rest_url}")
+                    resp = requests.post(rest_url, json=payload, headers=headers, timeout=5)
+                    if resp.status_code in (200, 201, 204):
+                        logger.info(f"Inserted voice command into Supabase for user {target_user_id}: {command}")
+                    else:
+                        logger.warning(f"Supabase insert failed ({resp.status_code}): {resp.text}")
+                except Exception as e:
+                    logger.debug(f"Supabase HTTP insert error: {e}")
+            else:
+                logger.debug("No edge function or Supabase REST config found; skipping DB insert of voice command")
+        except Exception as e:
+            logger.debug(f"Error preparing DB insert: {e}")
+
         logger.info(f"Command '{command}' ready for processing")
 
     def shutdown(self):
