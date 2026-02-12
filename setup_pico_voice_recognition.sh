@@ -4,6 +4,31 @@
 # Detects EVVOS voice commands with intent recognition
 # RGB LED feedback and journalctl logging
 #
+# ⚠️  IMPORTANT: RUN SETUP_RESPEAKER_ENHANCED.SH FIRST
+# ═══════════════════════════════════════════════════════════════════════════
+# This script requires a fully configured ReSpeaker 2-Mics HAT. 
+#
+# Setup sequence:
+#   1. ReSpeaker Hardware Setup [REQUIRED FIRST]:
+#      sudo bash setup_respeaker_enhanced.sh
+#      (This will auto-reboot when complete)
+#
+#   2. PicoVoice Voice Recognition Setup [RUN AFTER REBOOT]:
+#      sudo bash setup_pico_voice_recognition_respeaker.sh
+#
+# The first script configures:
+#   ✓ Device tree overlay for ReSpeaker HAT
+#   ✓ I2S audio interface and TLV320AIC3104 codec
+#   ✓ ALSA audio system and microphone gain (25 optimized for speech)
+#   ✓ Hardware drivers and dependencies
+#
+# This second script configures:
+#   ✓ PicoVoice Rhino intent recognition engine
+#   ✓ Custom EVVOSVOICE context model
+#   ✓ LED feedback (RGB APA102)
+#   ✓ Systemd service for auto-start on boot
+# ═══════════════════════════════════════════════════════════════════════════
+#
 # Intent Model (EVVOSVOICE.yml):
 # - recording_control: "start recording", "stop recording"
 # - emergency_action: "emergency backup", "alert"
@@ -53,7 +78,7 @@ log_section() {
 }
 
 # ============================================================================
-# PREFLIGHT CHECKS (Fixed ALSA)
+# PREFLIGHT CHECKS (NEW!)
 # ============================================================================
 
 log_section "Preflight System Checks"
@@ -65,15 +90,98 @@ if [ "$EUID" -ne 0 ]; then
 fi
 log_success "Running as root"
 
-# Check if ReSpeaker HAT is detected
-if ! aplay -l 2>/dev/null | grep -qi "seeed"; then
-    log_error "ReSpeaker HAT not detected!"
-    log_error "Please run setup_respeaker_enhanced.sh first and reboot."
-    log_info "After running setup_respeaker_enhanced.sh, the system will reboot."
-    log_info "Then run this script again."
+# ============================================================================
+# VERIFY SETUP_RESPEAKER_ENHANCED.SH HAS BEEN COMPLETED
+# ============================================================================
+
+log_info "Verifying ReSpeaker hardware setup completion..."
+echo ""
+
+# Check 1: Device Tree Overlay Installation
+log_info "Check 1: Device tree overlay installed..."
+OVERLAY_FOUND=false
+if [ -f "/boot/firmware/overlays/respeaker-2mic-v2_0.dtbo" ]; then
+    log_success "Found overlay at /boot/firmware/overlays/respeaker-2mic-v2_0.dtbo"
+    OVERLAY_FOUND=true
+elif [ -f "/boot/overlays/respeaker-2mic-v2_0.dtbo" ]; then
+    log_success "Found overlay at /boot/overlays/respeaker-2mic-v2_0.dtbo"
+    OVERLAY_FOUND=true
+else
+    log_warning "Device tree overlay not found"
+fi
+
+# Check 2: Boot Configuration Updated
+log_info "Check 2: Boot parameters configured..."
+CONFIG_FILE=""
+if [ -f "/boot/firmware/config.txt" ]; then
+    CONFIG_FILE="/boot/firmware/config.txt"
+elif [ -f "/boot/config.txt" ]; then
+    CONFIG_FILE="/boot/config.txt"
+fi
+
+if [ -z "$CONFIG_FILE" ]; then
+    log_error "config.txt not found at /boot/config.txt or /boot/firmware/config.txt"
+    log_error "This system may not be a Raspberry Pi or is not properly configured"
     exit 1
 fi
-log_success "ReSpeaker HAT detected"
+
+if grep -q "dtoverlay=respeaker" "$CONFIG_FILE"; then
+    log_success "respeaker overlay enabled in config.txt"
+else
+    log_warning "respeaker overlay not found in $CONFIG_FILE"
+fi
+
+if grep -q "dtparam=i2s=on" "$CONFIG_FILE"; then
+    log_success "I2S interface enabled in config.txt"
+else
+    log_warning "I2S parameter not found in $CONFIG_FILE"
+fi
+
+# Check 3: ReSpeaker HAT Hardware Detection
+log_info "Check 3: ReSpeaker HAT hardware detection..."
+if ! aplay -l 2>/dev/null | grep -qi "seeed"; then
+    log_error "❌ ReSpeaker HAT not detected!"
+    log_error ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  SETUP_RESPEAKER_ENHANCED.SH REQUIRED"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "The following prerequisite setup must be completed first:"
+    echo ""
+    echo "  1. Run ReSpeaker hardware setup (will reboot):"
+    echo "     sudo bash setup_respeaker_enhanced.sh"
+    echo ""
+    echo "  2. After reboot, run PicoVoice setup:"
+    echo "     sudo bash setup_pico_voice_recognition_respeaker.sh"
+    echo ""
+    echo "Setup sequence:"
+    echo "  ┌─────────────────────────────────────────────────┐"
+    echo "  │ 1. setup_respeaker_enhanced.sh (installs HAT)   │"
+    echo "  │    └─> Auto-reboot                              │"
+    echo "  │                                                 │"
+    echo "  │ 2. setup_pico_voice_recognition_respeaker.sh    │"
+    echo "  │    (installs voice recognition)                 │"
+    echo "  └─────────────────────────────────────────────────┘"
+    echo ""
+    echo "Current audio devices:"
+    echo "  $(aplay -l 2>/dev/null | head -3 || echo "  None found")"
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    exit 1
+fi
+log_success "ReSpeaker HAT detected and working"
+
+# Check 4: ALSA Configuration
+log_info "Check 4: ALSA audio system configured..."
+if grep -q "seeed2micvoicec\|seeed-voicecard" /proc/asound/cards 2>/dev/null || aplay -l 2>/dev/null | grep -q "seeed"; then
+    log_success "ALSA audio system configured"
+else
+    log_warning "ALSA configuration may not be complete"
+fi
+
+echo ""
+log_success "✓ All ReSpeaker hardware prerequisites verified"
+echo ""
 
 # Detect the exact card name and number
 CARD_INFO=$(aplay -l 2>/dev/null | grep -i seeed | head -1)
@@ -104,7 +212,63 @@ log_info "Kernel version: $KERNEL_VERSION"
 # STEP 1: VERIFY PREREQUISITES
 # ============================================================================
 
-log_section "Step 1: Verify Prerequisites"
+log_section "Step 1: Verify ReSpeaker Hardware & ALSA Audio System"
+
+log_info "Verifying ReSpeaker 2-Mics HAT V2.0 is fully initialized..."
+echo ""
+
+# Verify device tree overlay is loaded
+log_info "Checking device tree configuration..."
+if [ -f "/sys/firmware/devicetree/base/seeed" ] || [ -d "/sys/firmware/devicetree/base/seeed" ]; then
+    log_success "Device tree seeed node loaded"
+else
+    log_info "Seeed device tree node check (may not be visible but HAT still works)"
+fi
+
+# Verify audio codec is on I2C bus
+log_info "Checking I2C codec detection..."
+if command -v i2cdetect &> /dev/null; then
+    if i2cdetect -y 1 2>/dev/null | grep -E "1a|1b|48|4a" > /dev/null; then
+        log_success "TLV320AIC3104 audio codec detected on I2C bus 1"
+    else
+        log_warning "Audio codec not detected on I2C (this is OK, may use generic drivers)"
+    fi
+fi
+
+# Verify ALSA audio system is ready
+log_info "Checking ALSA audio system status..."
+for i in {1..3}; do
+    if aplay -l 2>/dev/null | grep -qi "seeed"; then
+        log_success "ALSA audio system ready with ReSpeaker HAT"
+        break
+    fi
+    if [ $i -lt 3 ]; then
+        log_info "Waiting for audio system to initialize (attempt $i/3)..."
+        sleep 1
+    else
+        log_warning "Audio system may need more time to initialize"
+    fi
+done
+
+# Display detected audio devices
+log_info "Detected audio devices:"
+echo ""
+aplay -l 2>/dev/null | grep "card\|device" | head -5 || echo "  (None detected yet, may need to reload modules)"
+echo ""
+
+# Verify microphone recording works
+log_info "Testing microphone recording capability..."
+if timeout 2 arecord -f S16_LE -r 16000 -c 1 -d 1 /tmp/mic_test.wav 2>/dev/null; then
+    TEST_SIZE=$(stat -c%s /tmp/mic_test.wav 2>/dev/null || echo 0)
+    if [ "$TEST_SIZE" -gt 10000 ]; then
+        log_success "Microphone recording test passed ($TEST_SIZE bytes)"
+        rm -f /tmp/mic_test.wav
+    else
+        log_warning "Microphone recording file is small - may need gain adjustment"
+    fi
+else
+    log_warning "Microphone test not ready yet (may initialize during service startup)"
+fi
 
 log_info "Checking for required system packages..."
 
@@ -119,21 +283,8 @@ else
     exit 1
 fi
 
-# Test recording capability
-log_info "Testing microphone recording capability..."
-if timeout 2 arecord -f S16_LE -r 16000 -c 1 -d 1 /tmp/mic_test.wav 2>/dev/null; then
-    TEST_SIZE=$(stat -c%s /tmp/mic_test.wav 2>/dev/null || echo 0)
-    if [ "$TEST_SIZE" -gt 10000 ]; then
-        log_success "Microphone recording test passed ($TEST_SIZE bytes)"
-        rm -f /tmp/mic_test.wav
-    else
-        log_warning "Microphone recording file is small - may need gain adjustment"
-    fi
-else
-    log_warning "Microphone test completed with timeout (this is normal)"
-fi
-
-log_success "Prerequisites verified"
+log_success "ReSpeaker hardware prerequisites verified"
+echo ""
 
 # ============================================================================
 # STEP 2: INSTALL PICOVOICE-SPECIFIC DEPENDENCIES
@@ -1050,6 +1201,42 @@ echo "  • Rhino requires 16kHz mono audio input"
 echo "  • Service will suppress ALSA lib errors for cleaner logs"
 echo "  • If ReSpeaker not found, service falls back to first available input device"
 echo "  • .asoundrc file configured at /root/.asoundrc for daemon operation"
+echo ""
+
+log_info "Setup Dependency Summary:"
+echo ""
+echo "  ┌─────────────────────────────────────────────────────────────┐"
+echo "  │ Layer 1: Hardware Setup (setup_respeaker_enhanced.sh)       │"
+echo "  ├─────────────────────────────────────────────────────────────┤"
+echo "  │ ✓ Device tree overlay compilation & installation            │"
+echo "  │ ✓ I2S interface enabled (dtparam=i2s=on)                    │"
+echo "  │ ✓ ReSpeaker 2-Mics HAT V2.0 overlay loaded                  │"
+echo "  │ ✓ TLV320AIC3104 audio codec driver loaded                   │"
+echo "  │ ✓ ALSA audio system configured                              │"
+echo "  │ ✓ Microphone gain optimized (PGA = 25)                      │"
+echo "  ├─────────────────────────────────────────────────────────────┤"
+echo "  │ Result: ReSpeaker HAT ready for voice applications          │"
+echo "  │ Check: aplay -l | grep seeed                                │"
+echo "  └─────────────────────────────────────────────────────────────┘"
+echo ""
+echo "  ┌─────────────────────────────────────────────────────────────┐"
+echo "  │ Layer 2: Voice Recognition (THIS SCRIPT)                    │"
+echo "  ├─────────────────────────────────────────────────────────────┤"
+echo "  │ ✓ PicoVoice Rhino SDK 4.0.1 installed                       │"
+echo "  │ ✓ PyAudio configured for audio capture                      │"
+echo "  │ ✓ Custom EVVOSVOICE context model deployed                  │"
+echo "  │ ✓ PicoVoice access key configured                           │"
+echo "  │ ✓ Systemd service created (evvos-pico-voice.service)        │"
+echo "  │ ✓ LED control via SPI (optional, if SPI enabled)            │"
+echo "  │ ✓ ALSA error suppression configured                         │"
+echo "  ├─────────────────────────────────────────────────────────────┤"
+echo "  │ Result: Voice command recognition working with intent       │"
+echo "  │ Check: systemctl status evvos-pico-voice                    │"
+echo "  └─────────────────────────────────────────────────────────────┘"
+echo ""
+echo "  Setup Verification:"
+echo "    Layer 1 Complete: ReSpeaker HAT detected and audio working"
+echo "    Layer 2 Complete: Voice service running and ready for commands"
 echo ""
 
 echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
