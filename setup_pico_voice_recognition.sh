@@ -53,7 +53,7 @@ log_section() {
 }
 
 # ============================================================================
-# PREFLIGHT CHECKS (NEW!)
+# PREFLIGHT CHECKS (Fixed ALSA)
 # ============================================================================
 
 log_section "Preflight System Checks"
@@ -389,40 +389,65 @@ fi
 
 echo ""
 
-log_section "Step 7: Create ALSA Configuration for ReSpeaker"
+log_section "Step 7: Check SPI for LED Control (Optional)"
 
-log_info "Creating ALSA configuration to suppress warnings..."
-mkdir -p /etc/alsa/conf.d
-cat > /etc/alsa/conf.d/respeaker.conf << 'ALSA_CONF_EOF'
-pcm.default {
+log_info "Checking if SPI is enabled for ReSpeaker LEDs..."
+
+if [ -e /dev/spidev0.0 ]; then
+    log_success "SPI is enabled - LEDs will work"
+else
+    log_warning "SPI device not found (/dev/spidev0.0)"
+    log_warning "To enable SPI and use LEDs:"
+    log_warning "  1. Run: sudo raspi-config"
+    log_warning "  2. Go to: Interfacing Options → SPI"
+    log_warning "  3. Select YES to enable SPI"
+    log_warning "  4. Reboot: sudo reboot"
+    log_info "NOTE: Audio will still work without SPI/LEDs"
+fi
+
+echo ""
+
+log_section "Step 8: Configure User ALSA Settings"
+
+log_info "Creating user ALSA configuration..."
+
+# Create .asoundrc for the root user to use ReSpeaker as default device
+cat > /root/.asoundrc << 'ASOUNDRC_EOF'
+# ReSpeaker 2-Mics HAT ALSA configuration
+defaults.ctl.card seeed2micvoicec
+defaults.pcm.card seeed2micvoicec
+
+pcm.!default {
     type asym
-    playback.pcm "play"
-    capture.pcm "rec"
+    playback.pcm "speaker"
+    capture.pcm "mic"
 }
 
-pcm.play {
+pcm.speaker {
     type hw
     card seeed2micvoicec
 }
 
-pcm.rec {
+pcm.mic {
     type hw
     card seeed2micvoicec
 }
+ASOUNDRC_EOF
 
-ctl.!default {
-    type hw
-    card seeed2micvoicec
-}
-ALSA_CONF_EOF
-chmod 644 /etc/alsa/conf.d/respeaker.conf
-log_success "ALSA configuration created"
+chmod 644 /root/.asoundrc
+log_success "User ALSA configuration created at /root/.asoundrc"
+
+# Suppress ALSA lib warnings without breaking functionality
+export ALSA_CARD=seeed2micvoicec
+export ALSA_DEVICE_LIST_DEFAULT=seeed2micvoicec
+
+log_info "ALSA warnings suppression configured"
 
 # ============================================================================
-# STEP 8: CREATE PICOVOICE SERVICE SCRIPT
+# STEP 9: CREATE PICOVOICE SERVICE SCRIPT
 # ============================================================================
 
-log_section "Step 8: Create PicoVoice Service Script"
+log_section "Step 9: Create PicoVoice Service Script"
 
 LOG_FILE="/var/log/evvos-pico-voice.log"
 touch "$LOG_FILE"
@@ -640,10 +665,26 @@ class PicoVoiceService:
 
     def setup_audio(self):
         try:
+            # CRITICAL: Suppress ALSA lib error messages
+            import ctypes
+            try:
+                ERROR = ctypes.c_int(-1)
+                ERRORFN = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
+                def ignore_errors(filename, line, function, err, fmt):
+                    pass
+                error_handler = ERRORFN(ignore_errors)
+                asound = ctypes.cdll.LoadLibrary('libasound.so.2')
+                asound.snd_lib_error_set_handler(error_handler)
+            except:
+                logger.debug("Could not suppress ALSA warnings (non-critical)")
+            
             self.pa = pyaudio.PyAudio()
-            # Find ReSpeaker device
+            
+            # Find ReSpeaker device with fallback
             dev_idx = None
             dev_name = None
+            
+            # First try: Look for 'seeed' in device name
             for i in range(self.pa.get_device_count()):
                 info = self.pa.get_device_info_by_index(i)
                 if 'seeed' in info['name'].lower():
@@ -654,12 +695,25 @@ class PicoVoiceService:
                     logger.info(f"  Input Channels: {info['maxInputChannels']}")
                     break
             
+            # Fallback: If no seeed device, use first device with input channels
             if dev_idx is None:
-                logger.error("ReSpeaker device (seeed) not found in audio devices")
+                logger.warning("ReSpeaker device (seeed) not found, trying fallback...")
+                for i in range(self.pa.get_device_count()):
+                    info = self.pa.get_device_info_by_index(i)
+                    if info['maxInputChannels'] > 0:
+                        dev_idx = i
+                        dev_name = info['name']
+                        logger.info(f"Using fallback audio device: {dev_name} (index {i})")
+                        logger.info(f"  Sample Rate: {int(info['defaultSampleRate'])} Hz")
+                        logger.info(f"  Input Channels: {info['maxInputChannels']}")
+                        break
+            
+            if dev_idx is None:
+                logger.error("No audio input device found!")
                 logger.info("Available devices:")
                 for i in range(self.pa.get_device_count()):
                     info = self.pa.get_device_info_by_index(i)
-                    logger.info(f"  [{i}] {info['name']}")
+                    logger.info(f"  [{i}] {info['name']} (input: {info['maxInputChannels']}, output: {info['maxOutputChannels']})")
                 return False
             
             self.audio_stream = self.pa.open(
@@ -668,12 +722,15 @@ class PicoVoiceService:
                 channels=CHANNELS,
                 format=AUDIO_FORMAT,
                 input=True,
-                frames_per_buffer=FRAME_LENGTH
+                frames_per_buffer=FRAME_LENGTH,
+                input_host_api=None
             )
             logger.info(f"Audio stream opened successfully from {dev_name}")
             return True
         except Exception as e:
             logger.error(f"Audio init failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
             self.leds.set_all(LED_ERROR, brightness=20)
             return False
 
@@ -747,10 +804,10 @@ chmod +x /usr/local/bin/evvos-pico-voice-service.py
 log_success "PicoVoice voice recognition service script created"
 
 # ============================================================================
-# STEP 9: CREATE SYSTEMD SERVICE UNIT
+# STEP 10: CREATE SYSTEMD SERVICE UNIT
 # ============================================================================
 
-log_section "Step 9: Create Systemd Service"
+log_section "Step 10: Create Systemd Service"
 
 cat > /etc/systemd/system/evvos-pico-voice.service << 'SERVICE_FILE'
 [Unit]
@@ -778,6 +835,9 @@ SyslogFacility=user
 Environment="PATH=/opt/evvos/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/opt/evvos"
+Environment="ALSA_CARD=seeed2micvoicec"
+Environment="ALSA_DEVICE_LIST_DEFAULT=seeed2micvoicec"
+Environment="ALSA_FORCE_CHANNELS=2"
 
 # Resource limits
 LimitNOFILE=65536
@@ -794,10 +854,10 @@ chmod 644 /etc/systemd/system/evvos-pico-voice.service
 log_success "Systemd service created"
 
 # ============================================================================
-# STEP 10: ENABLE AND START SERVICE
+# STEP 11: ENABLE AND START SERVICE
 # ============================================================================
 
-log_section "Step 10: Enable and Start PicoVoice Service"
+log_section "Step 11: Enable and Start PicoVoice Service"
 
 log_info "Reloading systemd daemon..."
 systemctl daemon-reload
@@ -815,10 +875,10 @@ else
 fi
 
 # ============================================================================
-# STEP 11: VERIFY SERVICE STATUS
+# STEP 12: VERIFY SERVICE STATUS
 # ============================================================================
 
-log_section "Step 11: Verify Service Status"
+log_section "Step 12: Verify Service Status"
 
 if systemctl is-active --quiet evvos-pico-voice; then
     log_success "PicoVoice service is RUNNING"
@@ -832,7 +892,7 @@ systemctl status evvos-pico-voice --no-pager 2>&1 | head -15
 echo ""
 
 # ============================================================================
-# STEP 12: SUMMARY & NEXT STEPS
+# STEP 13: SUMMARY & NEXT STEPS
 # ============================================================================
 
 log_section "PicoVoice Rhino Intent Recognition Setup Complete!"
@@ -929,6 +989,25 @@ echo ""
 
 log_info "Troubleshooting:"
 echo ""
+echo "  Q: '[WARNING] [LED] SPI device not found' error?"
+echo "  A: LEDs require SPI to be enabled. To enable SPI:"
+echo "     sudo raspi-config → Interfacing Options → SPI → Enable"
+echo "     Then reboot: sudo reboot"
+echo "     NOTE: Audio works fine without LEDs!"
+echo ""
+echo "  Q: ALSA errors like 'Invalid argument'?"
+echo "  A: ALSA warnings are normal and don't break audio."
+echo "     They're suppressed in the systemd service."
+echo "     If audio still fails, check:"
+echo "     • Is ReSpeaker detected? aplay -l | grep seeed"
+echo "     • Is sound.target active? systemctl status sound.target"
+echo ""
+echo "  Q: 'Audio init failed: [Errno -9999]' error?"
+echo "  A: This is usually an ALSA configuration issue."
+echo "     Solution: Restart ALSA or reload the service"
+echo "     sudo systemctl restart alsa-restore"
+echo "     sudo systemctl restart evvos-pico-voice"
+echo ""
 echo "  Q: 'AccessKey not loaded' error?"
 echo "  A: Ensure AccessKey is saved to: $ACCESS_KEY_FILE"
 echo "     Get free key from: https://console.picovoice.ai"
@@ -940,10 +1019,6 @@ echo ""
 echo "  Q: Service keeps restarting?"
 echo "  A: Check logs: sudo journalctl -u evvos-pico-voice --no-pager"
 echo "     Verify ReSpeaker is detected: aplay -l && arecord -l"
-echo ""
-echo "  Q: LEDs not working?"
-echo "  A: LEDs require spidev library. Verify it's installed in venv."
-echo "     Check SPI is enabled: ls /dev/spidev0.0"
 echo ""
 
 log_info "Next Steps:"
@@ -966,8 +1041,15 @@ echo ""
 log_info "Integration with EVVOS:"
 echo "  • Service logs intent detections to journalctl"
 echo "  • Can send intent data to Supabase Edge Function"
-echo "  • RGB LED feedback via ReSpeaker APA102 LEDs"
+echo "  • RGB LED feedback via ReSpeaker APA102 LEDs (if SPI enabled)"
 echo "  • Automatic startup on system boot"
+echo ""
+
+log_info "Audio System Configuration:"
+echo "  • Rhino requires 16kHz mono audio input"
+echo "  • Service will suppress ALSA lib errors for cleaner logs"
+echo "  • If ReSpeaker not found, service falls back to first available input device"
+echo "  • .asoundrc file configured at /root/.asoundrc for daemon operation"
 echo ""
 
 echo -e "${GREEN}═══════════════════════════════════════════════════════════${NC}"
