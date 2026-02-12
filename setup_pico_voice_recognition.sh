@@ -187,10 +187,10 @@ log_success "Virtual environment activated"
 
 log_section "Step 4: Install Python PicoVoice Packages"
 
-log_info "Installing PicoVoice Rhino SDK and build tools..."
+log_info "Preparing build environment for Pi Zero 2 W..."
 
-# Use disk-based temporary build directory to avoid exhausting RAM during wheel
-# builds on low-memory devices (critical for Pi Zero 2 W)
+# CRITICAL OPTIMIZATION: Use disk-based temporary build directory 
+# This prevents RAM exhaustion (OOM) when building wheels for numpy/scipy
 BUILD_TMP="/opt/evvos/pip_build_tmp"
 mkdir -p "$BUILD_TMP"
 chown "$(whoami)" "$BUILD_TMP" 2>/dev/null || true
@@ -198,48 +198,65 @@ OLD_TMPDIR="${TMPDIR:-}"
 export TMPDIR="$BUILD_TMP"
 export TMP="$BUILD_TMP"
 export TEMP="$BUILD_TMP"
-log_info "Using disk temp dir for builds: $BUILD_TMP (reduces RAM usage)"
+log_info "Using disk temp dir: $BUILD_TMP"
 
-log_info "Upgrading pip and setuptools..."
-pip install --upgrade --no-cache-dir pip setuptools wheel || log_warning "Pip upgrade completed with warnings"
+log_info "Upgrading pip to ensure wheel compatibility..."
+"$VENV_PATH/bin/pip" install --upgrade --no-cache-dir pip setuptools wheel || log_warning "Pip upgrade completed with warnings"
 
-log_info "Installing PicoVoice SDK (this may take several minutes on Pi Zero 2 W)..."
-if pip install --no-cache-dir picovoice pvrhino; then
-    log_success "PicoVoice Rhino SDK installed"
+log_info "Installing PicoVoice Rhino SDK 4.0.1..."
+# Installing pvrhino 4.0.1 directly as requested
+# We skip the generic 'picovoice' wrapper to ensure version strictness
+if "$VENV_PATH/bin/pip" install --no-cache-dir pvrhino==4.0.1; then
+    log_success "PicoVoice Rhino SDK 4.0.1 installed"
 else
-    log_warning "Primary PicoVoice install reported issues, trying alternative..."
-    pip install --no-cache-dir picovoice || log_warning "PicoVoice installation completed with warnings"
+    log_error "Failed to install pvrhino 4.0.1"
+    # Clean up before exiting
+    rm -rf "$BUILD_TMP"
+    exit 1
 fi
 
 log_info "Installing PyAudio for microphone access..."
-if pip install --no-cache-dir pyaudio; then
-    log_success "PyAudio installed"
-else
-    log_warning "PyAudio pip install failed - installing build deps and retrying"
-    apt-get install -y portaudio19-dev libasound2-dev libsndfile1 || log_warning "Failed to install system audio deps"
-    log_info "Retrying PyAudio build (verbose)..."
-    if pip install --no-cache-dir --verbose pyaudio 2>&1 | tail -20; then
-        log_success "PyAudio rebuilt and installed"
+# Try installing PyAudio; if it fails, attempt to install system build deps first
+if ! "$VENV_PATH/bin/pip" install --no-cache-dir pyaudio; then
+    log_warning "Standard PyAudio install failed - attempting to install system build deps..."
+    apt-get install -y portaudio19-dev libasound2-dev libsndfile1
+    
+    log_info "Retrying PyAudio install..."
+    if "$VENV_PATH/bin/pip" install --no-cache-dir pyaudio; then
+        log_success "PyAudio installed successfully on retry"
     else
-        log_warning "PyAudio rebuild failed - installing system package python3-pyaudio as fallback"
-        apt-get install -y python3-pyaudio || log_warning "Failed to install system python3-pyaudio"
+        log_error "PyAudio installation failed. Please check portaudio19-dev is installed."
+        exit 1
     fi
+else
+    log_success "PyAudio installed"
 fi
 
-log_info "Installing audio processing and integration libraries..."
-pip install --no-cache-dir \
+log_info "Installing remaining dependencies (scipy/numpy may take time)..."
+"$VENV_PATH/bin/pip" install --no-cache-dir \
     numpy \
     requests \
     webrtcvad \
-    scipy
-
-log_info "Installing GPIO and LED control libraries..."
-pip install --no-cache-dir \
+    scipy \
     gpiozero \
     RPi.GPIO \
-    spidev 2>/dev/null || log_warning "GPIO libraries optional (LED support)"
+    spidev || log_warning "Non-critical dependencies may have failed"
 
-log_success "All Python packages installed"
+# Restore TMPDIR and clean up
+if [ -n "$OLD_TMPDIR" ]; then
+    export TMPDIR="$OLD_TMPDIR"
+    export TMP="$OLD_TMPDIR"
+    export TEMP="$OLD_TMPDIR"
+else
+    unset TMPDIR TMP TEMP
+fi
+
+if [ -d "$BUILD_TMP" ]; then
+    rm -rf "$BUILD_TMP"
+    log_info "Temporary build artifacts cleaned up"
+fi
+
+log_success "All Python packages installed in virtual environment"
 
 # Restore TMPDIR and clean up temporary build folder
 if [ -n "$OLD_TMPDIR" ]; then
@@ -385,11 +402,11 @@ cat > /usr/local/bin/evvos-pico-voice-service.py << 'PICO_SERVICE_EOF'
 EVVOS PicoVoice Rhino Intent Recognition Service
 Optimized for ReSpeaker 2-Mics Pi HAT V2.0 on Raspberry Pi Zero 2 W
 
-This service listens for voice commands using PicoVoice Rhino
-and provides RGB LED feedback via the ReSpeaker HAT.
-
-Author: EVVOS Team
-License: MIT
+LED INDICATORS:
+- Cyan:   Listening (Default)
+- Purple: Processing (Analyzing voice)
+- Green:  Intent Detected (Success)
+- Red:    Error State
 """
 
 import os
@@ -429,12 +446,12 @@ FRAME_LENGTH = 512   # Rhino frame length
 CHANNELS = 1         # Mono for voice recognition
 AUDIO_FORMAT = pyaudio.paInt16
 
-# LED Colors (RGB)
+# LED Colors (RGB Tuple)
 LED_OFF = (0, 0, 0)
-LED_LISTENING = (0, 128, 128)  # Cyan - waiting for input
-LED_DETECTED = (0, 255, 0)     # Green - intent detected
-LED_ERROR = (255, 0, 0)        # Red - error state
-LED_PROCESSING = (128, 0, 128)  # Purple - processing
+LED_LISTENING = (0, 255, 255)   # Cyan
+LED_PROCESSING = (128, 0, 128)  # Purple
+LED_DETECTED = (0, 255, 0)      # Green
+LED_ERROR = (255, 0, 0)         # Red
 
 # ReSpeaker LED configuration (APA102)
 LED_COUNT = 3  # ReSpeaker 2-Mics HAT has 3 LEDs
@@ -443,7 +460,6 @@ LED_COUNT = 3  # ReSpeaker 2-Mics HAT has 3 LEDs
 # LOGGING SETUP
 # ============================================================================
 
-# Setup dual logging (file + journalctl)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -479,8 +495,7 @@ class ReSpeakerLEDs:
                 self.enabled = False
     
     def _build_frame(self, brightness, r, g, b):
-        """Build APA102 LED frame (32-bit)"""
-        # APA102 format: [111][5-bit brightness][8-bit blue][8-bit green][8-bit red]
+        """Build APA102 LED frame (32-bit). APA102 expects BGR order."""
         return [
             0b11100000 | (brightness & 0x1F),  # Start frame + brightness
             b & 0xFF,  # Blue
@@ -502,20 +517,24 @@ class ReSpeakerLEDs:
             for _ in range(LED_COUNT):
                 data.extend(self._build_frame(brightness, r, g, b))
             
-            data.extend([0xFF, 0xFF, 0xFF, 0xFF])  # End frame
+            # End frame (needed to push data through)
+            data.extend([0xFF, 0xFF, 0xFF, 0xFF])
             
             self.spi.xfer2(data)
         except Exception as e:
             logger.warning(f"[LED] Error setting LEDs: {e}")
     
-    def pulse(self, color, duration=0.2):
-        """Pulse effect (brief flash)"""
+    def pulse(self, color, duration=0.5, end_color=LED_LISTENING):
+        """Pulse a color briefly, then return to end_color"""
         if not self.enabled:
             return
         
+        # Flash bright
         self.set_all(color, brightness=20)
         time.sleep(duration)
-        self.set_all(LED_LISTENING, brightness=5)
+        
+        # Return to default state (usually listening)
+        self.set_all(end_color, brightness=5)
     
     def cleanup(self):
         """Turn off LEDs and close SPI"""
@@ -523,17 +542,14 @@ class ReSpeakerLEDs:
             try:
                 self.set_all(LED_OFF)
                 self.spi.close()
-                logger.info("[LED] LEDs turned off")
-            except Exception as e:
-                logger.warning(f"[LED] Cleanup error: {e}")
+            except Exception:
+                pass
 
 # ============================================================================
 # PICOVOICE RHINO SERVICE
 # ============================================================================
 
 class PicoVoiceService:
-    """Main PicoVoice Rhino service for voice intent recognition"""
-    
     def __init__(self):
         self.running = False
         self.rhino = None
@@ -542,331 +558,121 @@ class PicoVoiceService:
         self.leds = ReSpeakerLEDs()
         self.access_key = None
         
-        # Signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
-        
-        logger.info("=" * 70)
-        logger.info("EVVOS PicoVoice Rhino Service Starting")
-        logger.info("=" * 70)
-        logger.info(f"Python: {sys.version}")
-        logger.info(f"PicoVoice Rhino: {pvrhino.RHINO_VERSION}")
-        logger.info(f"Context: {CONTEXT_FILE}")
-        logger.info(f"Sample Rate: {SAMPLE_RATE} Hz")
-        logger.info(f"Frame Length: {FRAME_LENGTH}")
-        logger.info("=" * 70)
     
     def signal_handler(self, signum, frame):
-        """Handle shutdown signals"""
         logger.info(f"Received signal {signum}, shutting down...")
         self.running = False
-    
+
     def load_access_key(self):
-        """Load PicoVoice access key from file"""
         try:
             if not os.path.exists(ACCESS_KEY_FILE):
-                logger.error(f"Access key file not found: {ACCESS_KEY_FILE}")
-                logger.error("Create the file and add your PicoVoice access key")
-                logger.error("Get a free key at: https://console.picovoice.ai")
+                logger.error(f"Access key file missing: {ACCESS_KEY_FILE}")
                 return False
-            
             with open(ACCESS_KEY_FILE, 'r') as f:
                 self.access_key = f.read().strip()
-            
-            if not self.access_key or self.access_key == "YOUR_ACCESS_KEY_HERE":
-                logger.error("Invalid access key in file")
-                logger.error("Please update the access key in: " + ACCESS_KEY_FILE)
-                return False
-            
-            logger.info(f"Access key loaded: {self.access_key[:8]}...")
             return True
-        
         except Exception as e:
-            logger.error(f"Failed to load access key: {e}")
+            logger.error(f"Error loading access key: {e}")
             return False
-    
+
     def setup_rhino(self):
-        """Initialize PicoVoice Rhino engine"""
+        if not self.load_access_key(): return False
         try:
-            if not self.load_access_key():
-                return False
-            
-            if not os.path.exists(CONTEXT_FILE):
-                logger.error(f"Rhino context file not found: {CONTEXT_FILE}")
-                return False
-            
-            logger.info("Initializing Rhino engine...")
-            
             self.rhino = pvrhino.create(
                 access_key=self.access_key,
                 context_path=CONTEXT_FILE,
-                require_endpoint=True  # Wait for speech endpoint before processing
+                require_endpoint=True
             )
-            
-            logger.info(f"✓ Rhino initialized successfully")
-            logger.info(f"  Context: {self.rhino.context_info}")
-            logger.info(f"  Frame Length: {self.rhino.frame_length}")
-            logger.info(f"  Sample Rate: {self.rhino.sample_rate} Hz")
-            logger.info(f"  Version: {self.rhino.version}")
-            
             return True
-        
         except Exception as e:
-            logger.error(f"Failed to initialize Rhino: {e}")
-            self.leds.set_all(LED_ERROR)
+            logger.error(f"Rhino init failed: {e}")
+            self.leds.set_all(LED_ERROR, brightness=20)
             return False
-    
-    def find_respeaker_device(self):
-        """Find ReSpeaker audio input device index"""
-        try:
-            p = pyaudio.PyAudio()
-            device_count = p.get_device_count()
-            
-            logger.info(f"Scanning {device_count} audio devices...")
-            
-            for i in range(device_count):
-                info = p.get_device_info_by_index(i)
-                device_name = info['name'].lower()
-                
-                if 'seeed' in device_name:
-                    logger.info(f"✓ Found ReSpeaker device:")
-                    logger.info(f"  Index: {i}")
-                    logger.info(f"  Name: {info['name']}")
-                    logger.info(f"  Channels: {info['maxInputChannels']}")
-                    logger.info(f"  Sample Rate: {info['defaultSampleRate']}")
-                    p.terminate()
-                    return i
-            
-            # If ReSpeaker not found, use default
-            logger.warning("ReSpeaker not found by name, using default input")
-            default_input = p.get_default_input_device_info()
-            logger.info(f"Default input: {default_input['name']}")
-            p.terminate()
-            return None  # Use default
-        
-        except Exception as e:
-            logger.error(f"Error finding audio device: {e}")
-            return None
-    
-    def setup_audio_stream(self):
-        """Initialize PyAudio stream for ReSpeaker microphone"""
+
+    def setup_audio(self):
         try:
             self.pa = pyaudio.PyAudio()
+            # Find ReSpeaker
+            dev_idx = None
+            for i in range(self.pa.get_device_count()):
+                info = self.pa.get_device_info_by_index(i)
+                if 'seeed' in info['name'].lower():
+                    dev_idx = i
+                    break
             
-            # Find ReSpeaker device
-            device_index = self.find_respeaker_device()
-            
-            logger.info("Opening audio stream...")
-            
-            # Open stream with ReSpeaker-optimized settings
             self.audio_stream = self.pa.open(
-                input_device_index=device_index,
+                input_device_index=dev_idx,
                 rate=SAMPLE_RATE,
                 channels=CHANNELS,
                 format=AUDIO_FORMAT,
                 input=True,
-                frames_per_buffer=FRAME_LENGTH,
-                stream_callback=None  # Blocking mode for better reliability
+                frames_per_buffer=FRAME_LENGTH
             )
-            
-            logger.info("✓ Audio stream opened successfully")
-            logger.info(f"  Device: {'ReSpeaker' if device_index else 'Default'}")
-            logger.info(f"  Sample Rate: {SAMPLE_RATE} Hz")
-            logger.info(f"  Channels: {CHANNELS} (Mono)")
-            logger.info(f"  Frame Length: {FRAME_LENGTH}")
-            
             return True
-        
         except Exception as e:
-            logger.error(f"Failed to setup audio stream: {e}")
-            self.leds.set_all(LED_ERROR)
+            logger.error(f"Audio init failed: {e}")
+            self.leds.set_all(LED_ERROR, brightness=20)
             return False
-    
+
+    def handle_intent(self, intent, slots):
+        """Execute action based on intent"""
+        logger.info(f" >>> EXECUTING: {intent} {slots}")
+        
+        # Add your custom logic here
+        if intent == "recording_control":
+            pass # Start/Stop recording logic
+        elif intent == "emergency_action":
+            pass # Trigger alerts
+        elif intent == "incident_capture":
+            pass # Take snapshot
+
     def process_voice_input(self):
-        """Main loop: read audio and process with Rhino"""
         self.running = True
-        logger.info("=" * 70)
-        logger.info("🎤 Voice recognition active - listening for commands...")
-        logger.info("=" * 70)
+        logger.info("Service started. Listening...")
         
-        # Set listening state
+        # STATE: LISTENING (Cyan)
         self.leds.set_all(LED_LISTENING, brightness=5)
-        
-        frame_count = 0
         
         try:
             while self.running:
-                # Read audio frame
-                try:
-                    pcm_data = self.audio_stream.read(
-                        self.rhino.frame_length,
-                        exception_on_overflow=False
-                    )
-                except Exception as e:
-                    logger.warning(f"Audio read error: {e}")
-                    time.sleep(0.1)
-                    continue
+                pcm = self.audio_stream.read(self.rhino.frame_length, exception_on_overflow=False)
+                pcm = struct.unpack_from("h" * self.rhino.frame_length, pcm)
                 
-                # Convert to 16-bit PCM
-                pcm = struct.unpack_from(
-                    "h" * self.rhino.frame_length,
-                    pcm_data
-                )
-                
-                # Process frame with Rhino
                 is_finalized = self.rhino.process(pcm)
                 
-                frame_count += 1
-                
-                # Log heartbeat every 5 seconds
-                if frame_count % (SAMPLE_RATE // FRAME_LENGTH * 5) == 0:
-                    logger.info(f"[HEARTBEAT] Listening... ({frame_count} frames processed)")
-                
                 if is_finalized:
+                    # STATE: PROCESSING (Purple)
+                    # Voice command ended, analyzing intent...
+                    self.leds.set_all(LED_PROCESSING, brightness=15)
+                    
                     inference = self.rhino.get_inference()
                     
                     if inference.is_understood:
-                        intent = inference.intent
-                        slots = inference.slots
-                        
-                        logger.info("=" * 70)
-                        logger.info(f"[INTENT DETECTED] Intent: '{intent}'")
-                        logger.info(f"[SLOTS] {json.dumps(slots, indent=2)}")
-                        logger.info("=" * 70)
-                        
-                        # LED feedback: Green pulse
-                        self.leds.pulse(LED_DETECTED, duration=0.3)
-                        
-                        # Here you can add integration with EVVOS backend
-                        # e.g., send intent to Supabase Edge Function
-                        self.handle_intent(intent, slots)
-                    
+                        # STATE: INTENT DETECTED (Green Pulse)
+                        logger.info(f"Detected: {inference.intent}")
+                        self.handle_intent(inference.intent, inference.slots)
+                        self.leds.pulse(LED_DETECTED, duration=0.7, end_color=LED_LISTENING)
                     else:
-                        logger.info("[SPEECH] Speech detected but no intent matched")
-                        logger.info("  Try one of the configured commands")
-        
-        except KeyboardInterrupt:
-            logger.info("Keyboard interrupt received")
-        
+                        # STATE: NOT UNDERSTOOD (Return to Listening)
+                        logger.info("Voice detected but not understood")
+                        self.leds.set_all(LED_LISTENING, brightness=5)
+
         except Exception as e:
-            logger.error(f"Error in voice processing loop: {e}", exc_info=True)
-            self.leds.set_all(LED_ERROR)
-        
+            logger.error(f"Loop error: {e}")
+            self.leds.set_all(LED_ERROR, brightness=20)
         finally:
             self.cleanup()
-    
-    def handle_intent(self, intent, slots):
-        """Handle detected intent and execute corresponding action"""
-        logger.info(f"[ACTION] Processing intent: {intent}")
-        
-        # Map intents to actions
-        if intent == "recording_control":
-            # Check if slots indicate start or stop
-            logger.info("[ACTION] Recording control detected")
-            # TODO: Integrate with EVVOS recording system
-        
-        elif intent == "emergency_action":
-            logger.info("[ACTION] Emergency backup triggered!")
-            # TODO: Trigger emergency backup
-        
-        elif intent == "incident_capture":
-            logger.info("[ACTION] Capturing incident snapshot")
-            # TODO: Trigger camera snapshot or screenshot
-        
-        elif intent == "user_confirmation":
-            logger.info("[ACTION] User confirmation detected")
-            # TODO: Handle confirm/cancel actions
-        
-        elif intent == "incident_mark":
-            logger.info("[ACTION] Marking incident in timeline")
-            # TODO: Add incident marker to recording
-        
-        else:
-            logger.warning(f"[ACTION] Unknown intent: {intent}")
-        
-        # Optional: Send to Supabase Edge Function
-        # self.send_to_backend(intent, slots)
-    
-    def send_to_backend(self, intent, slots):
-        """Send intent data to EVVOS backend (optional)"""
-        try:
-            import requests
-            
-            # Replace with your Supabase Edge Function URL
-            EDGE_FUNCTION_URL = os.getenv("EVVOS_EDGE_FUNCTION_URL")
-            
-            if not EDGE_FUNCTION_URL:
-                return
-            
-            payload = {
-                "intent": intent,
-                "slots": slots,
-                "timestamp": datetime.now().isoformat(),
-                "device_id": os.getenv("EVVOS_DEVICE_ID", "unknown")
-            }
-            
-            response = requests.post(
-                EDGE_FUNCTION_URL,
-                json=payload,
-                timeout=5
-            )
-            
-            if response.status_code == 200:
-                logger.info("[BACKEND] Intent sent successfully")
-            else:
-                logger.warning(f"[BACKEND] Failed: {response.status_code}")
-        
-        except Exception as e:
-            logger.warning(f"[BACKEND] Error sending intent: {e}")
-    
+
     def cleanup(self):
-        """Clean up resources"""
-        logger.info("Shutting down voice recognition service...")
-        
-        if self.audio_stream:
-            self.audio_stream.stop_stream()
-            self.audio_stream.close()
-            logger.info("Audio stream closed")
-        
-        if self.pa:
-            self.pa.terminate()
-            logger.info("PyAudio terminated")
-        
-        if self.rhino:
-            self.rhino.delete()
-            logger.info("Rhino engine released")
-        
+        if self.audio_stream: self.audio_stream.close()
+        if self.pa: self.pa.terminate()
+        if self.rhino: self.rhino.delete()
         self.leds.cleanup()
-        
-        logger.info("Voice recognition service shutdown complete")
-        logger.info("=" * 70)
-    
-    def run(self):
-        """Main service entry point"""
-        if not self.setup_rhino():
-            logger.error("Failed to initialize Rhino")
-            return
-        
-        if not self.setup_audio_stream():
-            logger.error("Failed to setup audio stream")
-            return
-        
-        self.process_voice_input()
-
-# ============================================================================
-# MAIN ENTRY POINT
-# ============================================================================
-
-def main():
-    try:
-        service = PicoVoiceService()
-        service.run()
-    except Exception as e:
-        logger.error(f"Unhandled exception: {e}", exc_info=True)
-        sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    PicoVoiceService().process_voice_input() if PicoVoiceService().setup_rhino() and PicoVoiceService().setup_audio() else sys.exit(1)
 PICO_SERVICE_EOF
 
 chmod +x /usr/local/bin/evvos-pico-voice-service.py
