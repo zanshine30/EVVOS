@@ -1,18 +1,20 @@
 #!/bin/bash
 # PicoVoice Rhino Intent Recognition Setup for ReSpeaker 2-Mics HAT V2.0
+# Optimized for: Raspberry Pi Zero 2 W with TLV320AIC3104 Audio Codec
 # Detects EVVOS voice commands with intent recognition
 # RGB LED feedback and journalctl logging
 #
-# Intent Model:
-# - changeRecording: "start recording", "stop recording"
-# - emergency: "emergency backup"
-# - captureIncident: "mark incident", "snapshot"
-# - userAction: "confirm", "cancel"
+# Intent Model (EVVOSVOICE.yml):
+# - recording_control: "start recording", "stop recording"
+# - emergency_action: "emergency backup", "alert"
+# - incident_capture: "mark incident", "snapshot", "screenshot"
+# - user_confirmation: "confirm", "cancel"
+# - incident_mark: "mark incident"
 #
 # Tested on: Raspberry Pi Zero 2 W, Bookworm 12, Kernel 6.12
 # Prerequisites: ReSpeaker HAT already configured (run setup_respeaker_enhanced.sh first)
 #
-# Usage: sudo bash setup_pico_voice_recognition.sh
+# Usage: sudo bash setup_pico_voice_recognition_respeaker.sh
 
 set -e  # Exit on error
 
@@ -54,25 +56,34 @@ log_section() {
 # PREFLIGHT CHECKS
 # ============================================================================
 
-log_section "Preflight System Checks (NEW)"
+log_section "Preflight System Checks"
 
 if [ "$EUID" -ne 0 ]; then 
     log_error "This script must be run as root"
-    echo "Usage: sudo bash setup_pico_voice_recognition.sh"
+    echo "Usage: sudo bash setup_pico_voice_recognition_respeaker.sh"
     exit 1
 fi
 log_success "Running as root"
 
-# Check if ALSA is configured
+# Check if ReSpeaker HAT is detected
 if ! aplay -l 2>/dev/null | grep -qi "seeed"; then
-    log_warning "ReSpeaker HAT not detected. Please run setup_respeaker_enhanced.sh first."
-    read -p "Continue anyway? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
+    log_error "ReSpeaker HAT not detected!"
+    log_error "Please run setup_respeaker_enhanced.sh first and reboot."
+    log_info "After running setup_respeaker_enhanced.sh, the system will reboot."
+    log_info "Then run this script again."
+    exit 1
 fi
-log_success "ReSpeaker HAT verified (or skipped)"
+log_success "ReSpeaker HAT detected"
+
+# Detect the exact card name
+CARD_NAME=$(aplay -l | grep -i seeed | head -1 | sed 's/card \([0-9]\+\):.*/\1/')
+if [ -z "$CARD_NAME" ]; then
+    CARD_NAME="seeed2micvoicec"
+    log_warning "Could not auto-detect card number, using default: $CARD_NAME"
+else
+    CARD_NAME=$(aplay -l | grep "card $CARD_NAME" | sed 's/.*\[\(.*\)\].*/\1/')
+    log_success "Detected ReSpeaker card: $CARD_NAME"
+fi
 
 # Check Python3
 if ! command -v python3 &> /dev/null; then
@@ -82,6 +93,10 @@ fi
 PYTHON_VERSION=$(python3 --version | awk '{print $2}')
 log_success "Python3 detected: $PYTHON_VERSION"
 
+# Check kernel version
+KERNEL_VERSION=$(uname -r)
+log_info "Kernel version: $KERNEL_VERSION"
+
 # ============================================================================
 # STEP 1: VERIFY PREREQUISITES
 # ============================================================================
@@ -90,23 +105,29 @@ log_section "Step 1: Verify Prerequisites"
 
 log_info "Checking for required system packages..."
 
-log_info "Python3 development and audio libraries should be installed by:"
-echo "  • setup_respeaker_enhanced.sh (ReSpeaker HAT configuration)"
-echo ""
-
-log_info "If packages are missing, install them with:"
-echo "  sudo apt-get install -y python3-pip python3-dev portaudio19-dev \\"
-echo "    libasound2-dev libatlas-base-dev libffi-dev libssl-dev spidev git"
-echo ""
-
+# Verify audio subsystem
 log_info "Verifying ReSpeaker audio HAT..."
 if aplay -l 2>/dev/null | grep -qi "seeed"; then
     log_success "✓ ReSpeaker HAT detected and configured"
-    log_info "Audio codec (TLV320AIC3104) is ready with optimized settings"
+    log_info "Audio codec (TLV320AIC3104) is ready"
 else
-    log_warning "ReSpeaker HAT not detected"
+    log_error "ReSpeaker HAT not detected"
     log_error "Please run setup_respeaker_enhanced.sh first to configure the ReSpeaker HAT"
     exit 1
+fi
+
+# Test recording capability
+log_info "Testing microphone recording capability..."
+if timeout 2 arecord -f S16_LE -r 16000 -c 1 -d 1 /tmp/mic_test.wav 2>/dev/null; then
+    TEST_SIZE=$(stat -c%s /tmp/mic_test.wav 2>/dev/null || echo 0)
+    if [ "$TEST_SIZE" -gt 10000 ]; then
+        log_success "Microphone recording test passed ($TEST_SIZE bytes)"
+        rm -f /tmp/mic_test.wav
+    else
+        log_warning "Microphone recording file is small - may need gain adjustment"
+    fi
+else
+    log_warning "Microphone test completed with timeout (this is normal)"
 fi
 
 log_success "Prerequisites verified"
@@ -150,6 +171,7 @@ VENV_PATH="/opt/evvos/venv"
 
 if [ ! -d "$VENV_PATH" ]; then
     log_info "Creating virtual environment at $VENV_PATH..."
+    mkdir -p /opt/evvos
     python3 -m venv "$VENV_PATH"
     log_success "Virtual environment created"
 else
@@ -168,8 +190,7 @@ log_section "Step 4: Install Python PicoVoice Packages"
 log_info "Installing PicoVoice Rhino SDK and build tools..."
 
 # Use disk-based temporary build directory to avoid exhausting RAM during wheel
-# builds on low-memory devices. This places pip/compile temp files on the SD card
-# for the duration of heavy installs and restores TMPDIR afterwards.
+# builds on low-memory devices (critical for Pi Zero 2 W)
 BUILD_TMP="/opt/evvos/pip_build_tmp"
 mkdir -p "$BUILD_TMP"
 chown "$(whoami)" "$BUILD_TMP" 2>/dev/null || true
@@ -177,13 +198,17 @@ OLD_TMPDIR="${TMPDIR:-}"
 export TMPDIR="$BUILD_TMP"
 export TMP="$BUILD_TMP"
 export TEMP="$BUILD_TMP"
-log_info "Using disk temp dir for builds: $BUILD_TMP"
+log_info "Using disk temp dir for builds: $BUILD_TMP (reduces RAM usage)"
 
-if pip install --upgrade --no-cache-dir pip setuptools wheel picovoice pvrhino; then
-    log_success "PicoVoice Rhino SDK and build tools installed"
+log_info "Upgrading pip and setuptools..."
+pip install --upgrade --no-cache-dir pip setuptools wheel || log_warning "Pip upgrade completed with warnings"
+
+log_info "Installing PicoVoice SDK (this may take several minutes on Pi Zero 2 W)..."
+if pip install --no-cache-dir picovoice pvrhino; then
+    log_success "PicoVoice Rhino SDK installed"
 else
     log_warning "Primary PicoVoice install reported issues, trying alternative..."
-    pip install --upgrade --no-cache-dir pip setuptools wheel picovoice || log_warning "PicoVoice installation completed with warnings"
+    pip install --no-cache-dir picovoice || log_warning "PicoVoice installation completed with warnings"
 fi
 
 log_info "Installing PyAudio for microphone access..."
@@ -206,7 +231,6 @@ pip install --no-cache-dir \
     numpy \
     requests \
     webrtcvad \
-    noisereduce \
     scipy
 
 log_info "Installing GPIO and LED control libraries..."
@@ -241,593 +265,582 @@ try:
     device_count = p.get_device_count()
     print(f"[PyAudio] ✓ Working correctly")
     print(f"[PyAudio] ✓ Found {device_count} audio devices")
+    
+    # List ReSpeaker device
+    for i in range(device_count):
+        info = p.get_device_info_by_index(i)
+        if 'seeed' in info['name'].lower():
+            print(f"[PyAudio] ✓ ReSpeaker device found: {info['name']}")
+            print(f"[PyAudio]   - Index: {i}")
+            print(f"[PyAudio]   - Max Input Channels: {info['maxInputChannels']}")
+            print(f"[PyAudio]   - Default Sample Rate: {info['defaultSampleRate']}")
+    
     p.terminate()
-except ImportError as e:
-    print(f"[PyAudio] ✗ Import failed: {e}")
-    print("[PyAudio] Attempting recovery...")
-    exit(1)
 except Exception as e:
-    print(f"[PyAudio] ⚠ Warning: {e}")
+    print(f"[PyAudio] ✗ Error: {e}")
+    import sys
+    sys.exit(1)
 PYAUDIO_VERIFICATION
 
-# ============================================================================
-# STEP 5: CREATE PICOVOICE INTENT MODEL
-# ============================================================================
-
-log_section "Step 5: Setup Custom PicoVoice Rhino Context"
-
-MODEL_DIR="/opt/evvos/pico_model"
-mkdir -p "$MODEL_DIR"
-
-log_info "Custom EVVOSVOICE Context File Setup"
-log_info "Your custom Rhino context has been trained on PicoVoice console with the following intents:"
-echo ""
-echo "  ${CYAN}recording_control${NC}: Control recording state"
-echo "    • 'start recording'"
-echo "    • 'stop recording'"
-echo ""
-echo "  ${CYAN}emergency_action${NC}: Emergency backup trigger"
-echo "    • 'alert'"
-echo "    • 'emergency backup'"
-echo ""
-echo "  ${CYAN}incident_capture${NC}: Capture incident data or photos"
-echo "    • 'screenshot'"
-echo "    • 'snapshot'"
-echo ""
-echo "  ${CYAN}user_confirmation${NC}: General user confirmations"
-echo "    • 'cancel'"
-echo "    • 'confirm'"
-echo ""
-echo "  ${CYAN}incident_mark${NC}: Mark incident"
-echo "    • 'mark incident'"
-echo ""
-
-log_info "Copying custom context file to Raspberry Pi deployment directory..."
-log_warning "NOTE: The .rhn file will be transferred to Raspberry Pi at: /opt/evvos/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
-echo ""
-log_info "When deploying to Raspberry Pi, you will need to SCP the context file:"
-echo "  ${CYAN}scp bd4a3c6c-f499-4326-8c7a-883fc8636103/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn \\"
-echo "    pi@raspberrypi.local:/opt/evvos/${NC}"
-echo ""
-
-log_success "Custom context configuration ready for deployment"
+log_success "PyAudio verification complete"
 
 # ============================================================================
-# STEP 6: GET PICOVOICE ACCESS KEY
+# STEP 5: DEPLOY RHINO CONTEXT FILE
 # ============================================================================
 
-log_section "Step 6: PicoVoice Access Key Setup"
+log_section "Step 5: Deploy Rhino Context File"
 
-log_success "AccessKey provided: yDCtxCN8bet0r5wxMRaNQMWF7mvbu/MNgklGfQZHHZ6UONjoGIQUkQ=="
-echo ""
-log_info "This AccessKey is tied to your EVVOSVOICE custom context on PicoVoice console."
-echo ""
+CONTEXT_FILE="/opt/evvos/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
 
-ACCESS_KEY_FILE="/opt/evvos/pico_access_key.txt"
-PROVIDED_KEY="yDCtxCN8bet0r5wxMRaNQMWF7mvbu/MNgklGfQZHHZ6UONjoGIQUkQ=="
-
-if [ -f "$ACCESS_KEY_FILE" ]; then
-    log_info "Updating existing access key file at: $ACCESS_KEY_FILE"
-    echo "$PROVIDED_KEY" > "$ACCESS_KEY_FILE"
-    chmod 600 "$ACCESS_KEY_FILE"
-    log_success "AccessKey updated"
+# Check if context file was uploaded to /mnt/user-data/uploads
+if [ -f "/mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn" ]; then
+    log_info "Copying Rhino context file from uploads..."
+    cp /mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn "$CONTEXT_FILE"
+    chmod 644 "$CONTEXT_FILE"
+    log_success "Rhino context file deployed: $CONTEXT_FILE"
 else
-    log_info "Creating new access key file at: $ACCESS_KEY_FILE"
-    echo "$PROVIDED_KEY" > "$ACCESS_KEY_FILE"
-    chmod 600 "$ACCESS_KEY_FILE"
-    log_success "AccessKey saved to: $ACCESS_KEY_FILE"
+    log_error "Rhino context file not found at /mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
+    log_error "Please ensure the .rhn file is uploaded to the system"
+    exit 1
 fi
 
-log_info "When deploying to Raspberry Pi, this AccessKey will be transferred:"
-echo "  ${CYAN}scp /opt/evvos/pico_access_key.txt pi@raspberrypi.local:/opt/evvos/${NC}"
+# Verify context file
+if [ -f "$CONTEXT_FILE" ]; then
+    CONTEXT_SIZE=$(stat -c%s "$CONTEXT_FILE")
+    log_success "Context file verified: $CONTEXT_SIZE bytes"
+else
+    log_error "Context file deployment failed"
+    exit 1
+fi
+
+# ============================================================================
+# STEP 6: CREATE ACCESS KEY FILE
+# ============================================================================
+
+log_section "Step 6: Configure PicoVoice Access Key"
+
+ACCESS_KEY_FILE="/opt/evvos/picovoice_access_key.txt"
+
+log_info "Setting up PicoVoice Access Key..."
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  PicoVoice Access Key Required"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "You need a FREE PicoVoice Access Key to use Rhino."
+echo ""
+echo "Steps to get your key:"
+echo "  1. Visit: https://console.picovoice.ai"
+echo "  2. Sign up for a free account"
+echo "  3. Copy your Access Key from the dashboard"
+echo ""
+echo "The free tier includes:"
+echo "  • Unlimited on-device processing"
+echo "  • No cloud requirements"
+echo "  • Perfect for Raspberry Pi applications"
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+if [ -f "$ACCESS_KEY_FILE" ]; then
+    log_success "Access key file already exists: $ACCESS_KEY_FILE"
+    read -p "Do you want to replace it? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Keeping existing access key"
+    else
+        read -p "Enter your PicoVoice Access Key: " ACCESS_KEY
+        echo "$ACCESS_KEY" > "$ACCESS_KEY_FILE"
+        chmod 600 "$ACCESS_KEY_FILE"
+        log_success "Access key updated"
+    fi
+else
+    read -p "Enter your PicoVoice Access Key: " ACCESS_KEY
+    if [ -z "$ACCESS_KEY" ]; then
+        log_warning "No access key provided. Service will fail to start."
+        log_warning "You can add it later by editing: $ACCESS_KEY_FILE"
+        echo "YOUR_ACCESS_KEY_HERE" > "$ACCESS_KEY_FILE"
+    else
+        echo "$ACCESS_KEY" > "$ACCESS_KEY_FILE"
+        log_success "Access key saved to: $ACCESS_KEY_FILE"
+    fi
+    chmod 600 "$ACCESS_KEY_FILE"
+fi
+
 echo ""
 
 # ============================================================================
-# STEP 7: CREATE PICOVOICE VOICE RECOGNITION SERVICE
+# STEP 7: CREATE PICOVOICE SERVICE SCRIPT
 # ============================================================================
 
-log_section "Step 7: Create PicoVoice Voice Recognition Service"
+log_section "Step 7: Create PicoVoice Service Script"
+
+LOG_FILE="/var/log/evvos-pico-voice.log"
+touch "$LOG_FILE"
+chmod 644 "$LOG_FILE"
 
 cat > /usr/local/bin/evvos-pico-voice-service.py << 'PICO_SERVICE_EOF'
 #!/usr/bin/env python3
 """
 EVVOS PicoVoice Rhino Intent Recognition Service
-- Intent-based voice command recognition using PicoVoice Rhino
-- Structured command extraction with slot detection
-- RGB LED feedback (listening/detected)
-- Logs to journalctl and local files
-- Integrates with ReSpeaker 2-Mics HAT V2.0
+Optimized for ReSpeaker 2-Mics Pi HAT V2.0 on Raspberry Pi Zero 2 W
 
-Intent Model:
-  changeRecording: "start recording", "stop recording"
-  emergency: "emergency backup"
-  captureIncident: "mark incident", "snapshot"
-  userAction: "confirm", "cancel"
+This service listens for voice commands using PicoVoice Rhino
+and provides RGB LED feedback via the ReSpeaker HAT.
 
-Tested on: Raspberry Pi Zero 2 W, Bookworm 12
+Author: EVVOS Team
+License: MIT
 """
 
-import sys
 import os
+import sys
+import time
 import json
 import logging
-import subprocess
-import time
-import threading
-from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, List
+import signal
+import struct
+from datetime import datetime
+from pathlib import Path
 
-try:
-    import pyaudio
-except ImportError as e:
-    print(f"ERROR: Missing package: {e}")
-    print("Run: pip install pyaudio")
-    sys.exit(1)
+# Audio processing
+import pyaudio
+import pvrhino
 
-try:
-    from picovoice import AccessKey, create_rhino
-except ImportError:
-    print("ERROR: PicoVoice SDK not installed")
-    print("Run: pip install picovoice")
-    sys.exit(1)
-
+# GPIO for LED control (ReSpeaker has APA102 RGB LEDs)
 try:
     import spidev
+    LEDS_AVAILABLE = True
 except ImportError:
-    print("WARNING: spidev not found. LED feedback disabled.")
-    spidev = None
-
-try:
-    import webrtcvad
-except ImportError:
-    print("WARNING: webrtcvad not found. Voice Activity Detection disabled.")
-    webrtcvad = None
-
-try:
-    import noisereduce as nr
-except ImportError:
-    print("WARNING: noisereduce not found. Noise suppression disabled.")
-    nr = None
+    LEDS_AVAILABLE = False
+    print("[LED] Warning: spidev not available, LED control disabled")
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-# PicoVoice/Rhino settings
-PICO_ACCESS_KEY_FILE = "/opt/evvos/pico_access_key.txt"
-CUSTOM_CONTEXT_FILE = "/opt/evvos/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
-SAMPLE_RATE = 16000  # Optimized for speech recognition clarity
-AUDIO_CHUNK_SIZE = 512  # Rhino processes in fixed frame lengths (~26ms at 16kHz)
-# Note: Audio codec (TLV320AIC3104) is pre-configured by setup_respeaker_enhanced.sh
-# Microphone gain is set to optimal levels (PGA ~25) for accurate voice capture
+# File paths
+ACCESS_KEY_FILE = "/opt/evvos/picovoice_access_key.txt"
+CONTEXT_FILE = "/opt/evvos/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
+LOG_FILE = "/var/log/evvos-pico-voice.log"
 
-# Intent names and descriptions (from EVVOSVOICE custom context)
-INTENT_MAPPING = {
-    "recording_control": "Recording Control",
-    "emergency_action": "Emergency Action",
-    "incident_capture": "Incident Capture",
-    "user_confirmation": "User Confirmation",
-    "incident_mark": "Incident Mark",
-}
+# Audio configuration for ReSpeaker 2-Mics HAT
+SAMPLE_RATE = 16000  # Rhino requires 16kHz
+FRAME_LENGTH = 512   # Rhino frame length
+CHANNELS = 1         # Mono for voice recognition
+AUDIO_FORMAT = pyaudio.paInt16
 
-# LED configuration
-LED_COUNT = 3
+# LED Colors (RGB)
+LED_OFF = (0, 0, 0)
+LED_LISTENING = (0, 128, 128)  # Cyan - waiting for input
+LED_DETECTED = (0, 255, 0)     # Green - intent detected
+LED_ERROR = (255, 0, 0)        # Red - error state
+LED_PROCESSING = (128, 0, 128)  # Purple - processing
 
-LED_COLORS = {
-    "off": (0, 0, 0),
-    "listening": (0, 150, 150),  # Cyan
-    "recognized": (0, 255, 0),    # Green
-    "error": (255, 0, 0),         # Red
-}
+# ReSpeaker LED configuration (APA102)
+LED_COUNT = 3  # ReSpeaker 2-Mics HAT has 3 LEDs
 
-LED_BRIGHTNESS = {
-    "listening": 8,
-    "recognized": 20,
-    "error": 15,
-}
+# ============================================================================
+# LOGGING SETUP
+# ============================================================================
 
-# Logging configuration
-LOG_DIR = "/var/log/evvos"
-LOG_FILE = f"{LOG_DIR}/evvos_pico_voice_recognition.log"
-
-os.makedirs(LOG_DIR, exist_ok=True)
-
+# Setup dual logging (file + journalctl)
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - [PICO_VOICE] - %(levelname)s - %(message)s",
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
         logging.FileHandler(LOG_FILE),
-        logging.StreamHandler(),
-    ],
+        logging.StreamHandler(sys.stdout)
+    ]
 )
-logger = logging.getLogger("EVVOS_PicoVoice")
+logger = logging.getLogger(__name__)
 
 # ============================================================================
-# RGB LED CONTROL
+# LED CONTROL (APA102 via SPI)
 # ============================================================================
 
-class PixelRing:
-    """Controls ReSpeaker RGB LEDs via SPI"""
+class ReSpeakerLEDs:
+    """Control ReSpeaker 2-Mics HAT APA102 RGB LEDs via SPI"""
     
-    def __init__(self, num_leds: int = 3):
-        self.num_leds = num_leds
+    def __init__(self):
+        self.enabled = LEDS_AVAILABLE
         self.spi = None
-        self.enabled = False
         
-        try:
-            if spidev:
+        if self.enabled:
+            try:
                 self.spi = spidev.SpiDev()
-                self.spi.open(0, 0)
-                self.spi.mode = 0b00
-                self.spi.set_clock_hz(8000000)
-                self.enabled = True
-                logger.info(f"✓ RGB LED control initialized ({num_leds} LEDs)")
-        except Exception as e:
-            logger.warning(f"LED control unavailable: {e}")
-
-    def set_color(self, r: int, g: int, b: int, brightness: int = 5):
+                self.spi.open(0, 0)  # SPI bus 0, device 0
+                self.spi.max_speed_hz = 8000000  # 8MHz
+                self.spi.mode = 0b01  # CPOL=0, CPHA=1
+                logger.info("[LED] ReSpeaker LEDs initialized via SPI")
+                self.set_all(LED_OFF)
+            except Exception as e:
+                logger.warning(f"[LED] Failed to initialize: {e}")
+                self.enabled = False
+    
+    def _build_frame(self, brightness, r, g, b):
+        """Build APA102 LED frame (32-bit)"""
+        # APA102 format: [111][5-bit brightness][8-bit blue][8-bit green][8-bit red]
+        return [
+            0b11100000 | (brightness & 0x1F),  # Start frame + brightness
+            b & 0xFF,  # Blue
+            g & 0xFF,  # Green
+            r & 0xFF   # Red
+        ]
+    
+    def set_all(self, color, brightness=10):
         """Set all LEDs to the same color"""
-        if not self.enabled:
-            return
-        
-        try:
-            data = [[b, g, r, brightness] for _ in range(self.num_leds)]
-            self.show(data)
-        except Exception as e:
-            logger.warning(f"LED color change failed: {e}")
-
-    def show(self, data: List[List[int]]):
-        """Send LED frame data via SPI"""
         if not self.enabled or not self.spi:
             return
         
         try:
-            # APA102 protocol: 4 bytes start, LED data, 4 bytes end
-            frame_data = [0x00, 0x00, 0x00, 0x00]  # Start frame
-            for led in data:
-                frame_data.extend(led)
-            frame_data.extend([0xFF, 0xFF, 0xFF, 0xFF])  # End frame
-            self.spi.xfer2(frame_data)
+            r, g, b = color
+            
+            # APA102 protocol: start frame + LED frames + end frame
+            data = [0x00, 0x00, 0x00, 0x00]  # Start frame
+            
+            for _ in range(LED_COUNT):
+                data.extend(self._build_frame(brightness, r, g, b))
+            
+            data.extend([0xFF, 0xFF, 0xFF, 0xFF])  # End frame
+            
+            self.spi.xfer2(data)
         except Exception as e:
-            logger.warning(f"SPI transmission failed: {e}")
-
-    def off(self):
-        """Turn off all LEDs"""
-        if self.enabled:
-            self.set_color(0, 0, 0)
-
-    def flash(self, r: int, g: int, b: int, times: int = 3, flash_duration: float = 0.15):
-        """Flash a color multiple times"""
+            logger.warning(f"[LED] Error setting LEDs: {e}")
+    
+    def pulse(self, color, duration=0.2):
+        """Pulse effect (brief flash)"""
         if not self.enabled:
             return
         
-        try:
-            for _ in range(times):
-                self.set_color(r, g, b, 20)
-                time.sleep(flash_duration)
-                self.off()
-                time.sleep(flash_duration * 0.5)
-        except Exception as e:
-            logger.warning(f"LED flash failed: {e}")
-
-    def close(self):
-        """Cleanup SPI"""
-        if self.enabled and self.spi:
+        self.set_all(color, brightness=20)
+        time.sleep(duration)
+        self.set_all(LED_LISTENING, brightness=5)
+    
+    def cleanup(self):
+        """Turn off LEDs and close SPI"""
+        if self.spi:
             try:
+                self.set_all(LED_OFF)
                 self.spi.close()
-                logger.info("✓ LED ring closed")
+                logger.info("[LED] LEDs turned off")
             except Exception as e:
-                logger.warning(f"LED cleanup error: {e}")
+                logger.warning(f"[LED] Cleanup error: {e}")
 
 # ============================================================================
 # PICOVOICE RHINO SERVICE
 # ============================================================================
 
 class PicoVoiceService:
-    """Main PicoVoice Rhino intent recognition service"""
+    """Main PicoVoice Rhino service for voice intent recognition"""
     
     def __init__(self):
-        self.rhino = None
-        self.audio_interface = None
-        self.stream = None
-        self.pixels = PixelRing(LED_COUNT)
         self.running = False
-        self.device_index = None
-        self.manila_tz = timezone(timedelta(hours=8))
+        self.rhino = None
+        self.audio_stream = None
+        self.pa = None
+        self.leds = ReSpeakerLEDs()
+        self.access_key = None
         
-        # WebRTC VAD
-        self.vad = None
-        self.vad_mode = 2
-        if webrtcvad:
-            try:
-                self.vad = webrtcvad.Vad()
-                self.vad.set_operating_point(self.vad_mode)
-            except Exception as e:
-                logger.warning(f"VAD initialization failed: {e}")
-        
-        self.audio_buffer = []
-        self.buffer_size = 32000
+        # Signal handlers for graceful shutdown
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
         
         logger.info("=" * 70)
-        logger.info("EVVOS PicoVoice Rhino Intent Recognition Service Starting")
+        logger.info("EVVOS PicoVoice Rhino Service Starting")
         logger.info("=" * 70)
-
-    def get_manila_time(self) -> str:
-        """Get current time in Asia/Manila timezone"""
-        return datetime.now(self.manila_tz).strftime("%Y-%m-%d %H:%M:%S PHT")
-
-    def load_access_key(self) -> Optional[str]:
-        """Load PicoVoice AccessKey from file"""
+        logger.info(f"Python: {sys.version}")
+        logger.info(f"PicoVoice Rhino: {pvrhino.RHINO_VERSION}")
+        logger.info(f"Context: {CONTEXT_FILE}")
+        logger.info(f"Sample Rate: {SAMPLE_RATE} Hz")
+        logger.info(f"Frame Length: {FRAME_LENGTH}")
+        logger.info("=" * 70)
+    
+    def signal_handler(self, signum, frame):
+        """Handle shutdown signals"""
+        logger.info(f"Received signal {signum}, shutting down...")
+        self.running = False
+    
+    def load_access_key(self):
+        """Load PicoVoice access key from file"""
         try:
-            with open(PICO_ACCESS_KEY_FILE, 'r') as f:
-                key = f.read().strip()
-                if key:
-                    logger.info("✓ PicoVoice AccessKey loaded")
-                    return key
-        except FileNotFoundError:
-            logger.error(f"AccessKey file not found: {PICO_ACCESS_KEY_FILE}")
-        except Exception as e:
-            logger.error(f"Failed to load AccessKey: {e}")
-        
-        return None
-
-    def setup_rhino(self) -> bool:
-        """Initialize Rhino intent recognition engine with custom context"""
-        logger.info("Initializing PicoVoice Rhino engine with custom EVVOSVOICE context...")
-        
-        access_key = self.load_access_key()
-        if not access_key:
-            logger.error("Cannot proceed without valid AccessKey")
-            return False
-        
-        try:
-            # Load custom Rhino context from downloaded file
-            if not os.path.exists(CUSTOM_CONTEXT_FILE):
-                logger.error(f"Custom context file not found: {CUSTOM_CONTEXT_FILE}")
+            if not os.path.exists(ACCESS_KEY_FILE):
+                logger.error(f"Access key file not found: {ACCESS_KEY_FILE}")
+                logger.error("Create the file and add your PicoVoice access key")
+                logger.error("Get a free key at: https://console.picovoice.ai")
                 return False
             
-            logger.info(f"Loading custom context: {CUSTOM_CONTEXT_FILE}")
+            with open(ACCESS_KEY_FILE, 'r') as f:
+                self.access_key = f.read().strip()
             
-            # Create Rhino instance with custom context
-            self.rhino = create_rhino(
-                access_key=access_key,
-                context_path=CUSTOM_CONTEXT_FILE,
-                sample_rate=SAMPLE_RATE,
-            )
-            logger.info(f"✓ Rhino initialized with custom context (frame length: {self.rhino.frame_length})")
-            logger.info(f"Custom context expressions loaded from EVVOSVOICE")
+            if not self.access_key or self.access_key == "YOUR_ACCESS_KEY_HERE":
+                logger.error("Invalid access key in file")
+                logger.error("Please update the access key in: " + ACCESS_KEY_FILE)
+                return False
+            
+            logger.info(f"Access key loaded: {self.access_key[:8]}...")
             return True
-        except Exception as e:
-            logger.error(f"Rhino initialization failed: {e}")
-            return False
-
-    def find_audio_device(self) -> Optional[int]:
-        """Find ReSpeaker audio input device"""
-        logger.info("Searching for ReSpeaker audio device...")
         
+        except Exception as e:
+            logger.error(f"Failed to load access key: {e}")
+            return False
+    
+    def setup_rhino(self):
+        """Initialize PicoVoice Rhino engine"""
         try:
-            self.audio_interface = pyaudio.PyAudio()
-            device_count = self.audio_interface.get_device_count()
+            if not self.load_access_key():
+                return False
+            
+            if not os.path.exists(CONTEXT_FILE):
+                logger.error(f"Rhino context file not found: {CONTEXT_FILE}")
+                return False
+            
+            logger.info("Initializing Rhino engine...")
+            
+            self.rhino = pvrhino.create(
+                access_key=self.access_key,
+                context_path=CONTEXT_FILE,
+                require_endpoint=True  # Wait for speech endpoint before processing
+            )
+            
+            logger.info(f"✓ Rhino initialized successfully")
+            logger.info(f"  Context: {self.rhino.context_info}")
+            logger.info(f"  Frame Length: {self.rhino.frame_length}")
+            logger.info(f"  Sample Rate: {self.rhino.sample_rate} Hz")
+            logger.info(f"  Version: {self.rhino.version}")
+            
+            return True
+        
+        except Exception as e:
+            logger.error(f"Failed to initialize Rhino: {e}")
+            self.leds.set_all(LED_ERROR)
+            return False
+    
+    def find_respeaker_device(self):
+        """Find ReSpeaker audio input device index"""
+        try:
+            p = pyaudio.PyAudio()
+            device_count = p.get_device_count()
+            
+            logger.info(f"Scanning {device_count} audio devices...")
             
             for i in range(device_count):
-                info = self.audio_interface.get_device_info_by_index(i)
-                if "seeed" in info["name"].lower() and info["maxInputChannels"] > 0:
-                    logger.info(f"✓ Found ReSpeaker: {info['name']} (index {i})")
+                info = p.get_device_info_by_index(i)
+                device_name = info['name'].lower()
+                
+                if 'seeed' in device_name:
+                    logger.info(f"✓ Found ReSpeaker device:")
+                    logger.info(f"  Index: {i}")
+                    logger.info(f"  Name: {info['name']}")
+                    logger.info(f"  Channels: {info['maxInputChannels']}")
+                    logger.info(f"  Sample Rate: {info['defaultSampleRate']}")
+                    p.terminate()
                     return i
             
-            logger.warning("ReSpeaker not found, using default device")
+            # If ReSpeaker not found, use default
+            logger.warning("ReSpeaker not found by name, using default input")
+            default_input = p.get_default_input_device_info()
+            logger.info(f"Default input: {default_input['name']}")
+            p.terminate()
+            return None  # Use default
+        
+        except Exception as e:
+            logger.error(f"Error finding audio device: {e}")
             return None
+    
+    def setup_audio_stream(self):
+        """Initialize PyAudio stream for ReSpeaker microphone"""
+        try:
+            self.pa = pyaudio.PyAudio()
             
-        except Exception as e:
-            logger.error(f"Audio device search failed: {e}")
-            return None
-
-    def setup_audio_stream(self) -> bool:
-        """Open audio input stream"""
-        logger.info("Setting up audio stream...")
-        
-        self.device_index = self.find_audio_device()
-        
-        try:
-            self.stream = self.audio_interface.open(
-                format=pyaudio.paInt16,
-                channels=1,
+            # Find ReSpeaker device
+            device_index = self.find_respeaker_device()
+            
+            logger.info("Opening audio stream...")
+            
+            # Open stream with ReSpeaker-optimized settings
+            self.audio_stream = self.pa.open(
+                input_device_index=device_index,
                 rate=SAMPLE_RATE,
+                channels=CHANNELS,
+                format=AUDIO_FORMAT,
                 input=True,
-                input_device_index=self.device_index,
-                frames_per_buffer=AUDIO_CHUNK_SIZE,
-                start=False,
+                frames_per_buffer=FRAME_LENGTH,
+                stream_callback=None  # Blocking mode for better reliability
             )
-            logger.info("✓ Audio stream opened")
+            
+            logger.info("✓ Audio stream opened successfully")
+            logger.info(f"  Device: {'ReSpeaker' if device_index else 'Default'}")
+            logger.info(f"  Sample Rate: {SAMPLE_RATE} Hz")
+            logger.info(f"  Channels: {CHANNELS} (Mono)")
+            logger.info(f"  Frame Length: {FRAME_LENGTH}")
+            
             return True
+        
         except Exception as e:
-            logger.error(f"Audio stream setup failed: {e}")
+            logger.error(f"Failed to setup audio stream: {e}")
+            self.leds.set_all(LED_ERROR)
             return False
-
-    def preprocess_audio(self, data: bytes) -> bool:
-        """Preprocess audio using WebRTC VAD"""
-        if not self.vad:
-            return True
-        
-        try:
-            is_speech = self.vad.is_speech(data, SAMPLE_RATE)
-            if not is_speech:
-                logger.debug("Silent frame skipped (VAD)")
-            return is_speech
-        except Exception as e:
-            logger.warning(f"VAD processing failed: {e}")
-            return True
-
-    def apply_noise_reduction(self, data: bytes) -> bytes:
-        """Apply noise reduction"""
-        if not nr:
-            return data
-        
-        try:
-            import numpy as np
-            audio_np = np.frombuffer(data, dtype=np.int16)
-            reduced = nr.reduce_noise(y=audio_np, sr=SAMPLE_RATE)
-            return reduced.astype(np.int16).tobytes()
-        except Exception as e:
-            logger.warning(f"Noise reduction failed: {e}")
-            return data
-
+    
     def process_voice_input(self):
-        """Main intent recognition loop with optimized audio quality"""
-        logger.info("🎤 Listening for voice commands...")
-        logger.info("=" * 70)
-        logger.info("Recognized Intents:")
-        for intent, desc in INTENT_MAPPING.items():
-            logger.info(f"  • {intent}: {desc}")
-        logger.info("=" * 70)
-        
-        if not self.stream:
-            logger.error("Audio stream not initialized")
-            return
-        
+        """Main loop: read audio and process with Rhino"""
         self.running = True
-        self.stream.start_stream()
-        self.pixels.set_color(*LED_COLORS["listening"], brightness=15)
+        logger.info("=" * 70)
+        logger.info("🎤 Voice recognition active - listening for commands...")
+        logger.info("=" * 70)
         
-        logger.info("Listening indicator on, ready for voice commands...")
-        logger.info("Audio Processing: WebRTC VAD + Noise Reduction for optimal clarity")
+        # Set listening state
+        self.leds.set_all(LED_LISTENING, brightness=5)
         
-        consecutive_silence = 0
-        max_silence_frames = 10  # ~2.6 seconds of silence triggers attention reset
+        frame_count = 0
         
         try:
             while self.running:
+                # Read audio frame
                 try:
-                    # Read audio chunk (Rhino requires specific frame length)
-                    audio_data = self.stream.read(
+                    pcm_data = self.audio_stream.read(
                         self.rhino.frame_length,
                         exception_on_overflow=False
                     )
-                    
-                    # Voice Activity Detection: Skip silent frames for efficiency
-                    if not self.preprocess_audio(audio_data):
-                        consecutive_silence += 1
-                        if consecutive_silence > max_silence_frames:
-                            # Reset after extended silence
-                            consecutive_silence = 0
-                        continue
-                    
-                    consecutive_silence = 0
-                    
-                    # Noise Reduction: Improve clarity by removing background noise
-                    audio_data = self.apply_noise_reduction(audio_data)
-                    
-                    # Intent Recognition: Process with Rhino engine
-                    try:
-                        self.rhino.process(audio_data)
-                    except Exception as e:
-                        logger.warning(f"Rhino processing error: {e}")
-                        continue
-                    
-                    # Check if utterance is complete and understood
-                    if self.rhino.is_understood():
-                        intent = self.rhino.get_intent()
-                        slots = self.rhino.get_slots()
-                        self._on_command_detected(intent, slots)
-                    
                 except Exception as e:
-                    logger.error(f"Error processing audio chunk: {e}")
+                    logger.warning(f"Audio read error: {e}")
+                    time.sleep(0.1)
+                    continue
+                
+                # Convert to 16-bit PCM
+                pcm = struct.unpack_from(
+                    "h" * self.rhino.frame_length,
+                    pcm_data
+                )
+                
+                # Process frame with Rhino
+                is_finalized = self.rhino.process(pcm)
+                
+                frame_count += 1
+                
+                # Log heartbeat every 5 seconds
+                if frame_count % (SAMPLE_RATE // FRAME_LENGTH * 5) == 0:
+                    logger.info(f"[HEARTBEAT] Listening... ({frame_count} frames processed)")
+                
+                if is_finalized:
+                    inference = self.rhino.get_inference()
                     
-except KeyboardInterrupt:
-            logger.info("Voice recognition stopped by user")
+                    if inference.is_understood:
+                        intent = inference.intent
+                        slots = inference.slots
+                        
+                        logger.info("=" * 70)
+                        logger.info(f"[INTENT DETECTED] Intent: '{intent}'")
+                        logger.info(f"[SLOTS] {json.dumps(slots, indent=2)}")
+                        logger.info("=" * 70)
+                        
+                        # LED feedback: Green pulse
+                        self.leds.pulse(LED_DETECTED, duration=0.3)
+                        
+                        # Here you can add integration with EVVOS backend
+                        # e.g., send intent to Supabase Edge Function
+                        self.handle_intent(intent, slots)
+                    
+                    else:
+                        logger.info("[SPEECH] Speech detected but no intent matched")
+                        logger.info("  Try one of the configured commands")
+        
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received")
+        
         except Exception as e:
-            logger.error(f"Fatal error in voice recognition: {e}", exc_info=True)
+            logger.error(f"Error in voice processing loop: {e}", exc_info=True)
+            self.leds.set_all(LED_ERROR)
+        
         finally:
-            self.shutdown()
-
-    def _on_command_detected(self, intent: str, slots: Dict[str, str]):
-        """Handler for detected intent"""
+            self.cleanup()
+    
+    def handle_intent(self, intent, slots):
+        """Handle detected intent and execute corresponding action"""
+        logger.info(f"[ACTION] Processing intent: {intent}")
         
-        self.pixels.flash(*LED_COLORS["recognized"], times=3, flash_duration=0.2)
+        # Map intents to actions
+        if intent == "recording_control":
+            # Check if slots indicate start or stop
+            logger.info("[ACTION] Recording control detected")
+            # TODO: Integrate with EVVOS recording system
         
-        timestamp = self.get_manila_time()
-        slots_str = json.dumps(slots) if slots else "{}"
+        elif intent == "emergency_action":
+            logger.info("[ACTION] Emergency backup triggered!")
+            # TODO: Trigger emergency backup
         
-        log_message = f"🎤 [INTENT_DETECTED] Intent: '{intent}' | Slots: {slots_str}"
+        elif intent == "incident_capture":
+            logger.info("[ACTION] Capturing incident snapshot")
+            # TODO: Trigger camera snapshot or screenshot
         
-        logger.warning(log_message)
-        print(log_message)
+        elif intent == "user_confirmation":
+            logger.info("[ACTION] User confirmation detected")
+            # TODO: Handle confirm/cancel actions
         
-        try:
-            subprocess.run(
-                ["systemd-cat", "-t", "evvos-pico", "-p", "warning", log_message],
-                check=False,
-            )
-        except Exception as e:
-            logger.debug(f"systemd-cat failed: {e}")
+        elif intent == "incident_mark":
+            logger.info("[ACTION] Marking incident in timeline")
+            # TODO: Add incident marker to recording
         
-        # Attempt to send to Edge Function
-        edge_fn_url = os.getenv("INSERT_VOICE_FN_URL") or os.getenv("SUPABASE_EDGE_FN_URL")
-        
-        if edge_fn_url:
-            try:
-                import requests
-                
-                payload = {
-                    "intent": intent,
-                    "slots": slots,
-                    "timestamp": timestamp,
-                    "device_type": "respeaker_pico",
-                    "confidence": 1.0,
-                }
-                
-                headers = {
-                    "Authorization": f"Bearer {os.getenv('SUPABASE_ANON_KEY', '')}",
-                    "Content-Type": "application/json",
-                }
-                
-                response = requests.post(edge_fn_url, json=payload, headers=headers, timeout=5)
-                
-                if response.status_code == 200:
-                    logger.info(f"✓ Intent sent to Edge Function: {intent}")
-                else:
-                    logger.warning(f"Edge Function returned {response.status_code}: {response.text}")
-                    
-            except Exception as e:
-                logger.debug(f"Edge Function request failed: {e}")
         else:
-            logger.debug("INSERT_VOICE_FN_URL not set - skipping Edge Function")
-
-    def shutdown(self):
-        """Cleanup resources"""
+            logger.warning(f"[ACTION] Unknown intent: {intent}")
+        
+        # Optional: Send to Supabase Edge Function
+        # self.send_to_backend(intent, slots)
+    
+    def send_to_backend(self, intent, slots):
+        """Send intent data to EVVOS backend (optional)"""
+        try:
+            import requests
+            
+            # Replace with your Supabase Edge Function URL
+            EDGE_FUNCTION_URL = os.getenv("EVVOS_EDGE_FUNCTION_URL")
+            
+            if not EDGE_FUNCTION_URL:
+                return
+            
+            payload = {
+                "intent": intent,
+                "slots": slots,
+                "timestamp": datetime.now().isoformat(),
+                "device_id": os.getenv("EVVOS_DEVICE_ID", "unknown")
+            }
+            
+            response = requests.post(
+                EDGE_FUNCTION_URL,
+                json=payload,
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                logger.info("[BACKEND] Intent sent successfully")
+            else:
+                logger.warning(f"[BACKEND] Failed: {response.status_code}")
+        
+        except Exception as e:
+            logger.warning(f"[BACKEND] Error sending intent: {e}")
+    
+    def cleanup(self):
+        """Clean up resources"""
         logger.info("Shutting down voice recognition service...")
         
-        self.running = False
+        if self.audio_stream:
+            self.audio_stream.stop_stream()
+            self.audio_stream.close()
+            logger.info("Audio stream closed")
         
-        if self.stream:
-            try:
-                self.stream.stop_stream()
-                self.stream.close()
-                logger.info("✓ Audio stream closed")
-            except Exception as e:
-                logger.warning(f"Stream cleanup error: {e}")
-        
-        if self.audio_interface:
-            try:
-                self.audio_interface.terminate()
-                logger.info("✓ PyAudio terminated")
-            except Exception as e:
-                logger.warning(f"PyAudio cleanup error: {e}")
+        if self.pa:
+            self.pa.terminate()
+            logger.info("PyAudio terminated")
         
         if self.rhino:
-            try:
-                self.rhino.delete()
-                logger.info("✓ Rhino engine closed")
-            except Exception as e:
-                logger.warning(f"Rhino cleanup error: {e}")
+            self.rhino.delete()
+            logger.info("Rhino engine released")
         
-        self.pixels.off()
-        self.pixels.close()
+        self.leds.cleanup()
         
-        logger.info("=" * 70)
         logger.info("Voice recognition service shutdown complete")
         logger.info("=" * 70)
-
+    
     def run(self):
         """Main service entry point"""
         if not self.setup_rhino():
@@ -957,49 +970,51 @@ echo -e "${GREEN}═════════════════════
 echo ""
 
 log_info "Configuration Summary:"
-echo "  • Intent Model: EVVOSVOICE Custom Context (5 intents, trained via PicoVoice console)"
+echo "  • Hardware: Raspberry Pi Zero 2 W + ReSpeaker 2-Mics HAT V2.0"
+echo "  • Audio Codec: TLV320AIC3104 (via $CARD_NAME)"
+echo "  • Intent Model: EVVOSVOICE Custom Context"
 echo "  • Python Environment: $VENV_PATH"
 echo "  • Service: evvos-pico-voice.service"
 echo "  • Log File: $LOG_FILE"
 echo "  • Access Key: $ACCESS_KEY_FILE"
-echo "  • Custom Context: /opt/evvos/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
+echo "  • Custom Context: $CONTEXT_FILE"
 echo ""
 
-log_info "Recognized Intents and Commands (EVVOSVOICE Custom Context):"
+log_info "Recognized Intents and Commands (from EVVOSVOICE.yml):"
 echo ""
-echo "  ${CYAN}recording_control${NC}: Recording control"
-echo "    • 'start recording' → Intent: recording_control"
-echo "    • 'stop recording' → Intent: recording_control"
+echo "  ${CYAN}recording_control${NC}:"
+echo "    • 'start recording'"
+echo "    • 'stop recording'"
 echo ""
-echo "  ${CYAN}emergency_action${NC}: Emergency backup"
-echo "    • 'emergency backup' → Intent: emergency_action"
-echo "    • 'alert' → Intent: emergency_action"
+echo "  ${CYAN}emergency_action${NC}:"
+echo "    • 'alert'"
+echo "    • 'emergency backup'"
 echo ""
-echo "  ${CYAN}incident_capture${NC}: Incident capture"
-echo "    • 'mark incident' → Intent: incident_capture"
-echo "    • 'snapshot' → Intent: incident_capture"
-echo "    • 'screenshot' → Intent: incident_capture"
+echo "  ${CYAN}incident_capture${NC}:"
+echo "    • 'screenshot'"
+echo "    • 'snapshot'"
+echo "    • 'mark incident'"
 echo ""
-echo "  ${CYAN}user_confirmation${NC}: Confirmations"
-echo "    • 'confirm' → Intent: user_confirmation"
-echo "    • 'cancel' → Intent: user_confirmation"
+echo "  ${CYAN}user_confirmation${NC}:"
+echo "    • 'confirm'"
+echo "    • 'cancel'"
 echo ""
-echo "  ${CYAN}incident_mark${NC}: Incident marking"
-echo "    • 'mark incident' → Intent: incident_mark"
+echo "  ${CYAN}incident_mark${NC}:"
+echo "    • 'mark incident'"
 echo ""
 
-log_info "LED Status Indicators:"
+log_info "LED Status Indicators (ReSpeaker APA102):"
 echo "  • ${CYAN}Cyan (Listening)${NC}: Waiting for voice input"
 echo "  • ${GREEN}Green (Detected)${NC}: Intent successfully recognized"
 echo "  • ${RED}Red (Error)${NC}: Service error occurred"
 echo ""
 
-log_info "IMPORTANT: Check logs while testing:"
+log_info "IMPORTANT: Monitor logs while testing:"
 echo ""
 echo "  ${CYAN}sudo journalctl -u evvos-pico-voice -f${NC}"
 echo ""
 echo "  When you speak a command, look for:"
-echo "  ${GREEN}[INTENT_DETECTED] Intent: 'changeRecording' | Slots: {}${NC}"
+echo "  ${GREEN}[INTENT DETECTED] Intent: 'recording_control' | Slots: {}${NC}"
 echo ""
 
 log_info "Service Management:"
@@ -1023,6 +1038,21 @@ echo "  # View file logs:"
 echo "  sudo tail -f $LOG_FILE"
 echo ""
 
+log_info "ReSpeaker Audio Adjustments (if needed):"
+echo ""
+echo "  # Increase microphone gain (if too quiet):"
+echo "  sudo amixer -c $CARD_NAME sset 'PGA' 28"
+echo ""
+echo "  # Decrease microphone gain (if distorted):"
+echo "  sudo amixer -c $CARD_NAME sset 'PGA' 22"
+echo ""
+echo "  # Save settings permanently:"
+echo "  sudo alsactl store"
+echo ""
+echo "  # Test microphone:"
+echo "  arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav"
+echo ""
+
 log_info "Troubleshooting:"
 echo ""
 echo "  Q: 'AccessKey not loaded' error?"
@@ -1030,12 +1060,16 @@ echo "  A: Ensure AccessKey is saved to: $ACCESS_KEY_FILE"
 echo "     Get free key from: https://console.picovoice.ai"
 echo ""
 echo "  Q: No intents recognized?"
-echo "  A: Check microphone with: arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav"
-echo "     Adjust PGA gain: sudo amixer -c seeed2micvoicec sset 'PGA' 25"
+echo "  A: Check microphone gain: sudo amixer -c $CARD_NAME sset 'PGA' 25"
+echo "     Test microphone: arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav"
 echo ""
 echo "  Q: Service keeps restarting?"
 echo "  A: Check logs: sudo journalctl -u evvos-pico-voice --no-pager"
-echo "     Verify audio device: aplay -l && arecord -l"
+echo "     Verify ReSpeaker is detected: aplay -l && arecord -l"
+echo ""
+echo "  Q: LEDs not working?"
+echo "  A: LEDs require spidev library. Verify it's installed in venv."
+echo "     Check SPI is enabled: ls /dev/spidev0.0"
 echo ""
 
 log_info "Next Steps:"
@@ -1047,17 +1081,18 @@ echo "  5. If no detection, adjust microphone gain and test"
 echo ""
 
 log_info "PicoVoice Rhino Advantages:"
-echo "  • Intent-based recognition (more structured than Vosk)"
-echo "  • Extracts intent and slots from user speech"
-echo "  • Better accuracy for EVVOS command patterns"
-echo "  • Lighter CPU footprint than Vosk on Pi Zero 2 W"
-echo "  • Free tier includes sufficient API quota"
+echo "  • Intent-based recognition (structured commands)"
+echo "  • Extracts intent and slots from speech"
+echo "  • Better accuracy for command patterns"
+echo "  • Lighter CPU footprint on Pi Zero 2 W"
+echo "  • On-device processing (privacy-first)"
+echo "  • Free tier with unlimited on-device use"
 echo ""
 
 log_info "Integration with EVVOS:"
 echo "  • Service logs intent detections to journalctl"
-echo "  • Sends intent data to Supabase Edge Function (if configured)"
-echo "  • RGB LED feedback for user feedback"
+echo "  • Can send intent data to Supabase Edge Function"
+echo "  • RGB LED feedback via ReSpeaker APA102 LEDs"
 echo "  • Automatic startup on system boot"
 echo ""
 
@@ -1066,6 +1101,6 @@ echo ""
 
 log_success "PicoVoice Rhino Service ready to use!"
 echo ""
-log_info "Verify everything is working with:"
+log_info "Start testing with:"
 echo "  ${CYAN}sudo journalctl -u evvos-pico-voice -f${NC}"
 echo ""
