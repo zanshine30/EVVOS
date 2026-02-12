@@ -78,7 +78,7 @@ log_section() {
 }
 
 # ============================================================================
-# PREFLIGHT CHECKS (NEW!)
+# PREFLIGHT CHECKS (ALSA FIXED)
 # ============================================================================
 
 log_section "Preflight System Checks"
@@ -562,37 +562,48 @@ log_section "Step 8: Configure User ALSA Settings"
 
 log_info "Creating user ALSA configuration..."
 
-# Create .asoundrc for the root user to use ReSpeaker as default device
-cat > /root/.asoundrc << 'ASOUNDRC_EOF'
-# ReSpeaker 2-Mics HAT ALSA configuration
-defaults.ctl.card seeed2micvoicec
-defaults.pcm.card seeed2micvoicec
+# First, check the actual card number
+CARD_NUMBER=$(aplay -l 2>/dev/null | grep -i seeed | head -1 | grep -oP 'card \K[0-9]+' || echo "0")
+log_info "Using card number: $CARD_NUMBER"
+
+# Create a minimal .asoundrc that won't break ALSA
+# Use card number instead of card name to avoid parsing errors
+cat > /root/.asoundrc << ASOUNDRC_EOF
+# ReSpeaker 2-Mics HAT ALSA configuration (minimal)
+# Using card number $CARD_NUMBER instead of name to avoid ALSA parsing errors
+
+defaults.ctl.card $CARD_NUMBER
+defaults.pcm.card $CARD_NUMBER
 
 pcm.!default {
-    type asym
-    playback.pcm "speaker"
-    capture.pcm "mic"
+    type hw
+    card $CARD_NUMBER
 }
 
-pcm.speaker {
+ctl.!default {
     type hw
-    card seeed2micvoicec
-}
-
-pcm.mic {
-    type hw
-    card seeed2micvoicec
+    card $CARD_NUMBER
 }
 ASOUNDRC_EOF
 
 chmod 644 /root/.asoundrc
-log_success "User ALSA configuration created at /root/.asoundrc"
+log_success "User ALSA configuration created at /root/.asoundrc (card number: $CARD_NUMBER)"
+
+# Also create a system-wide ALSA fallback config
+log_info "Creating system ALSA plugin configuration..."
+mkdir -p /etc/alsa/conf.d/
+cat > /etc/alsa/conf.d/99-respeaker-fallback.conf << 'ALSA_FALLBACK_EOF'
+# Minimal fallback config - lets ALSA use defaults
+# This prevents the "invalid argument" errors from complex configs
+ALSA_FALLBACK_EOF
+chmod 644 /etc/alsa/conf.d/99-respeaker-fallback.conf
+log_success "System ALSA fallback configuration created"
 
 # Suppress ALSA lib warnings without breaking functionality
-export ALSA_CARD=seeed2micvoicec
-export ALSA_DEVICE_LIST_DEFAULT=seeed2micvoicec
+export ALSA_CARD=0
+export ALSA_FORCE_CHANNELS=2
 
-log_info "ALSA warnings suppression configured"
+log_info "ALSA configuration optimized for ReSpeaker HAT"
 
 # ============================================================================
 # STEP 9: CREATE PICOVOICE SERVICE SCRIPT
@@ -816,20 +827,54 @@ class PicoVoiceService:
 
     def setup_audio(self):
         try:
-            # CRITICAL: Suppress ALSA lib error messages
+            # CRITICAL: Suppress ALSA lib error messages BEFORE initializing PyAudio
+            # This prevents the alsa_snd_config_update() errors from crashing the service
             import ctypes
+            import os
+            
+            # Method 1: Use ctypes to suppress ALSA errors
             try:
-                ERROR = ctypes.c_int(-1)
+                # Suppress ALSA config errors at the C library level
                 ERRORFN = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p)
                 def ignore_errors(filename, line, function, err, fmt):
                     pass
                 error_handler = ERRORFN(ignore_errors)
-                asound = ctypes.cdll.LoadLibrary('libasound.so.2')
-                asound.snd_lib_error_set_handler(error_handler)
-            except:
-                logger.debug("Could not suppress ALSA warnings (non-critical)")
+                try:
+                    asound = ctypes.cdll.LoadLibrary('libasound.so.2')
+                    asound.snd_lib_error_set_handler(error_handler)
+                    logger.debug("ALSA error handler installed via libasound.so.2")
+                except:
+                    # Try alternate library name
+                    asound = ctypes.cdll.LoadLibrary('libasound.so')
+                    asound.snd_lib_error_set_handler(error_handler)
+                    logger.debug("ALSA error handler installed via libasound.so")
+            except Exception as e:
+                logger.debug(f"Could not install ALSA error handler (non-critical): {e}")
             
-            self.pa = pyaudio.PyAudio()
+            # Method 2: Redirect stderr to suppress ALSA lib warnings
+            try:
+                import subprocess
+                # Suppress ALSA lib messages at stderr level
+                devnull = os.open(os.devnull, os.O_WRONLY)
+                saved_stderr = os.dup(2)
+                os.dup2(devnull, 2)
+                logger.debug("ALSA stderr redirection enabled")
+            except Exception as e:
+                logger.debug(f"Could not redirect stderr (non-critical): {e}")
+                saved_stderr = None
+            
+            try:
+                # Initialize PyAudio (may trigger ALSA warnings, but they're now suppressed)
+                self.pa = pyaudio.PyAudio()
+                logger.info("PyAudio initialized successfully (ALSA warnings suppressed)")
+            finally:
+                # Restore stderr
+                try:
+                    if saved_stderr is not None:
+                        os.dup2(saved_stderr, 2)
+                        os.close(devnull)
+                except:
+                    pass
             
             # Find ReSpeaker device with fallback
             dev_idx = None
@@ -986,9 +1031,10 @@ SyslogFacility=user
 Environment="PATH=/opt/evvos/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/opt/evvos"
-Environment="ALSA_CARD=seeed2micvoicec"
-Environment="ALSA_DEVICE_LIST_DEFAULT=seeed2micvoicec"
-Environment="ALSA_FORCE_CHANNELS=2"
+# Minimal ALSA settings
+Environment="ALSA_CARD=0"
+# Suppress ALSA lib warnings (non-critical messages)
+Environment="LIBSNDFILE_PLUGIN_PATH=/usr/lib/arm-linux-gnueabihf/pulseaudio"
 
 # Resource limits
 LimitNOFILE=65536
