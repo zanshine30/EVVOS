@@ -1,2 +1,2 @@
-echo -n "yDCtxCN8bet0r5wxMRaNQMWF7mvbu/MNgklGfQZHHZ6UONjoGIQUkQ==" | sudo tee /opt/evvos/picovoice_access_key.txt
+echo -n "0EqhAHGwuaxJ4IzbRILT6I/pILEt25JUEoU0s6kivGRcwG8QCHbNFg==" | sudo tee /opt/evvos/picovoice_access_key.txt
 echo "AccessKey Changed"
