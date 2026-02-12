@@ -777,6 +777,28 @@ class ReSpeakerLEDs:
 # COMMAND MAPPING (Intent + Slots → Actual Spoken Command)
 # ============================================================================
 
+# Mapping of (intent, slot_key, slot_value) -> actual spoken command
+COMMAND_MAP = {
+    # recording_control: uses recordingAction slot
+    ("recording_control", "recordingAction", "start"): "start recording",
+    ("recording_control", "recordingAction", "stop"): "stop recording",
+    ("recording_control", "recordingAction", "begin"): "begin recording",
+    
+    # emergency_action: NO SLOTS - these are literal phrases matched by Rhino
+    # Will be handled specially in get_spoken_command()
+    
+    # incident_capture: uses captureAction slot
+    ("incident_capture", "captureAction", "screenshot"): "screenshot",
+    ("incident_capture", "captureAction", "snapshot"): "snapshot",
+    ("incident_capture", "captureAction", "mark"): "mark incident",
+    ("incident_capture", "captureAction", "timestamp"): "timestamp",
+    ("incident_capture", "captureAction", "incident"): "incident",
+    
+    # user_confirmation: uses confirmAction slot
+    ("user_confirmation", "confirmAction", "confirm"): "confirm",
+    ("user_confirmation", "confirmAction", "cancel"): "cancel",
+}
+
 # Mapping for emergency_action intent (literal phrases, no slots)
 EMERGENCY_ACTION_MAP = {
     "backup backup backup": "backup backup backup",
