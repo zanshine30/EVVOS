@@ -1198,7 +1198,7 @@ Environment="ALSA_CARD_DEFAULTS=libasound.so.2"
 # Supabase Edge Function Configuration
 Environment="SUPABASE_EDGE_FUNCTION_URL=https://zekbonbxwccgsfagrrph.supabase.co/functions/v1/insert-voice-command"
 Environment="EVVOS_DEVICE_ID=EVVOS_0001"
-Environment="SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY_HERE"
+Environment="SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpla2JvbmJ4d2NjZ3NmYWdycnBoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2ODM5NDI5NSwiZXhwIjoyMDgzOTcwMjk1fQ.Ddpwys249qYzjlK-kNrZCzNhZ-7OX-RUUg74XnZxuOU"
 
 # Resource limits
 LimitNOFILE=65536
