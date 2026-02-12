@@ -1,18 +1,35 @@
 #!/bin/bash
-# The simplest fix - directly edit the file
+# Manual fix for IndentationError
 
-echo "Stopping service..."
+echo "(New) Stopping service..."
 sudo systemctl stop evvos-pico-voice
 
-echo "Backing up original file..."
-sudo cp /usr/local/bin/evvos-pico-voice-service.py /usr/local/bin/evvos-pico-voice-service.py.broken
+echo "Fixing line 171..."
+sudo python3 << 'PYTHONFIX'
+import sys
 
-echo "Fixing the service file..."
+# Read file
+with open('/usr/local/bin/evvos-pico-voice-service.py', 'r') as f:
+    lines = f.readlines()
 
-# This sed command removes lines 171-174 which contain the broken try block
-# and replaces with a simple logger statement
-sudo sed -i '171,174d' /usr/local/bin/evvos-pico-voice-service.py
-sudo sed -i '170a\        logger.info("PicoVoice Rhino: Installed")' /usr/local/bin/evvos-pico-voice-service.py
+# Find and fix the problematic line (around line 171)
+for i, line in enumerate(lines):
+    if 'pvrhino.RHINO_VERSION' in line:
+        # Replace with simple version
+        lines[i] = '        logger.info("PicoVoice Rhino: Installed")\n'
+        print(f"Fixed line {i+1}")
+    
+    # Also fix the self.rhino.version line if it exists
+    if 'self.rhino.version' in line and 'Version:' in line:
+        lines[i] = '            logger.info("  Version: Installed")\n'
+        print(f"Fixed line {i+1}")
+
+# Write back
+with open('/usr/local/bin/evvos-pico-voice-service.py', 'w') as f:
+    f.writelines(lines)
+
+print("File fixed successfully!")
+PYTHONFIX
 
 echo "Restarting service..."
 sudo systemctl restart evvos-pico-voice
@@ -20,10 +37,10 @@ sudo systemctl restart evvos-pico-voice
 sleep 2
 
 echo ""
-echo "✓ Fixed!"
+echo "✓ Service restarted!"
 echo ""
 echo "Check status:"
-sudo systemctl status evvos-pico-voice --no-pager | head -20
+echo "  sudo systemctl status evvos-pico-voice"
 echo ""
 echo "View logs:"
 echo "  sudo journalctl -u evvos-pico-voice -f"
