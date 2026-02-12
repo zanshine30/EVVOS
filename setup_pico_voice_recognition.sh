@@ -466,17 +466,59 @@ log_success "PyAudio verification complete"
 log_section "Step 5: Deploy Rhino Context File"
 
 CONTEXT_FILE="/opt/evvos/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
+UPLOADED_CONTEXT="/mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
 
-# Check if context file was uploaded to /mnt/user-data/uploads
-if [ -f "/mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn" ]; then
-    log_info "Copying Rhino context file from uploads..."
-    cp /mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn "$CONTEXT_FILE"
+log_info "Checking for Rhino context file..."
+
+# Check if context file already exists locally
+if [ -f "$CONTEXT_FILE" ]; then
+    EXISTING_SIZE=$(stat -c%s "$CONTEXT_FILE" 2>/dev/null || echo "0")
+    EXISTING_DATE=$(stat -c%y "$CONTEXT_FILE" 2>/dev/null || echo "unknown")
+    log_success "Context file already deployed: $CONTEXT_FILE"
+    log_info "  Size: $EXISTING_SIZE bytes | Modified: $EXISTING_DATE"
+    
+    # Check if newer file was uploaded
+    if [ -f "$UPLOADED_CONTEXT" ]; then
+        UPLOADED_SIZE=$(stat -c%s "$UPLOADED_CONTEXT" 2>/dev/null || echo "0")
+        UPLOADED_DATE=$(stat -c%y "$UPLOADED_CONTEXT" 2>/dev/null || echo "unknown")
+        log_info "Newer .rhn file found in uploads:"
+        log_info "  Size: $UPLOADED_SIZE bytes | Modified: $UPLOADED_DATE"
+        echo ""
+        read -p "Update context file from uploads? (y/n) " -n 1 -r UPDATE_RHN
+        echo
+        if [[ $UPDATE_RHN =~ ^[Yy]$ ]]; then
+            log_info "Updating context file from uploads..."
+            cp "$UPLOADED_CONTEXT" "$CONTEXT_FILE"
+            chmod 644 "$CONTEXT_FILE"
+            log_success "Context file updated from: $UPLOADED_CONTEXT"
+            log_info "  To skip this prompt next time, delete the uploaded copy:"
+            log_info "  rm /mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
+        else
+            log_info "Keeping existing context file (no changes made)"
+        fi
+    fi
+else
+    # No local file exists, must copy from uploads
+    if [ ! -f "$UPLOADED_CONTEXT" ]; then
+        log_error "No context file found!"
+        log_error "Expected one of:"
+        log_error "  1. Local: $CONTEXT_FILE (missing)"
+        log_error "  2. Uploaded: $UPLOADED_CONTEXT (missing)"
+        log_error ""
+        log_error "Solution:"
+        log_error "  1. Go to: https://console.picovoice.ai"
+        log_error "  2. Create/train EVVOSVOICE context model"
+        log_error "  3. Compile and download the .rhn file"
+        log_error "  4. Copy to: $UPLOADED_CONTEXT"
+        log_error "     Or directly to: $CONTEXT_FILE"
+        exit 1
+    fi
+    
+    log_info "First-time setup: copying context file from uploads..."
+    cp "$UPLOADED_CONTEXT" "$CONTEXT_FILE"
     chmod 644 "$CONTEXT_FILE"
     log_success "Rhino context file deployed: $CONTEXT_FILE"
-else
-    log_error "Rhino context file not found at /mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
-    log_error "Please ensure the .rhn file is uploaded to the system"
-    exit 1
+    log_info "  To avoid this prompt, keep the uploaded copy at: $UPLOADED_CONTEXT"
 fi
 
 # Verify context file
