@@ -1,4 +1,4 @@
-cat << 'EOF' | sudo tee /opt/evvos/evvos_voice.py > /dev/output
+cat << 'EOF' | sudo tee /usr/local/bin/evvos-pico-voice-service.py > /dev/null
 #!/usr/bin/env python3
 """
 EVVOS PicoVoice Rhino Intent Recognition Service
@@ -399,9 +399,6 @@ class PicoVoiceService:
         
         else:
             logger.warning(f"[ACTION] Unknown intent: {intent}")
-        
-        # Optional: Send to Supabase Edge Function
-        # self.send_to_backend(intent, slots)
     
     def send_to_backend(self, intent, slots):
         """Send intent data to EVVOS backend (optional)"""
@@ -440,19 +437,31 @@ class PicoVoiceService:
         logger.info("Shutting down voice recognition service...")
         
         if self.audio_stream:
-            self.audio_stream.stop_stream()
-            self.audio_stream.close()
-            logger.info("Audio stream closed")
+            try:
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+                logger.info("Audio stream closed")
+            except Exception:
+                pass
         
         if self.pa:
-            self.pa.terminate()
-            logger.info("PyAudio terminated")
+            try:
+                self.pa.terminate()
+                logger.info("PyAudio terminated")
+            except Exception:
+                pass
         
         if self.rhino:
-            self.rhino.delete()
-            logger.info("Rhino engine released")
+            try:
+                self.rhino.delete()
+                logger.info("Rhino engine released")
+            except Exception:
+                pass
         
-        self.leds.cleanup()
+        try:
+            self.leds.cleanup()
+        except Exception:
+            pass
         
         logger.info("Voice recognition service shutdown complete")
         logger.info("=" * 70)
@@ -484,3 +493,5 @@ def main():
 if __name__ == "__main__":
     main()
 EOF
+
+echo "File overwrite"
