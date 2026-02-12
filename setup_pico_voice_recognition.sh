@@ -1014,12 +1014,17 @@ class PicoVoiceService:
         try:
             import requests
             
-            # Get Supabase Edge Function URL from environment
+            # Get Supabase Edge Function URL and auth key from environment
             EDGE_FUNCTION_URL = os.getenv("SUPABASE_EDGE_FUNCTION_URL")
             DEVICE_ID = os.getenv("EVVOS_DEVICE_ID", "EVVOS_0001")
+            SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
             
             if not EDGE_FUNCTION_URL:
                 logger.debug("[BACKEND] SUPABASE_EDGE_FUNCTION_URL not set, skipping backend sync")
+                return
+            
+            if not SERVICE_ROLE_KEY:
+                logger.warning("[BACKEND] SUPABASE_SERVICE_ROLE_KEY not set, cannot authenticate")
                 return
             
             payload = {
@@ -1032,10 +1037,17 @@ class PicoVoiceService:
                 "confidence": 1.0
             }
             
+            # Add authorization header with service role key
+            headers = {
+                "Authorization": f"Bearer {SERVICE_ROLE_KEY}",
+                "Content-Type": "application/json"
+            }
+            
             logger.info(f"[BACKEND] Sending: intent='{intent}', command='{spoken_command}'")
             response = requests.post(
                 EDGE_FUNCTION_URL,
                 json=payload,
+                headers=headers,
                 timeout=5
             )
             
