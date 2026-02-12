@@ -53,7 +53,7 @@ log_section() {
 }
 
 # ============================================================================
-# PREFLIGHT CHECKS (NEW)
+# PREFLIGHT CHECKS
 # ============================================================================
 
 log_section "Preflight System Checks"
@@ -75,14 +75,17 @@ if ! aplay -l 2>/dev/null | grep -qi "seeed"; then
 fi
 log_success "ReSpeaker HAT detected"
 
-# Detect the exact card name
-CARD_NAME=$(aplay -l | grep -i seeed | head -1 | sed 's/card \([0-9]\+\):.*/\1/')
-if [ -z "$CARD_NAME" ]; then
+# Detect the exact card name and number
+CARD_INFO=$(aplay -l 2>/dev/null | grep -i seeed | head -1)
+if [ -z "$CARD_INFO" ]; then
+    CARD_NUM="0"
     CARD_NAME="seeed2micvoicec"
-    log_warning "Could not auto-detect card number, using default: $CARD_NAME"
+    log_warning "Could not auto-detect card, using defaults: $CARD_NAME (card $CARD_NUM)"
 else
-    CARD_NAME=$(aplay -l | grep "card $CARD_NAME" | sed 's/.*\[\(.*\)\].*/\1/')
-    log_success "Detected ReSpeaker card: $CARD_NAME"
+    # Extract card number and name from output like: card 0: seeed2micvoicec [seeed-voicecard]
+    CARD_NUM=$(echo "$CARD_INFO" | grep -oP 'card \K[0-9]+')
+    CARD_NAME=$(echo "$CARD_INFO" | grep -oP '\[\K[^\]]+' | head -1)
+    log_success "Detected ReSpeaker: card $CARD_NUM ($CARD_NAME)"
 fi
 
 # Check Python3
@@ -386,11 +389,40 @@ fi
 
 echo ""
 
+log_section "Step 7: Create ALSA Configuration for ReSpeaker"
+
+log_info "Creating ALSA configuration to suppress warnings..."
+mkdir -p /etc/alsa/conf.d
+cat > /etc/alsa/conf.d/respeaker.conf << 'ALSA_CONF_EOF'
+pcm.default {
+    type asym
+    playback.pcm "play"
+    capture.pcm "rec"
+}
+
+pcm.play {
+    type hw
+    card seeed2micvoicec
+}
+
+pcm.rec {
+    type hw
+    card seeed2micvoicec
+}
+
+ctl.!default {
+    type hw
+    card seeed2micvoicec
+}
+ALSA_CONF_EOF
+chmod 644 /etc/alsa/conf.d/respeaker.conf
+log_success "ALSA configuration created"
+
 # ============================================================================
-# STEP 7: CREATE PICOVOICE SERVICE SCRIPT
+# STEP 8: CREATE PICOVOICE SERVICE SCRIPT
 # ============================================================================
 
-log_section "Step 7: Create PicoVoice Service Script"
+log_section "Step 8: Create PicoVoice Service Script"
 
 LOG_FILE="/var/log/evvos-pico-voice.log"
 touch "$LOG_FILE"
@@ -490,6 +522,14 @@ class ReSpeakerLEDs:
                 self.spi.mode = 0b01  # CPOL=0, CPHA=1
                 logger.info("[LED] ReSpeaker LEDs initialized via SPI")
                 self.set_all(LED_OFF)
+            except FileNotFoundError as e:
+                logger.warning(f"[LED] SPI device not found ({e}) - LEDs disabled")
+                logger.warning("[LED] Enable SPI with: sudo raspi-config")
+                self.enabled = False
+            except PermissionError as e:
+                logger.warning(f"[LED] Permission denied accessing SPI ({e})")
+                logger.warning("[LED] Service must run as root or with GPIO permissions")
+                self.enabled = False
             except Exception as e:
                 logger.warning(f"[LED] Failed to initialize: {e}")
                 self.enabled = False
@@ -521,8 +561,15 @@ class ReSpeakerLEDs:
             data.extend([0xFF, 0xFF, 0xFF, 0xFF])
             
             self.spi.xfer2(data)
+        except OSError as e:
+            # OSError usually means SPI device disconnected or permission issue
+            if not hasattr(self, '_error_logged'):
+                logger.warning(f"[LED] SPI communication error: {e}")
+                self._error_logged = True
         except Exception as e:
-            logger.warning(f"[LED] Error setting LEDs: {e}")
+            if not hasattr(self, '_error_logged'):
+                logger.warning(f"[LED] Error setting LEDs: {e}")
+                self._error_logged = True
     
     def pulse(self, color, duration=0.5, end_color=LED_LISTENING):
         """Pulse a color briefly, then return to end_color"""
@@ -594,13 +641,26 @@ class PicoVoiceService:
     def setup_audio(self):
         try:
             self.pa = pyaudio.PyAudio()
-            # Find ReSpeaker
+            # Find ReSpeaker device
             dev_idx = None
+            dev_name = None
             for i in range(self.pa.get_device_count()):
                 info = self.pa.get_device_info_by_index(i)
                 if 'seeed' in info['name'].lower():
                     dev_idx = i
+                    dev_name = info['name']
+                    logger.info(f"Found ReSpeaker device: {dev_name} (index {i})")
+                    logger.info(f"  Sample Rate: {int(info['defaultSampleRate'])} Hz")
+                    logger.info(f"  Input Channels: {info['maxInputChannels']}")
                     break
+            
+            if dev_idx is None:
+                logger.error("ReSpeaker device (seeed) not found in audio devices")
+                logger.info("Available devices:")
+                for i in range(self.pa.get_device_count()):
+                    info = self.pa.get_device_info_by_index(i)
+                    logger.info(f"  [{i}] {info['name']}")
+                return False
             
             self.audio_stream = self.pa.open(
                 input_device_index=dev_idx,
@@ -610,6 +670,7 @@ class PicoVoiceService:
                 input=True,
                 frames_per_buffer=FRAME_LENGTH
             )
+            logger.info(f"Audio stream opened successfully from {dev_name}")
             return True
         except Exception as e:
             logger.error(f"Audio init failed: {e}")
@@ -672,17 +733,24 @@ class PicoVoiceService:
         self.leds.cleanup()
 
 if __name__ == "__main__":
-    PicoVoiceService().process_voice_input() if PicoVoiceService().setup_rhino() and PicoVoiceService().setup_audio() else sys.exit(1)
+    # CRITICAL FIX: Create single instance, not multiple instances!
+    service = PicoVoiceService()
+    
+    if service.setup_rhino() and service.setup_audio():
+        service.process_voice_input()
+    else:
+        logger.error("Failed to initialize service")
+        sys.exit(1)
 PICO_SERVICE_EOF
 
 chmod +x /usr/local/bin/evvos-pico-voice-service.py
 log_success "PicoVoice voice recognition service script created"
 
 # ============================================================================
-# STEP 8: CREATE SYSTEMD SERVICE UNIT
+# STEP 9: CREATE SYSTEMD SERVICE UNIT
 # ============================================================================
 
-log_section "Step 8: Create Systemd Service"
+log_section "Step 9: Create Systemd Service"
 
 cat > /etc/systemd/system/evvos-pico-voice.service << 'SERVICE_FILE'
 [Unit]
@@ -726,10 +794,10 @@ chmod 644 /etc/systemd/system/evvos-pico-voice.service
 log_success "Systemd service created"
 
 # ============================================================================
-# STEP 9: ENABLE AND START SERVICE
+# STEP 10: ENABLE AND START SERVICE
 # ============================================================================
 
-log_section "Step 9: Enable and Start PicoVoice Service"
+log_section "Step 10: Enable and Start PicoVoice Service"
 
 log_info "Reloading systemd daemon..."
 systemctl daemon-reload
@@ -747,10 +815,10 @@ else
 fi
 
 # ============================================================================
-# STEP 10: VERIFY SERVICE STATUS
+# STEP 11: VERIFY SERVICE STATUS
 # ============================================================================
 
-log_section "Step 10: Verify Service Status"
+log_section "Step 11: Verify Service Status"
 
 if systemctl is-active --quiet evvos-pico-voice; then
     log_success "PicoVoice service is RUNNING"
@@ -764,7 +832,7 @@ systemctl status evvos-pico-voice --no-pager 2>&1 | head -15
 echo ""
 
 # ============================================================================
-# STEP 11: SUMMARY & NEXT STEPS
+# STEP 12: SUMMARY & NEXT STEPS
 # ============================================================================
 
 log_section "PicoVoice Rhino Intent Recognition Setup Complete!"
