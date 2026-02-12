@@ -212,7 +212,7 @@ log_info "Kernel version: $KERNEL_VERSION"
 # STEP 1: VERIFY PREREQUISITES
 # ============================================================================
 
-log_section "Step 1: Verify ReSpeaker Hardware & ALSA Audio System (NEW)"
+log_section "Step 1: Verify ReSpeaker Hardware & ALSA Audio System"
 
 log_info "Verifying ReSpeaker 2-Mics HAT V2.0 is fully initialized..."
 echo ""
@@ -688,7 +688,73 @@ logger = logging.getLogger(__name__)
 # LED CONTROL (APA102 via SPI)
 # ============================================================================
 
-class ReSpeakerLEDs:
+# ============================================================================
+# COMMAND MAPPING (Intent + Slots → Actual Spoken Command)
+# ============================================================================
+
+# Mapping of (intent, slot_key, slot_value) -> actual spoken command
+COMMAND_MAP = {
+    # recording_control: uses recordingAction slot
+    ("recording_control", "recordingAction", "start"): "start recording",
+    ("recording_control", "recordingAction", "stop"): "stop recording",
+    ("recording_control", "recordingAction", "begin"): "begin recording",
+    
+    # emergency_action: NO SLOTS - these are literal phrases matched by Rhino
+    # Will be handled specially in get_spoken_command()
+    
+    # incident_capture: uses captureAction slot
+    ("incident_capture", "captureAction", "screenshot"): "screenshot",
+    ("incident_capture", "captureAction", "snapshot"): "snapshot",
+    ("incident_capture", "captureAction", "mark"): "mark incident",
+    ("incident_capture", "captureAction", "timestamp"): "timestamp",
+    ("incident_capture", "captureAction", "incident"): "incident",
+    
+    # user_confirmation: uses confirmAction slot
+    ("user_confirmation", "confirmAction", "confirm"): "confirm",
+    ("user_confirmation", "confirmAction", "cancel"): "cancel",
+}
+
+# Mapping for emergency_action intent (literal phrases, no slots)
+EMERGENCY_ACTION_MAP = {
+    "backup backup backup": "backup backup backup",
+    "alert": "alert",
+    "emergency backup": "emergency backup",
+}
+
+def get_spoken_command(intent, slots):
+    """
+    Reconstruct the actual spoken command from intent and slots.
+    
+    Special handling for emergency_action which has no slots - we map
+    the intent itself to a default command.
+    
+    Args:
+        intent: The detected intent (e.g., "recording_control")
+        slots: Dictionary of slots (e.g., {"recordingAction": "start"})
+    
+    Returns:
+        The reconstructed spoken command (e.g., "start recording")
+    """
+    # Special case: emergency_action has no slots
+    # Safe default - in production, all three emergency commands trigger same intent
+    if intent == "emergency_action":
+        # Since we can't distinguish between the three emergency phrases from slots,
+        # return a generic emergency command (or pick the first one)
+        # In practice, all three should trigger the same emergency behavior
+        return "emergency alert"
+    
+    if not slots:
+        return intent
+    
+    # Find a match for (intent, slot_key, slot_value)
+    # Try different slot key names that might be used
+    for slot_key, slot_value in slots.items():
+        key = (intent, slot_key, slot_value)
+        if key in COMMAND_MAP:
+            return COMMAND_MAP[key]
+    
+    # Fallback: return intent as command if no slot match found
+    return intent
     """Control ReSpeaker 2-Mics HAT APA102 RGB LEDs via SPI"""
     
     def __init__(self):
@@ -924,16 +990,63 @@ class PicoVoiceService:
             return False
 
     def handle_intent(self, intent, slots):
-        """Execute action based on intent"""
-        logger.info(f" >>> EXECUTING: {intent} {slots}")
+        """Execute action based on intent and slots"""
+        # Reconstruct the spoken command from intent + slots
+        spoken_command = get_spoken_command(intent, slots)
+        logger.info(f"[DETECTED] Intent: {intent} → Command: '{spoken_command}'")
+        logger.info(f"[SLOTS] {slots if slots else 'None'}")
         
-        # Add your custom logic here
-        if intent == "recording_control":
-            pass # Start/Stop recording logic
-        elif intent == "emergency_action":
-            pass # Trigger alerts
-        elif intent == "incident_capture":
-            pass # Take snapshot
+        # Send to Supabase backend with the actual spoken command
+        self.send_to_backend(intent, spoken_command, slots)
+        
+        # Add your custom logic here based on spoken command
+        if spoken_command in ["start recording", "stop recording"]:
+            logger.info("[ACTION] Recording control")
+        elif spoken_command in ["alert", "emergency backup"]:
+            logger.info("[ACTION] Emergency action triggered")
+        elif spoken_command in ["screenshot", "snapshot", "mark incident"]:
+            logger.info("[ACTION] Incident capture")
+
+    def send_to_backend(self, intent, spoken_command, slots):
+        """Send voice command to Supabase Edge Function"""
+        try:
+            import requests
+            
+            # Get Supabase Edge Function URL from environment
+            EDGE_FUNCTION_URL = os.getenv("SUPABASE_EDGE_FUNCTION_URL")
+            DEVICE_ID = os.getenv("EVVOS_DEVICE_ID", "EVVOS_0001")
+            
+            if not EDGE_FUNCTION_URL:
+                logger.debug("[BACKEND] SUPABASE_EDGE_FUNCTION_URL not set, skipping backend sync")
+                return
+            
+            payload = {
+                "intent": intent,
+                "command": spoken_command,  # The actual spoken command
+                "slots": slots or {},
+                "timestamp": datetime.now().isoformat(),
+                "device_id": DEVICE_ID,
+                "device_type": "raspberry_pi",
+                "confidence": 1.0
+            }
+            
+            logger.info(f"[BACKEND] Sending: intent='{intent}', command='{spoken_command}'")
+            response = requests.post(
+                EDGE_FUNCTION_URL,
+                json=payload,
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"[BACKEND] ✓ Success: {result.get('message', 'Command recorded')}")
+            else:
+                logger.warning(f"[BACKEND] ✗ Failed: {response.status_code} - {response.text}")
+        
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"[BACKEND] Network error: {e}")
+        except Exception as e:
+            logger.warning(f"[BACKEND] Error: {e}")
 
     def process_voice_input(self):
         self.running = True
