@@ -78,7 +78,7 @@ log_section() {
 }
 
 # ============================================================================
-# PREFLIGHT CHECKS (pyrhino)
+# PREFLIGHT CHECKS
 # ============================================================================
 
 log_section "Preflight System Checks"
@@ -212,7 +212,7 @@ log_info "Kernel version: $KERNEL_VERSION"
 # STEP 1: VERIFY PREREQUISITES
 # ============================================================================
 
-log_section "Step 1: Verify ReSpeaker Hardware & ALSA Audio System"
+log_section "Step 1: Verify ReSpeaker Hardware & ALSA Audio System (NEW)"
 
 log_info "Verifying ReSpeaker 2-Mics HAT V2.0 is fully initialized..."
 echo ""
@@ -912,8 +912,7 @@ class PicoVoiceService:
                 channels=CHANNELS,
                 format=AUDIO_FORMAT,
                 input=True,
-                frames_per_buffer=FRAME_LENGTH,
-                input_host_api=None
+                frames_per_buffer=FRAME_LENGTH
             )
             logger.info(f"Audio stream opened successfully from {dev_name}")
             return True
