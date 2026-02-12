@@ -146,22 +146,19 @@ class EVVOSWiFiProvisioner:
         return datetime.now(self.manila_tz)
 
     def _get_device_id(self) -> str:
-        """Get or create a unique device ID based on MAC address"""
+        """Get or create a unique device ID - use fixed EVVOS_0001 identifier"""
         try:
-            mac = subprocess.check_output(
-                "cat /sys/class/net/wlan0/address", shell=True, text=True
-            ).strip()
-            return mac.replace(":", "")
+            # Use fixed device identifier for EVVOS Voice Recognition System
+            return "EVVOS_0001"
         except Exception:
+            # Fallback to MAC address if needed
             try:
-                serial = subprocess.check_output(
-                    "cat /proc/device-tree/serial-number",
-                    shell=True,
-                    text=True,
+                mac = subprocess.check_output(
+                    "cat /sys/class/net/wlan0/address", shell=True, text=True
                 ).strip()
-                return serial
+                return mac.replace(":", "")
             except Exception:
-                return str(uuid.uuid4()).replace("-", "")[:16]
+                return "EVVOS_0001"
 
     def _generate_device_token(self) -> str:
         """Generate a unique token for this provisioning session"""
