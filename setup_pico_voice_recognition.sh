@@ -78,7 +78,7 @@ log_section() {
 }
 
 # ============================================================================
-# PREFLIGHT CHECKS (ALSA FIXED)
+# PREFLIGHT CHECKS (ALSA REMOVED)
 # ============================================================================
 
 log_section "Preflight System Checks"
@@ -558,52 +558,42 @@ fi
 
 echo ""
 
-log_section "Step 8: Configure User ALSA Settings"
+log_section "Step 8: Configure ALSA Error Suppression"
 
-log_info "Creating user ALSA configuration..."
+log_info "Checking ALSA audio device status..."
 
-# First, check the actual card number
-CARD_NUMBER=$(aplay -l 2>/dev/null | grep -i seeed | head -1 | grep -oP 'card \K[0-9]+' || echo "0")
-log_info "Using card number: $CARD_NUMBER"
+# Verify the audio device is working
+if aplay -l 2>&1 | grep -qi "seeed"; then
+    log_success "ReSpeaker audio device ready"
+else
+    log_warning "ReSpeaker may not be detected yet, but service will auto-detect"
+fi
 
-# Create a minimal .asoundrc that won't break ALSA
-# Use card number instead of card name to avoid parsing errors
-cat > /root/.asoundrc << ASOUNDRC_EOF
-# ReSpeaker 2-Mics HAT ALSA configuration (minimal)
-# Using card number $CARD_NUMBER instead of name to avoid ALSA parsing errors
+log_info "ALSA configuration..."
 
-defaults.ctl.card $CARD_NUMBER
-defaults.pcm.card $CARD_NUMBER
-
-pcm.!default {
-    type hw
-    card $CARD_NUMBER
-}
-
-ctl.!default {
-    type hw
-    card $CARD_NUMBER
-}
-ASOUNDRC_EOF
-
-chmod 644 /root/.asoundrc
-log_success "User ALSA configuration created at /root/.asoundrc (card number: $CARD_NUMBER)"
-
-# Also create a system-wide ALSA fallback config
-log_info "Creating system ALSA plugin configuration..."
+# Create a minimal ALSA config to avoid parsing errors
+# DO NOT override card names - let ALSA use defaults
 mkdir -p /etc/alsa/conf.d/
-cat > /etc/alsa/conf.d/99-respeaker-fallback.conf << 'ALSA_FALLBACK_EOF'
-# Minimal fallback config - lets ALSA use defaults
-# This prevents the "invalid argument" errors from complex configs
-ALSA_FALLBACK_EOF
-chmod 644 /etc/alsa/conf.d/99-respeaker-fallback.conf
-log_success "System ALSA fallback configuration created"
 
-# Suppress ALSA lib warnings without breaking functionality
-export ALSA_CARD=0
-export ALSA_FORCE_CHANNELS=2
+# Remove any problematic custom configs
+rm -f /root/.asoundrc
+log_success "Removed problematic .asoundrc (will use system ALSA defaults)"
 
-log_info "ALSA configuration optimized for ReSpeaker HAT"
+# Create a safe ALSA plugin config that doesn't override devices
+cat > /etc/alsa/conf.d/00-default-respeaker.conf << 'ALSA_SAFE_EOF'
+# Safe ALSA configuration for ReSpeaker
+# This file does NOT override device configurations
+# It only ensures ALSA defaults work correctly
+
+# Load standard ALSA config
+@include "/etc/alsa/conf.d.orig/default.conf"
+ALSA_SAFE_EOF
+
+chmod 644 /etc/alsa/conf.d/00-default-respeaker.conf
+log_success "Safe ALSA configuration created"
+
+log_info "Audio error suppression will be handled in the Python service"
+log_success "ALSA configuration complete - using system defaults"
 
 # ============================================================================
 # STEP 9: CREATE PICOVOICE SERVICE SCRIPT
@@ -1031,10 +1021,8 @@ SyslogFacility=user
 Environment="PATH=/opt/evvos/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/opt/evvos"
-# Minimal ALSA settings
-Environment="ALSA_CARD=0"
-# Suppress ALSA lib warnings (non-critical messages)
-Environment="LIBSNDFILE_PLUGIN_PATH=/usr/lib/arm-linux-gnueabihf/pulseaudio"
+# ALSA lib error suppression (note: actual suppression happens in Python code)
+Environment="ALSA_CARD_DEFAULTS=libasound.so.2"
 
 # Resource limits
 LimitNOFILE=65536
