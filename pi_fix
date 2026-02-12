@@ -1,7 +1,7 @@
 #!/bin/bash
 # The simplest fix - directly edit the file
 
-echo "Identation Error, stopping service..."
+echo "Stopping service..."
 sudo systemctl stop evvos-pico-voice
 
 echo "Backing up original file..."
