@@ -1195,6 +1195,10 @@ Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/opt/evvos"
 # ALSA lib error suppression (note: actual suppression happens in Python code)
 Environment="ALSA_CARD_DEFAULTS=libasound.so.2"
+# Supabase Edge Function Configuration
+Environment="SUPABASE_EDGE_FUNCTION_URL=https://zekbonbxwccgsfagrrph.supabase.co/functions/v1/insert-voice-command"
+Environment="EVVOS_DEVICE_ID=EVVOS_0001"
+Environment="SUPABASE_SERVICE_ROLE_KEY=YOUR_SERVICE_ROLE_KEY_HERE"
 
 # Resource limits
 LimitNOFILE=65536
