@@ -819,69 +819,110 @@ class ReSpeakerLEDs:
 # COMMAND MAPPING (Intent + Slots → Actual Spoken Command)
 # ============================================================================
 
-# Mapping of (intent, slot_key, slot_value) -> actual spoken command
-COMMAND_MAP = {
-    # recording_control: uses recordingAction slot
-    ("recording_control", "recordingAction", "start"): "start recording",
-    ("recording_control", "recordingAction", "stop"): "stop recording",
-    ("recording_control", "recordingAction", "begin"): "begin recording",
+# Mapping of voice commands to their intents and slots (from evvos.yml)
+COMMAND_TO_INTENT_MAP = {
+    # Recording Control
+    "start recording": {
+        "intent": "recording_control",
+        "slots": {"recordingAction": "start"}
+    },
+    "start": {
+        "intent": "recording_control",
+        "slots": {"recordingAction": "start"}
+    },
+    "begin recording": {
+        "intent": "recording_control",
+        "slots": {"recordingAction": "begin"}
+    },
+    "begin": {
+        "intent": "recording_control",
+        "slots": {"recordingAction": "begin"}
+    },
+    "stop recording": {
+        "intent": "recording_control",
+        "slots": {"recordingAction": "stop"}
+    },
+    "stop": {
+        "intent": "recording_control",
+        "slots": {"recordingAction": "stop"}
+    },
     
-    # emergency_action: NO SLOTS - these are literal phrases matched by Rhino
-    # Will be handled specially in get_spoken_command()
+    # Emergency Action (removed "alert" - too easy to trigger accidentally)
+    "emergency backup": {
+        "intent": "emergency_action",
+        "slots": {}
+    },
+    "backup backup backup": {
+        "intent": "emergency_action",
+        "slots": {}
+    },
     
-    # incident_capture: uses captureAction slot
-    ("incident_capture", "captureAction", "screenshot"): "screenshot",
-    ("incident_capture", "captureAction", "snapshot"): "snapshot",
-    ("incident_capture", "captureAction", "mark"): "mark incident",
-    ("incident_capture", "captureAction", "timestamp"): "timestamp",
-    ("incident_capture", "captureAction", "incident"): "incident",
+    # Incident Capture
+    "screenshot": {
+        "intent": "incident_capture",
+        "slots": {"captureAction": "screenshot"}
+    },
+    "snapshot": {
+        "intent": "incident_capture",
+        "slots": {"captureAction": "snapshot"}
+    },
     
-    # user_confirmation: uses confirmAction slot
-    ("user_confirmation", "confirmAction", "confirm"): "confirm",
-    ("user_confirmation", "confirmAction", "cancel"): "cancel",
+    # Incident Mark
+    "mark incident": {
+        "intent": "incident_mark",
+        "slots": {}
+    },
+    "mark": {
+        "intent": "incident_mark",
+        "slots": {}
+    },
+    "timestamp": {
+        "intent": "incident_mark",
+        "slots": {}
+    },
+    "incident": {
+        "intent": "incident_mark",
+        "slots": {}
+    },
+    
+    # User Confirmation
+    "confirm": {
+        "intent": "user_confirmation",
+        "slots": {"confirmAction": "confirm"}
+    },
+    "cancel": {
+        "intent": "user_confirmation",
+        "slots": {"confirmAction": "cancel"}
+    },
 }
 
-# Mapping for emergency_action intent (literal phrases, no slots)
-EMERGENCY_ACTION_MAP = {
-    "backup backup backup": "backup backup backup",
-    "alert": "alert",
-    "emergency backup": "emergency backup",
-}
-
-def get_spoken_command(intent, slots):
+def get_intent_from_command(command: str):
     """
-    Reconstruct the actual spoken command from intent and slots.
-    
-    Special handling for emergency_action which has no slots - we map
-    the intent itself to a default command.
+    Map a recognized voice command to its intent and slots.
     
     Args:
-        intent: The detected intent (e.g., "recording_control")
-        slots: Dictionary of slots (e.g., {"recordingAction": "start"})
-    
+        command: The recognized voice command string
+        
     Returns:
-        The reconstructed spoken command (e.g., "start recording")
+        Tuple of (intent, slots) from the detected command.
+        If command not found, returns ("unknown", {})
     """
-    # Special case: emergency_action has no slots
-    # Safe default - in production, all three emergency commands trigger same intent
-    if intent == "emergency_action":
-        # Since we can't distinguish between the three emergency phrases from slots,
-        # return a generic emergency command (or pick the first one)
-        # In practice, all three should trigger the same emergency behavior
-        return "emergency alert"
+    command_lower = command.lower().strip()
     
-    if not slots:
-        return intent
+    # Direct match
+    if command_lower in COMMAND_TO_INTENT_MAP:
+        mapping = COMMAND_TO_INTENT_MAP[command_lower]
+        return mapping.get("intent", "unknown"), mapping.get("slots", {})
     
-    # Find a match for (intent, slot_key, slot_value)
-    # Try different slot key names that might be used
-    for slot_key, slot_value in slots.items():
-        key = (intent, slot_key, slot_value)
-        if key in COMMAND_MAP:
-            return COMMAND_MAP[key]
+    # Fallback: try to match partial phrases
+    for key, value in COMMAND_TO_INTENT_MAP.items():
+        if key in command_lower or command_lower in key:
+            logger.debug(f"Partial match: '{command_lower}' matched to '{key}'")
+            return value.get("intent", "unknown"), value.get("slots", {})
     
-    # Fallback: return intent as command if no slot match found
-    return intent
+    # If no match found, log a warning and return generic intent
+    logger.warning(f"[MAPPING] No intent mapping found for command: '{command}'")
+    return "unknown", {}
 
 # ============================================================================
 # PICOVOICE RHINO SERVICE
@@ -1035,21 +1076,64 @@ class PicoVoiceService:
 
     def handle_intent(self, intent, slots):
         """Execute action based on intent and slots"""
-        # Reconstruct the spoken command from intent + slots
-        spoken_command = get_spoken_command(intent, slots)
-        logger.info(f"[DETECTED] Intent: {intent} → Command: '{spoken_command}'")
+        # Reconstruct the spoken command text from intent + slots for logging
+        # This reverses the mapping: given intent and slots, find what was likely spoken
+        spoken_command = self._reconstruct_command(intent, slots)
+        logger.info(f"[DETECTED] Intent: {intent} → Likely Command: '{spoken_command}'")
         logger.info(f"[SLOTS] {slots if slots else 'None'}")
         
-        # Send to Supabase backend with the actual spoken command
+        # Send to Supabase backend with the intent, reconstructed command, and slots
         self.send_to_backend(intent, spoken_command, slots)
         
-        # Add your custom logic here based on spoken command
-        if spoken_command in ["start recording", "stop recording"]:
-            logger.info("[ACTION] Recording control")
-        elif spoken_command in ["alert", "emergency backup"]:
+        # Add your custom logic here based on intent
+        if intent == "recording_control":
+            logger.info("[ACTION] Recording control detected")
+        elif intent == "emergency_action":
             logger.info("[ACTION] Emergency action triggered")
-        elif spoken_command in ["screenshot", "snapshot", "mark incident"]:
+        elif intent == "incident_capture":
             logger.info("[ACTION] Incident capture")
+        elif intent == "incident_mark":
+            logger.info("[ACTION] Incident marked")
+        elif intent == "user_confirmation":
+            logger.info("[ACTION] User confirmation received")
+    
+    def _reconstruct_command(self, intent, slots):
+        """
+        Reconstruct the probable spoken command from intent and slots.
+        
+        Since Rhino detects intent and slots but not the exact text spoken,
+        we reverse-lookup from the COMMAND_TO_INTENT_MAP to get a likely command.
+        
+        For example: intent="recording_control", slots={"recordingAction": "start"}
+        Returns: "start recording"
+        """
+        # Try to find a matching command in our map
+        for command, mapping in COMMAND_TO_INTENT_MAP.items():
+            if mapping.get("intent") == intent:
+                # Check if slots match
+                cmd_slots = mapping.get("slots", {})
+                if cmd_slots == slots:
+                    return command
+                # Partial match for intent (even if slots differ)
+                if not cmd_slots or not slots:
+                    return command
+        
+        # Fallback: return a generic command based on intent
+        if intent == "recording_control":
+            action = slots.get("recordingAction", "start")
+            return f"{action} recording"
+        elif intent == "emergency_action":
+            return "emergency backup"
+        elif intent == "incident_capture":
+            action = slots.get("captureAction", "screenshot")
+            return action
+        elif intent == "incident_mark":
+            return "mark incident"
+        elif intent == "user_confirmation":
+            action = slots.get("confirmAction", "confirm")
+            return action
+        else:
+            return intent
 
     def send_to_backend(self, intent, spoken_command, slots):
         """Send voice command to Supabase Edge Function"""
