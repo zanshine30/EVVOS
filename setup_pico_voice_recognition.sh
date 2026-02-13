@@ -98,7 +98,7 @@ log_info "Verifying ReSpeaker hardware setup completion..."
 echo ""
 
 # Check 1: Device Tree Overlay Installation
-log_info "Check 1: Device tree overlay installed..."
+log_info "Check 1: Device tree overlay installed... (New)"
 OVERLAY_FOUND=false
 if [ -f "/boot/firmware/overlays/respeaker-2mic-v2_0.dtbo" ]; then
     log_success "Found overlay at /boot/firmware/overlays/respeaker-2mic-v2_0.dtbo"
@@ -671,6 +671,7 @@ import json
 import logging
 import signal
 import struct
+import requests
 from datetime import datetime
 from pathlib import Path
 
@@ -937,6 +938,12 @@ class PicoVoiceService:
         self.leds = ReSpeakerLEDs()
         self.access_key = None
         
+        # Log environment configuration at startup
+        logger.info("[SERVICE] Environment Configuration:")
+        logger.info(f"  SUPABASE_EDGE_FUNCTION_URL: {os.getenv('SUPABASE_EDGE_FUNCTION_URL', 'NOT SET')}")
+        logger.info(f"  EVVOS_DEVICE_ID: {os.getenv('EVVOS_DEVICE_ID', 'NOT SET')}")
+        logger.info(f"  SUPABASE_SERVICE_ROLE_KEY: {'SET' if os.getenv('SUPABASE_SERVICE_ROLE_KEY') else 'NOT SET'}")
+        
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
     
@@ -1080,10 +1087,13 @@ class PicoVoiceService:
         # This reverses the mapping: given intent and slots, find what was likely spoken
         spoken_command = self._reconstruct_command(intent, slots)
         logger.info(f"[DETECTED] Intent: {intent} → Likely Command: '{spoken_command}'")
-        logger.info(f"[SLOTS] {slots if slots else 'None'}")
+        logger.info(f"[DETECTED] Slots: {slots}")
+        logger.info(f"[DETECTED] About to send to backend...")
         
         # Send to Supabase backend with the intent, reconstructed command, and slots
         self.send_to_backend(intent, spoken_command, slots)
+        
+        logger.info(f"[DETECTED] Backend call completed")
         
         # Add your custom logic here based on intent
         if intent == "recording_control":
@@ -1138,25 +1148,38 @@ class PicoVoiceService:
     def send_to_backend(self, intent, spoken_command, slots):
         """Send voice command to Supabase Edge Function"""
         try:
-            import requests
-            
             # Get Supabase Edge Function URL and auth key from environment
             EDGE_FUNCTION_URL = os.getenv("SUPABASE_EDGE_FUNCTION_URL")
             DEVICE_ID = os.getenv("EVVOS_DEVICE_ID", "EVVOS_0001")
             SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
             
             if not EDGE_FUNCTION_URL:
-                logger.debug("[BACKEND] SUPABASE_EDGE_FUNCTION_URL not set, skipping backend sync")
+                logger.error("[BACKEND] SUPABASE_EDGE_FUNCTION_URL not set - cannot send command!")
+                logger.error("[BACKEND] Please check systemd service environment variables")
                 return
             
             if not SERVICE_ROLE_KEY:
-                logger.warning("[BACKEND] SUPABASE_SERVICE_ROLE_KEY not set, cannot authenticate")
+                logger.error("[BACKEND] SUPABASE_SERVICE_ROLE_KEY not set - cannot authenticate!")
+                logger.error("[BACKEND] Please check systemd service environment variables")
                 return
+            
+            # Convert slots to dict if it's a pvrhino Slots object
+            slots_dict = {}
+            if slots:
+                if isinstance(slots, dict):
+                    slots_dict = slots
+                else:
+                    # Convert pvrhino Slots object to dict
+                    try:
+                        slots_dict = dict(slots)
+                    except:
+                        logger.warning(f"[BACKEND] Could not convert slots to dict: {type(slots)}")
+                        slots_dict = {}
             
             payload = {
                 "intent": intent,
                 "command": spoken_command,  # The actual spoken command
-                "slots": slots or {},
+                "slots": slots_dict,
                 "timestamp": datetime.now().isoformat(),
                 "device_id": DEVICE_ID,
                 "device_type": "raspberry_pi",
@@ -1169,24 +1192,41 @@ class PicoVoiceService:
                 "Content-Type": "application/json"
             }
             
-            logger.info(f"[BACKEND] Sending: intent='{intent}', command='{spoken_command}'")
-            response = requests.post(
-                EDGE_FUNCTION_URL,
-                json=payload,
-                headers=headers,
-                timeout=5
-            )
+            logger.info(f"[BACKEND] Sending to edge function:")
+            logger.info(f"  URL: {EDGE_FUNCTION_URL}")
+            logger.info(f"  intent: '{intent}'")
+            logger.info(f"  command: '{spoken_command}'")
+            logger.info(f"  device_id: '{DEVICE_ID}'")
+            logger.debug(f"  Full payload: {json.dumps(payload, default=str)}")
             
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f"[BACKEND] ✓ Success: {result.get('message', 'Command recorded')}")
-            else:
-                logger.warning(f"[BACKEND] ✗ Failed: {response.status_code} - {response.text}")
+            try:
+                response = requests.post(
+                    EDGE_FUNCTION_URL,
+                    json=payload,
+                    headers=headers,
+                    timeout=5
+                )
+                
+                logger.info(f"[BACKEND] Response status: {response.status_code}")
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    logger.info(f"[BACKEND] ✓ Success: {result.get('message', 'Command recorded')}")
+                    logger.debug(f"[BACKEND] Response: {result}")
+                else:
+                    logger.error(f"[BACKEND] ✗ Failed with status {response.status_code}")
+                    logger.error(f"[BACKEND] Response: {response.text}")
+            except requests.exceptions.Timeout:
+                logger.error(f"[BACKEND] Request timed out (5s)")
+            except requests.exceptions.ConnectionError as e:
+                logger.error(f"[BACKEND] Connection error: {e}")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"[BACKEND] Request error: {e}")
         
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"[BACKEND] Network error: {e}")
         except Exception as e:
-            logger.warning(f"[BACKEND] Error: {e}")
+            logger.error(f"[BACKEND] Unhandled error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
 
     def process_voice_input(self):
         self.running = True
