@@ -32,9 +32,8 @@
 # Intent Model (EVVOSVOICE.yml):
 # - recording_control: "start recording", "stop recording"
 # - emergency_action: "emergency backup", "backup backup backup"
-# - incident_capture: "mark incident", "snapshot", "screenshot"
+# - incident_capture: "mark incident", "timestamp", "incident", "snapshot", "screenshot"
 # - user_confirmation: "confirm", "cancel"
-# - incident_mark: "mark incident"
 #
 # Tested on: Raspberry Pi Zero 2 W, Bookworm 12, Kernel 6.12
 # Prerequisites: ReSpeaker HAT already configured (run setup_respeaker_enhanced.sh first)
@@ -867,23 +866,21 @@ COMMAND_TO_INTENT_MAP = {
         "intent": "incident_capture",
         "slots": {"captureAction": "snapshot"}
     },
-    
-    # Incident Mark
     "mark incident": {
-        "intent": "incident_mark",
-        "slots": {}
+        "intent": "incident_capture",
+        "slots": {"captureAction": "incident"}
     },
     "mark": {
-        "intent": "incident_mark",
-        "slots": {}
+        "intent": "incident_capture",
+        "slots": {"captureAction": "incident"}
     },
     "timestamp": {
-        "intent": "incident_mark",
-        "slots": {}
+        "intent": "incident_capture",
+        "slots": {"captureAction": "timestamp"}
     },
     "incident": {
-        "intent": "incident_mark",
-        "slots": {}
+        "intent": "incident_capture",
+        "slots": {"captureAction": "incident"}
     },
     
     # User Confirmation
@@ -1102,8 +1099,6 @@ class PicoVoiceService:
             logger.info("[ACTION] Emergency action triggered")
         elif intent == "incident_capture":
             logger.info("[ACTION] Incident capture")
-        elif intent == "incident_mark":
-            logger.info("[ACTION] Incident marked")
         elif intent == "user_confirmation":
             logger.info("[ACTION] User confirmation received")
     
@@ -1137,8 +1132,6 @@ class PicoVoiceService:
         elif intent == "incident_capture":
             action = slots.get("captureAction", "screenshot")
             return action
-        elif intent == "incident_mark":
-            return "mark incident"
         elif intent == "user_confirmation":
             action = slots.get("confirmAction", "confirm")
             return action
@@ -1417,9 +1410,6 @@ echo ""
 echo "  ${CYAN}user_confirmation${NC}:"
 echo "    • 'confirm'"
 echo "    • 'cancel'"
-echo ""
-echo "  ${CYAN}incident_mark${NC}:"
-echo "    • 'mark incident'"
 echo ""
 
 log_info "LED Status Indicators (ReSpeaker APA102):"
