@@ -31,7 +31,7 @@
 #
 # Intent Model (EVVOSVOICE.yml):
 # - recording_control: "start recording", "stop recording"
-# - emergency_action: "emergency backup", "alert"
+# - emergency_action: "emergency backup", "backup backup backup"
 # - incident_capture: "mark incident", "snapshot", "screenshot"
 # - user_confirmation: "confirm", "cancel"
 # - incident_mark: "mark incident"
@@ -98,7 +98,7 @@ log_info "Verifying ReSpeaker hardware setup completion..."
 echo ""
 
 # Check 1: Device Tree Overlay Installation
-log_info "Check 1: Device tree overlay installed... (New)"
+log_info "Check 1: Device tree overlay installed..."
 OVERLAY_FOUND=false
 if [ -f "/boot/firmware/overlays/respeaker-2mic-v2_0.dtbo" ]; then
     log_success "Found overlay at /boot/firmware/overlays/respeaker-2mic-v2_0.dtbo"
@@ -1268,7 +1268,18 @@ class PicoVoiceService:
     def cleanup(self):
         if self.audio_stream: self.audio_stream.close()
         if self.pa: self.pa.terminate()
-        if self.rhino: self.rhino.delete()
+        if self.rhino: self.rhino.delete()        curl -X POST "https://zekbonbxwccgsfagrrph.supabase.co/functions/v1/insert-voice-command" \
+          -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpla2JvbmJ4d2NjZ3NmYWdycnBoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2ODM5NDI5NSwiZXhwIjoyMDgzOTcwMjk1fQ.Ddpwys249qYzjlK-kNrZCzNhZ-7OX-RUUg74XnZxuOU" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "intent": "recording_control",
+            "command": "start recording",
+            "slots": {"action": "start"},
+            "timestamp": "2026-02-13T12:00:00Z",
+            "device_id": "EVVOS_0001",
+            "device_type": "test",
+            "confidence": 1.0
+          }'
         self.leds.cleanup()
 
 if __name__ == "__main__":
@@ -1406,8 +1417,8 @@ echo "    • 'start recording'"
 echo "    • 'stop recording'"
 echo ""
 echo "  ${CYAN}emergency_action${NC}:"
-echo "    • 'alert'"
 echo "    • 'emergency backup'"
+echo "    • 'backup backup backup'"
 echo ""
 echo "  ${CYAN}incident_capture${NC}:"
 echo "    • 'screenshot'"
