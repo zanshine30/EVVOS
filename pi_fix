@@ -1,2 +1,211 @@
-echo -n "0EqhAHGwuaxJ4IzbRILT6I/pILEt25JUEoU0s6kivGRcwG8QCHbNFg==" | sudo tee /opt/evvos/picovoice_access_key.txt
-echo "AccessKey Changed"
+#!/bin/bash
+# ============================================================================
+# EVVOS Voice Command Debug Script
+# Comprehensive test suite to identify TCP connection and handler issues
+# ============================================================================
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}     EVVOS Voice Command Troubleshooting Suite${NC}"
+echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+echo ""
+
+# ============================================================================
+# Get phone IP address
+# ============================================================================
+echo -e "${BLUE}Step 1: Detecting Phone IP Address${NC}"
+PHONE_IP=$(ip route show | grep default | awk '{print $3}')
+
+if [ -z "$PHONE_IP" ]; then
+    echo -e "${RED}✗ Could not detect gateway IP${NC}"
+    echo -e "${YELLOW}  Please enter phone IP manually:${NC}"
+    read -p "  Phone IP: " PHONE_IP
+fi
+
+echo -e "${GREEN}✓ Phone IP: $PHONE_IP${NC}"
+echo ""
+
+# ============================================================================
+# Test 1: Network Connectivity
+# ============================================================================
+echo -e "${BLUE}Test 1: Network Connectivity${NC}"
+if ping -c 1 -W 2 $PHONE_IP > /dev/null 2>&1; then
+    echo -e "${GREEN}✓ Phone is reachable via ping${NC}"
+else
+    echo -e "${RED}✗ Cannot ping phone${NC}"
+    echo -e "${YELLOW}  Check: Hotspot enabled? Pi connected to hotspot?${NC}"
+fi
+echo ""
+
+# ============================================================================
+# Test 2: TCP Port 3000 Accessibility
+# ============================================================================
+echo -e "${BLUE}Test 2: TCP Port 3000 Connection${NC}"
+if timeout 2 bash -c "cat < /dev/tcp/$PHONE_IP/3000" 2>/dev/null; then
+    echo -e "${GREEN}✓ Port 3000 is open and accepting connections${NC}"
+else
+    echo -e "${RED}✗ Port 3000 is not accessible${NC}"
+    echo -e "${YELLOW}  Check: Is the EVVOS app running and in foreground?${NC}"
+    echo -e "${YELLOW}  Check: Did VoiceCommandContext start the TCP server?${NC}"
+fi
+echo ""
+
+# ============================================================================
+# Test 3: Send Test Commands
+# ============================================================================
+echo -e "${BLUE}Test 3: Sending Test Voice Commands${NC}"
+echo -e "${CYAN}────────────────────────────────────────────────────────────${NC}"
+
+# Test Command 1: START_RECORDING
+echo -e "${YELLOW}Sending: START_RECORDING (recording_control)${NC}"
+TEST_CMD_1='{"id":"test_001","intent":"recording_control","command":"start recording","slots":{"recordingAction":"start"},"timestamp":'$(date +%s)'}'
+echo "$TEST_CMD_1" | nc -w 2 $PHONE_IP 3000 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ Command sent successfully${NC}"
+else
+    echo -e "${RED}✗ Failed to send command${NC}"
+fi
+echo ""
+sleep 1
+
+# Test Command 2: MARK_INCIDENT
+echo -e "${YELLOW}Sending: MARK_INCIDENT (incident_capture)${NC}"
+TEST_CMD_2='{"id":"test_002","intent":"incident_capture","command":"mark incident","slots":{"captureAction":"mark"},"timestamp":'$(date +%s)'}'
+echo "$TEST_CMD_2" | nc -w 2 $PHONE_IP 3000 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ Command sent successfully${NC}"
+else
+    echo -e "${RED}✗ Failed to send command${NC}"
+fi
+echo ""
+sleep 1
+
+# Test Command 3: EMERGENCY_BACKUP
+echo -e "${YELLOW}Sending: EMERGENCY_BACKUP (emergency_action)${NC}"
+TEST_CMD_3='{"id":"test_003","intent":"emergency_action","command":"emergency backup","slots":{},"timestamp":'$(date +%s)'}'
+echo "$TEST_CMD_3" | nc -w 2 $PHONE_IP 3000 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ Command sent successfully${NC}"
+else
+    echo -e "${RED}✗ Failed to send command${NC}"
+fi
+echo ""
+sleep 1
+
+# Test Command 4: STOP_RECORDING
+echo -e "${YELLOW}Sending: STOP_RECORDING (recording_control)${NC}"
+TEST_CMD_4='{"id":"test_004","intent":"recording_control","command":"stop recording","slots":{"recordingAction":"stop"},"timestamp":'$(date +%s)'}'
+echo "$TEST_CMD_4" | nc -w 2 $PHONE_IP 3000 2>/dev/null
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✓ Command sent successfully${NC}"
+else
+    echo -e "${RED}✗ Failed to send command${NC}"
+fi
+echo ""
+
+echo -e "${CYAN}────────────────────────────────────────────────────────────${NC}"
+echo ""
+
+# ============================================================================
+# Test 4: Check EVVOS Voice Service Status
+# ============================================================================
+echo -e "${BLUE}Test 4: EVVOS Voice Service Status${NC}"
+if systemctl is-active --quiet evvos-voice.service; then
+    echo -e "${GREEN}✓ evvos-voice.service is running${NC}"
+    
+    # Show recent logs
+    echo -e "${YELLOW}  Recent service logs (last 10 lines):${NC}"
+    journalctl -u evvos-voice.service -n 10 --no-pager | sed 's/^/    /'
+else
+    echo -e "${RED}✗ evvos-voice.service is not running${NC}"
+    echo -e "${YELLOW}  Start it with: sudo systemctl start evvos-voice.service${NC}"
+fi
+echo ""
+
+# ============================================================================
+# Test 5: Verify Audio Input
+# ============================================================================
+echo -e "${BLUE}Test 5: ReSpeaker Audio Status${NC}"
+if arecord -l | grep -q "seeed2micvoicec"; then
+    echo -e "${GREEN}✓ ReSpeaker 2-Mics HAT detected${NC}"
+else
+    echo -e "${RED}✗ ReSpeaker HAT not detected${NC}"
+    echo -e "${YELLOW}  Run: sudo bash setup_respeaker_enhanced.sh${NC}"
+fi
+echo ""
+
+# ============================================================================
+# Summary and Next Steps
+# ============================================================================
+echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}     Troubleshooting Guide${NC}"
+echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+echo ""
+echo -e "${YELLOW}📱 ON YOUR PHONE:${NC}"
+echo "   1. Open the EVVOS app"
+echo "   2. Enable React Native debugging (shake phone → Show Perf Monitor)"
+echo "   3. Watch the Metro console output"
+echo ""
+echo -e "${YELLOW}🔍 EXPECTED CONSOLE OUTPUT (when command works):${NC}"
+echo "   [TCP] 🔌 Client connected: {address}"
+echo "   [TCP] 📥 Received Command: {intent: 'recording_control', ...}"
+echo "   [TCP] 🔄 Mapping intent: recording_control with slots: {...}"
+echo "   [TCP] 🎯 Mapped to command: START_RECORDING"
+echo "   [TCP] 🔍 Looking for handler: START_RECORDING"
+echo "   [TCP] 📋 Available handlers: ['START_RECORDING', 'MARK_INCIDENT', ...]"
+echo "   [TCP] ✅ Handler found! Executing..."
+echo "   [HomeScreen] 🎙️ START_RECORDING triggered"
+echo ""
+echo -e "${RED}❌ IF YOU SEE THIS (command NOT working):${NC}"
+echo "   [TCP] 📥 Received Command: ..."
+echo "   [TCP] ❌ No handler for intent: START_RECORDING"
+echo "   [TCP] 📋 Available handlers: []"
+echo ""
+echo -e "${YELLOW}🔧 COMMON ISSUES & FIXES:${NC}"
+echo ""
+echo "   Issue #1: No handlers registered (handlers: [])"
+echo "   ────────────────────────────────────────────────────────"
+echo "   Cause: Screen hasn't mounted or useEffect hasn't run"
+echo "   Fix: Make sure you're on the correct screen (Home/Recording)"
+echo ""
+echo "   Issue #2: Wrong intent name mapping"
+echo "   ────────────────────────────────────────────────────────"
+echo "   Cause: Pi sends 'recording_control' but phone expects 'START_RECORDING'"
+echo "   Fix: Check mapIntentToCommand() function in VoiceCommandContext.jsx"
+echo "   Expected mappings:"
+echo "     - recording_control (action=start) → START_RECORDING"
+echo "     - recording_control (action=stop)  → STOP_RECORDING"
+echo "     - emergency_action                 → EMERGENCY_BACKUP"
+echo "     - incident_capture                 → MARK_INCIDENT"
+echo "     - user_confirmation (confirm)      → USER_CONFIRM"
+echo "     - user_confirmation (cancel)       → USER_CANCEL"
+echo ""
+echo "   Issue #3: Handler registration dependencies missing"
+echo "   ────────────────────────────────────────────────────────"
+echo "   Cause: useEffect dependencies don't include required functions"
+echo "   Fix: Check HomeScreen.js line 347-351 and RecordingScreen.js dependencies"
+echo ""
+echo "   Issue #4: TCP server not starting"
+echo "   ────────────────────────────────────────────────────────"
+echo "   Cause: VoiceCommandContext not wrapping the app properly"
+echo "   Fix: Verify App.js has <VoiceCommandProvider> at the root"
+echo ""
+echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
+echo ""
+echo -e "${GREEN}📊 Next Steps:${NC}"
+echo "   1. Check phone console for the logs above"
+echo "   2. If 'Available handlers: []', check screen mounting"
+echo "   3. If handlers exist but wrong intent, check mapIntentToCommand()"
+echo "   4. If no TCP logs, check VoiceCommandContext server startup"
+echo ""
+echo -e "${BLUE}📝 For detailed debugging:${NC}"
+echo "   - Phone logs: React Native Metro console"
+echo "   - Pi logs:    sudo journalctl -u evvos-voice.service -f"
+echo ""
+echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
