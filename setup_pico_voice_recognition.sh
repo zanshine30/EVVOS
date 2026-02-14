@@ -3,7 +3,6 @@
 # Optimized for: Raspberry Pi Zero 2 W with TLV320AIC3104 Audio Codec
 # Detects EVVOS voice commands with intent recognition
 # RGB LED feedback and journalctl logging
-# DIRECT HOTSPOT MODE - Commands sent directly to mobile app (NO Supabase!)
 #
 # ⚠️  IMPORTANT: RUN SETUP_RESPEAKER_ENHANCED.SH FIRST
 # ═══════════════════════════════════════════════════════════════════════════
@@ -28,12 +27,7 @@
 #   ✓ Custom EVVOSVOICE context model
 #   ✓ LED feedback (RGB APA102)
 #   ✓ Systemd service for auto-start on boot
-#   ✓ Direct hotspot communication to mobile app (NO Supabase!)
 # ═══════════════════════════════════════════════════════════════════════════
-#
-# Communication Architecture:
-# Raspberry Pi → HTTP POST → Mobile App (http://<mobile-ip>:9000/voice-command)
-# NO database polling, NO internet required, ultra-low latency!
 #
 # Intent Model (EVVOSVOICE.yml):
 # - recording_control: "start recording", "stop recording"
@@ -45,7 +39,6 @@
 # Prerequisites: ReSpeaker HAT already configured (run setup_respeaker_enhanced.sh first)
 #
 # Usage: sudo bash setup_pico_voice_recognition_respeaker.sh
-
 
 set -e  # Exit on error
 
@@ -663,14 +656,6 @@ cat > /usr/local/bin/evvos-pico-voice-service.py << 'PICO_SERVICE_EOF'
 EVVOS PicoVoice Rhino Intent Recognition Service
 Optimized for ReSpeaker 2-Mics Pi HAT V2.0 on Raspberry Pi Zero 2 W
 
-DIRECT HOTSPOT MODE - Commands sent directly to mobile app (NO Supabase!)
-
-Communication Flow:
-  Raspberry Pi → HTTP POST → Mobile App (via Hotspot)
-  
-  NO database polling, NO internet required!
-  Ultra-low latency voice command execution.
-
 LED INDICATORS:
 - Cyan:   Listening (Default)
 - Purple: Processing (Analyzing voice)
@@ -951,14 +936,10 @@ class PicoVoiceService:
         self.access_key = None
         
         # Log environment configuration at startup
-        logger.info("[SERVICE] ════════════════════════════════════════════════════════")
-        logger.info("[SERVICE] EVVOS PicoVoice Rhino - Direct Hotspot Mode")
-        logger.info("[SERVICE] ════════════════════════════════════════════════════════")
-        logger.info("[SERVICE] Communication: Direct to Mobile App (NO Supabase)")
-        logger.info(f"[SERVICE] Mobile App IP: {os.getenv('MOBILE_APP_IP', 'NOT SET')}")
-        logger.info(f"[SERVICE] Mobile App Port: {os.getenv('MOBILE_APP_PORT', '9000')}")
-        logger.info(f"[SERVICE] Device ID: {os.getenv('EVVOS_DEVICE_ID', 'pi-zero-2w')}")
-        logger.info("[SERVICE] ════════════════════════════════════════════════════════")
+        logger.info("[SERVICE] Environment Configuration:")
+        logger.info(f"  SUPABASE_EDGE_FUNCTION_URL: {os.getenv('SUPABASE_EDGE_FUNCTION_URL', 'NOT SET')}")
+        logger.info(f"  EVVOS_DEVICE_ID: {os.getenv('EVVOS_DEVICE_ID', 'NOT SET')}")
+        logger.info(f"  SUPABASE_SERVICE_ROLE_KEY: {'SET' if os.getenv('SUPABASE_SERVICE_ROLE_KEY') else 'NOT SET'}")
         
         signal.signal(signal.SIGINT, self.signal_handler)
         signal.signal(signal.SIGTERM, self.signal_handler)
@@ -1104,12 +1085,12 @@ class PicoVoiceService:
         spoken_command = self._reconstruct_command(intent, slots)
         logger.info(f"[DETECTED] Intent: {intent} → Likely Command: '{spoken_command}'")
         logger.info(f"[DETECTED] Slots: {slots}")
-        logger.info(f"[DETECTED] About to send to mobile app...")
+        logger.info(f"[DETECTED] About to send to backend...")
         
-        # Send to mobile app directly via hotspot (NO Supabase!)
-        self.send_to_mobile_app(intent, spoken_command, slots)
+        # Send to Supabase backend with the intent, reconstructed command, and slots
+        self.send_to_backend(intent, spoken_command, slots)
         
-        logger.info(f"[DETECTED] Mobile app command delivery completed")
+        logger.info(f"[DETECTED] Backend call completed")
         
         # Add your custom logic here based on intent
         if intent == "recording_control":
@@ -1157,100 +1138,56 @@ class PicoVoiceService:
         else:
             return intent
 
-    def send_to_mobile_app(self, intent, spoken_command, slots):
-        """Send voice command directly to mobile app via hotspot (NO Supabase!)"""
+    def send_to_backend(self, intent, spoken_command, slots):
+        """Send voice command to Mobile App via Raw TCP"""
         try:
-            # Get mobile app configuration from environment
-            MOBILE_APP_IP = os.getenv("MOBILE_APP_IP", "10.84.110.141")
-            MOBILE_APP_PORT = os.getenv("MOBILE_APP_PORT", "9000")
-            DEVICE_ID = os.getenv("EVVOS_DEVICE_ID", "pi-zero-2w")
+            # 1. Get Gateway IP (Android Hotspot Default is usually 192.168.43.1)
+            gateway_ip = self.get_gateway_ip() 
+            PORT = 3000
             
-            if not MOBILE_APP_IP:
-                logger.error("[HOTSPOT] MOBILE_APP_IP not set - cannot send command!")
-                logger.error("[HOTSPOT] Please check systemd service environment variables")
-                return False
-            
-            # Convert slots to dict if it's a pvrhino Slots object
-            slots_dict = {}
-            if slots:
-                if isinstance(slots, dict):
-                    slots_dict = slots
-                else:
-                    # Convert pvrhino Slots object to dict
-                    try:
-                        slots_dict = dict(slots)
-                    except:
-                        logger.warning(f"[HOTSPOT] Could not convert slots to dict: {type(slots)}")
-                        slots_dict = {}
-            
-            # Build endpoint URL
-            endpoint = f"http://{MOBILE_APP_IP}:{MOBILE_APP_PORT}/voice-command"
-            
+            # 2. Prepare Payload
             payload = {
+                "id": f"cmd_{int(time.time())}",
                 "intent": intent,
-                "command": spoken_command,  # The actual spoken command
-                "slots": slots_dict,
-                "timestamp": datetime.now().isoformat(),
-                "device_id": DEVICE_ID,
-                "confidence": 1.0
+                "command": spoken_command,
+                "slots": slots if slots else {},
+                "timestamp": time.time()
             }
             
-            logger.info(f"[HOTSPOT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"[HOTSPOT] 📤 Sending to mobile app via hotspot")
-            logger.info(f"[HOTSPOT] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"[HOTSPOT] Endpoint: {endpoint}")
-            logger.info(f"[HOTSPOT] Intent: '{intent}'")
-            logger.info(f"[HOTSPOT] Command: '{spoken_command}'")
-            logger.info(f"[HOTSPOT] Slots: {slots_dict}")
-            logger.info(f"[HOTSPOT] Device ID: '{DEVICE_ID}'")
-            logger.debug(f"[HOTSPOT] Full payload: {json.dumps(payload, default=str)}")
+            # 3. Create JSON String with Newline Delimiter
+            message = json.dumps(payload) + "\n"
             
-            try:
-                response = requests.post(
-                    endpoint,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=5  # 5 second timeout for local network
-                )
+            logger.info(f"[TCP] Connecting to {gateway_ip}:{PORT}...")
+
+            # 4. Open Socket, Send, Close
+            # using 'with' ensures the socket is closed automatically
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(2.0) # 2 second timeout
+                s.connect((gateway_ip, PORT))
+                s.sendall(message.encode('utf-8'))
                 
-                logger.info(f"[HOTSPOT] Response status: {response.status_code}")
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    logger.info(f"[HOTSPOT] ✅ Command delivered! ID: {result.get('command_id', 'N/A')}")
-                    logger.info(f"[HOTSPOT] Message: {result.get('message', 'Command processed')}")
-                    logger.debug(f"[HOTSPOT] Response: {result}")
-                    return True
-                elif response.status_code == 409:
-                    logger.warning(f"[HOTSPOT] ⚠️  Command already processed (duplicate)")
-                    return False
-                else:
-                    logger.error(f"[HOTSPOT] ❌ Mobile app rejected (HTTP {response.status_code})")
-                    logger.error(f"[HOTSPOT] Response: {response.text}")
-                    return False
-                    
-            except requests.exceptions.Timeout:
-                logger.error(f"[HOTSPOT] ❌ Request timed out (5s)")
-                logger.error(f"[HOTSPOT] Is mobile app running and on the same hotspot?")
-                return False
-            except requests.exceptions.ConnectionError as e:
-                logger.error(f"[HOTSPOT] ❌ Cannot connect to {MOBILE_APP_IP}:{MOBILE_APP_PORT}")
-                logger.error(f"[HOTSPOT] Connection error: {e}")
-                logger.error(f"[HOTSPOT] Troubleshooting:")
-                logger.error(f"[HOTSPOT]   1. Verify mobile app is running")
-                logger.error(f"[HOTSPOT]   2. Check mobile IP in Settings → Wi-Fi → Info")
-                logger.error(f"[HOTSPOT]   3. Ensure both devices on same hotspot network")
-                logger.error(f"[HOTSPOT]   4. Update MOBILE_APP_IP in systemd service")
-                return False
-            except requests.exceptions.RequestException as e:
-                logger.error(f"[HOTSPOT] ❌ Request error: {e}")
-                return False
-        
+            logger.info(f"[TCP] ✓ Sent: {intent}")
+            self.leds.pulse(LED_DETECTED, duration=0.2)
+            
+        except socket.timeout:
+             logger.error("[TCP] ✗ Connection Timed Out. Is the App running?")
+             self.leds.pulse(LED_ERROR, duration=0.5)
+        except ConnectionRefusedError:
+             logger.error("[TCP] ✗ Connection Refused. Check Port 3000.")
+             self.leds.pulse(LED_ERROR, duration=0.5)
         except Exception as e:
-            logger.error(f"[HOTSPOT] ❌ Unhandled error: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return False
+            logger.error(f"[TCP] Error: {e}")
+            self.leds.pulse(LED_ERROR, duration=0.5)
+
+    def get_gateway_ip(self):
+        """Helper to find the phone's IP"""
+        try:
+            cmd = "ip route show | grep default | awk '{print $3}'"
+            import os
+            ip = os.popen(cmd).read().strip()
+            return ip if ip else "192.168.43.1"
+        except:
+            return "192.168.43.1"
 
     def process_voice_input(self):
         self.running = True
@@ -1343,10 +1280,10 @@ Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/opt/evvos"
 # ALSA lib error suppression (note: actual suppression happens in Python code)
 Environment="ALSA_CARD_DEFAULTS=libasound.so.2"
-# Mobile App Direct Hotspot Configuration (NO Supabase!)
-Environment="MOBILE_APP_IP=10.84.110.141"
-Environment="MOBILE_APP_PORT=9000"
-Environment="EVVOS_DEVICE_ID=pi-zero-2w"
+# Supabase Edge Function Configuration
+Environment="SUPABASE_EDGE_FUNCTION_URL=https://zekbonbxwccgsfagrrph.supabase.co/functions/v1/insert-voice-command"
+Environment="EVVOS_DEVICE_ID=EVVOS_0001"
+Environment="SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inpla2JvbmJ4d2NjZ3NmYWdycnBoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2ODM5NDI5NSwiZXhwIjoyMDgzOTcwMjk1fQ.Ddpwys249qYzjlK-kNrZCzNhZ-7OX-RUUg74XnZxuOU"
 
 # Resource limits
 LimitNOFILE=65536
@@ -1495,14 +1432,6 @@ echo ""
 
 log_info "Troubleshooting:"
 echo ""
-echo "  Q: Commands not reaching mobile app?"
-echo "  A: Check hotspot connection:"
-echo "     1. Verify mobile IP: ${CYAN}Settings → Wi-Fi → Info${NC}"
-echo "     2. Update IP in: ${CYAN}/etc/systemd/system/evvos-pico-voice.service${NC}"
-echo "     3. Reload service: ${CYAN}sudo systemctl daemon-reload && sudo systemctl restart evvos-pico-voice${NC}"
-echo "     4. Check logs: ${CYAN}sudo journalctl -u evvos-pico-voice -f${NC}"
-echo "     5. Look for: [HOTSPOT] ❌ Cannot connect to..."
-echo ""
 echo "  Q: '[WARNING] [LED] SPI device not found' error?"
 echo "  A: LEDs require SPI to be enabled. To enable SPI:"
 echo "     sudo raspi-config → Interfacing Options → SPI → Enable"
@@ -1536,27 +1465,14 @@ echo "     Verify ReSpeaker is detected: aplay -l && arecord -l"
 echo ""
 
 log_info "Next Steps:"
-echo "  ${YELLOW}1. CRITICAL: Configure Mobile App IP Address${NC}"
-echo "     - Find mobile IP: Settings → Wi-Fi → Info"
-echo "     - Edit: ${CYAN}sudo nano /etc/systemd/system/evvos-pico-voice.service${NC}"
-echo "     - Update: Environment=\"MOBILE_APP_IP=YOUR_MOBILE_IP\""
-echo "     - Reload: ${CYAN}sudo systemctl daemon-reload && sudo systemctl restart evvos-pico-voice${NC}"
-echo ""
-echo "  2. Verify AccessKey is set: cat $ACCESS_KEY_FILE"
-echo "  3. Start mobile app on same hotspot network"
-echo "  4. Monitor logs: ${CYAN}sudo journalctl -u evvos-pico-voice -f${NC}"
-echo "  5. Speak a command: 'start recording' or 'snapshot'"
-echo "  6. Watch for:"
-echo "     - ${GREEN}[HOTSPOT] ✅ Command delivered!${NC} (Success)"
-echo "     - ${RED}[HOTSPOT] ❌ Cannot connect${NC} (Check IP/network)"
-echo "  7. Green LED flash confirms command detected"
-echo "  8. If no detection, adjust microphone gain and test"
+echo "  1. Verify AccessKey is set: cat $ACCESS_KEY_FILE"
+echo "  2. Monitor logs: ${CYAN}sudo journalctl -u evvos-pico-voice -f${NC}"
+echo "  3. Speak a command: 'start recording' or 'snapshot'"
+echo "  4. Watch for green LED flash and log message"
+echo "  5. If no detection, adjust microphone gain and test"
 echo ""
 
-log_info "PicoVoice Rhino + Direct Hotspot Advantages:"
-echo "  • ${GREEN}Zero latency${NC} - commands sent directly to mobile app"
-echo "  • ${GREEN}No internet required${NC} - works completely offline"
-echo "  • ${GREEN}No database polling${NC} - instant command execution"
+log_info "PicoVoice Rhino Advantages:"
 echo "  • Intent-based recognition (structured commands)"
 echo "  • Extracts intent and slots from speech"
 echo "  • Better accuracy for command patterns"
@@ -1566,9 +1482,8 @@ echo "  • Free tier with unlimited on-device use"
 echo ""
 
 log_info "Integration with EVVOS:"
-echo "  • Service sends commands directly to mobile app via hotspot"
-echo "  • NO Supabase - zero latency local communication"
-echo "  • Commands sent to http://<mobile-ip>:9000/voice-command"
+echo "  • Service logs intent detections to journalctl"
+echo "  • Can send intent data to Supabase Edge Function"
 echo "  • RGB LED feedback via ReSpeaker APA102 LEDs (if SPI enabled)"
 echo "  • Automatic startup on system boot"
 echo ""
@@ -1578,31 +1493,6 @@ echo "  • Rhino requires 16kHz mono audio input"
 echo "  • Service will suppress ALSA lib errors for cleaner logs"
 echo "  • If ReSpeaker not found, service falls back to first available input device"
 echo "  • .asoundrc file configured at /root/.asoundrc for daemon operation"
-echo ""
-
-log_info "Mobile App Hotspot Configuration:"
-echo ""
-echo "  ${CYAN}CRITICAL: Set your mobile device's IP address!${NC}"
-echo ""
-echo "  1. Find your mobile device IP address:"
-echo "     ${CYAN}Settings → Wi-Fi → Info → IP Address${NC}"
-echo ""
-echo "  2. Update the systemd service:"
-echo "     ${CYAN}sudo nano /etc/systemd/system/evvos-pico-voice.service${NC}"
-echo ""
-echo "  3. Change this line:"
-echo "     ${YELLOW}Environment=\"MOBILE_APP_IP=10.84.110.141\"${NC}"
-echo "     To your mobile device's IP address"
-echo ""
-echo "  4. Reload and restart:"
-echo "     ${CYAN}sudo systemctl daemon-reload${NC}"
-echo "     ${CYAN}sudo systemctl restart evvos-pico-voice${NC}"
-echo ""
-echo "  5. Verify connection in logs:"
-echo "     ${CYAN}sudo journalctl -u evvos-pico-voice -f${NC}"
-echo "     Look for: [HOTSPOT] ✅ Command delivered!"
-echo ""
-echo "  ${YELLOW}NOTE: Both Pi and mobile must be on the same hotspot network!${NC}"
 echo ""
 
 log_info "Setup Dependency Summary:"
@@ -1646,32 +1536,6 @@ echo ""
 
 log_success "PicoVoice Rhino Service ready to use!"
 echo ""
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}   ⚠️  IMPORTANT: Configure Mobile App IP Address!${NC}"
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-echo "  Quick Start:"
-echo ""
-echo "  1. Find your mobile IP:"
-echo "     ${CYAN}Settings → Wi-Fi → Tap network → IP Address${NC}"
-echo ""
-echo "  2. Edit service config:"
-echo "     ${CYAN}sudo nano /etc/systemd/system/evvos-pico-voice.service${NC}"
-echo ""
-echo "  3. Update this line with your mobile IP:"
-echo "     ${YELLOW}Environment=\"MOBILE_APP_IP=10.84.110.141\"${NC}"
-echo ""
-echo "  4. Apply changes:"
-echo "     ${CYAN}sudo systemctl daemon-reload${NC}"
-echo "     ${CYAN}sudo systemctl restart evvos-pico-voice${NC}"
-echo ""
-echo "  5. Test connection:"
-echo "     ${CYAN}sudo journalctl -u evvos-pico-voice -f${NC}"
-echo "     Speak: 'start recording'"
-echo "     Look for: ${GREEN}[HOTSPOT] ✅ Command delivered!${NC}"
-echo ""
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-log_info "Start monitoring with:"
+log_info "Start testing with:"
 echo "  ${CYAN}sudo journalctl -u evvos-pico-voice -f${NC}"
 echo ""
