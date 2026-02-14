@@ -671,6 +671,7 @@ import logging
 import signal
 import struct
 import requests
+import socket
 from datetime import datetime
 from pathlib import Path
 
