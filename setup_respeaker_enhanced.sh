@@ -401,6 +401,94 @@ log_info "Saving ALSA configuration for persistence..."
 alsactl store
 log_success "ALSA settings saved to /var/lib/alsa/asound.state"
 
+# ============================================================================
+# STEP 7b: CONFIGURE SHARED AUDIO ACCESS (dmix/dsnoop)
+# ============================================================================
+
+log_section "Step 7b: Configure Shared Audio Access"
+
+log_info "Creating ALSA shared audio configuration (dmix/dsnoop)..."
+log_info "This allows multiple applications to use the microphone simultaneously"
+echo ""
+
+# Create /etc/asound.conf for system-wide shared audio
+cat > /etc/asound.conf << 'ASOUND_CONF'
+# ReSpeaker 2-Mics HAT V2.0 - Shared Audio Configuration
+# Allows multiple applications (voice recognition + recording) to use audio simultaneously
+# Uses dsnoop for shared microphone capture and dmix for shared playback
+
+# Default device uses shared capture and playback
+pcm.!default {
+    type asym
+    playback.pcm "dmixer"
+    capture.pcm "dsnooper"
+}
+
+# Shared capture device (dsnoop)
+# Multiple applications can record from microphone simultaneously
+pcm.dsnooper {
+    type dsnoop
+    ipc_key 2048
+    ipc_perm 0666
+    slave {
+        pcm "hw:seeed2micvoicec"
+        channels 2
+        rate 48000
+        period_size 1024
+        buffer_size 8192
+        format S16_LE
+    }
+    bindings {
+        0 0
+        1 1
+    }
+}
+
+# Shared playback device (dmix)
+# Multiple applications can play audio simultaneously
+pcm.dmixer {
+    type dmix
+    ipc_key 1024
+    ipc_perm 0666
+    slave {
+        pcm "hw:seeed2micvoicec"
+        channels 2
+        rate 48000
+        period_size 1024
+        buffer_size 8192
+        format S16_LE
+    }
+    bindings {
+        0 0
+        1 1
+    }
+}
+
+# Control device
+ctl.!default {
+    type hw
+    card seeed2micvoicec
+}
+ASOUND_CONF
+
+log_success "Created /etc/asound.conf with shared audio configuration"
+echo ""
+
+log_info "ALSA Configuration Details:"
+echo "  • Default capture device: dsnooper (shared microphone)"
+echo "  • Default playback device: dmixer (shared speaker)"
+echo "  • Multiple apps can now record simultaneously"
+echo "  • Sample rate: 48kHz (ReSpeaker native)"
+echo "  • Format: S16_LE (16-bit PCM)"
+echo "  • Channels: 2 (stereo)"
+echo ""
+
+log_warning "Important: Use 'default' or 'dsnooper' device in your applications"
+echo "  • For recording: arecord -D dsnooper ..."
+echo "  • For playback: aplay -D dmixer ..."
+echo "  • Or just use 'default' for both (recommended)"
+echo ""
+
 # Create systemd service to restore ALSA on boot
 if [ ! -f /etc/systemd/system/alsa-restore.service ]; then
     log_info "Creating ALSA restore systemd service..."
@@ -496,8 +584,8 @@ fi
 
 # Test recording
 if command -v arecord &> /dev/null; then
-    log_info "Recording 3 seconds of audio for testing..."
-    if timeout 3 arecord -f S16_LE -r 16000 -c 2 /tmp/test_record.wav 2>/dev/null; then
+    log_info "Recording 3 seconds of audio for testing (using shared device)..."
+    if timeout 3 arecord -D dsnooper -f S16_LE -r 48000 -c 2 /tmp/test_record.wav 2>/dev/null; then
         FILE_SIZE=$(stat -f%z /tmp/test_record.wav 2>/dev/null || stat -c%s /tmp/test_record.wav)
         if [ "$FILE_SIZE" -gt 1000 ]; then
             log_success "Recording successful ($FILE_SIZE bytes)"
@@ -544,8 +632,11 @@ echo ""
 echo "  # Interactive mixer adjustment"
 echo "  sudo alsamixer -c seeed2micvoicec"
 echo ""
-echo "  # Test microphone recording (3 seconds)"
-echo "  arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav"
+echo "  # Test microphone recording (3 seconds) - using shared device"
+echo "  arecord -D dsnooper -f S16_LE -r 48000 -c 2 -d 3 /tmp/test.wav && aplay /tmp/test.wav"
+echo ""
+echo "  # Or use default device (will auto-use dsnooper)"
+echo "  arecord -f S16_LE -r 48000 -c 2 -d 3 /tmp/test.wav && aplay /tmp/test.wav"
 echo ""
 echo "  # View logs"
 echo "  journalctl -u evvos-voice -f  # (if using voice service)"
