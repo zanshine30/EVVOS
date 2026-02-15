@@ -263,6 +263,8 @@ def report_ip_to_supabase():
             print(f"[SUPABASE] ⚠ IP report failed: HTTP {resp.status_code} — {resp.text[:200]}")
     except Exception as e:
         print(f"[SUPABASE] Error reporting IP to Supabase: {e}")
+
+def setup_camera():
     """Initialize Pi Camera"""
     global camera
     try:
