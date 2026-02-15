@@ -1,5 +1,7 @@
 #!/bin/bash
-# Diagnostic script to identify why dsnoop is hanging
+# Simplified shared audio approach using minimal dsnoop config
+
+set -e
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -13,152 +15,150 @@ log_error() { echo -e "${RED}✗${NC} $1"; }
 
 echo ""
 echo "════════════════════════════════════════════════════"
-echo "  ALSA dsnoop Diagnostics"
+echo "  Simplified Shared Audio Configuration"
 echo "════════════════════════════════════════════════════"
 echo ""
 
 if [ "$EUID" -ne 0 ]; then 
-    log_error "Run as root: sudo bash diagnose_dsnoop.sh"
+    log_error "Run as root"
     exit 1
 fi
 
-# Stop all services
+# Stop everything
 log_info "Stopping services..."
 systemctl stop evvos-picam-tcp 2>/dev/null || true
 systemctl stop evvos-pico-voice 2>/dev/null || true
 pkill -9 arecord 2>/dev/null || true
 pkill -9 python3 2>/dev/null || true
 sleep 2
-log_success "Services stopped"
+
+# Clear IPC
+ipcrm -M 2048 2>/dev/null || true
+ipcrm -M 1024 2>/dev/null || true
+
+log_success "Stopped everything"
 echo ""
 
-# Check hardware device
-log_info "Test 1: Direct hardware access (hw:seeed2micvoicec)"
-if timeout 2 arecord -D hw:seeed2micvoicec -f S16_LE -r 48000 -c 2 /tmp/test_hw.wav 2>&1 | grep -q "Recording"; then
-    SIZE=$(stat -c%s /tmp/test_hw.wav 2>/dev/null || echo "0")
-    log_success "Hardware access works: ${SIZE} bytes"
+# Create MINIMAL dsnoop config
+log_info "Creating minimal ALSA configuration..."
+
+cat > /etc/asound.conf << 'EOF'
+# Minimal dsnoop configuration for ReSpeaker
+pcm.dsnooper {
+    type dsnoop
+    ipc_key 2048
+    slave {
+        pcm "hw:0,0"
+        rate 48000
+        channels 2
+    }
+}
+
+pcm.!default {
+    type asym
+    playback.pcm "hw:0,0"
+    capture.pcm "dsnooper"
+}
+EOF
+
+log_success "Created minimal config"
+echo ""
+
+# Test hardware first
+log_info "Test 1: Direct hardware"
+if timeout 2 arecord -D hw:0,0 -f S16_LE -r 48000 -c 2 /tmp/test1.wav 2>&1; then
+    SIZE=$(stat -c%s /tmp/test1.wav 2>/dev/null || echo "0")
+    log_success "Hardware works: ${SIZE} bytes"
 else
-    log_error "Hardware access FAILED"
-    arecord -l | grep seeed
+    log_error "Hardware test failed"
     exit 1
 fi
-echo ""
 
-# Check plughw
-log_info "Test 2: Plug layer (plughw:seeed2micvoicec)"
-if timeout 2 arecord -D plughw:seeed2micvoicec -f S16_LE -r 48000 -c 2 /tmp/test_plughw.wav 2>&1 | grep -q "Recording"; then
-    SIZE=$(stat -c%s /tmp/test_plughw.wav 2>/dev/null || echo "0")
-    log_success "Plughw works: ${SIZE} bytes"
+# Test dsnooper
+log_info "Test 2: dsnooper device"
+echo "Attempting 2 second recording..."
+if timeout 3 arecord -D dsnooper -f S16_LE -r 48000 -c 2 /tmp/test2.wav 2>&1; then
+    SIZE=$(stat -c%s /tmp/test2.wav 2>/dev/null || echo "0")
+    if [ "$SIZE" -gt 50000 ]; then
+        log_success "✓ dsnooper works: ${SIZE} bytes"
+        DSNOOPER_WORKS=true
+    else
+        log_error "dsnooper created tiny file: ${SIZE} bytes"
+        DSNOOPER_WORKS=false
+    fi
 else
-    log_error "Plughw FAILED"
+    log_error "dsnooper test failed or hung"
+    DSNOOPER_WORKS=false
 fi
+
 echo ""
 
-# Check if dsnooper exists
-log_info "Test 3: Check if dsnooper device exists"
-if arecord -L | grep -q "dsnooper"; then
-    log_success "dsnooper is in device list"
-    arecord -L | grep -A 5 dsnooper
-else
-    log_error "dsnooper NOT in device list"
+if [ "$DSNOOPER_WORKS" = true ]; then
+    log_success "Shared audio configuration successful!"
     echo ""
-    log_info "Available ALSA devices:"
-    arecord -L | grep -E "^[a-z]" | head -10
-    exit 1
-fi
-echo ""
-
-# Check ALSA config
-log_info "Test 4: Check /etc/asound.conf"
-if [ -f /etc/asound.conf ]; then
-    log_success "/etc/asound.conf exists"
-    echo ""
-    echo "Content preview:"
-    grep -E "pcm.dsnooper|ipc_key|slave" /etc/asound.conf | head -10
-else
-    log_error "/etc/asound.conf missing"
-    exit 1
-fi
-echo ""
-
-# Check IPC
-log_info "Test 5: Check shared memory segments"
-echo "Current IPC shared memory:"
-ipcs -m
-echo ""
-
-# Try to open dsnooper
-log_info "Test 6: Attempt to open dsnooper device"
-echo "This will try to record for 2 seconds..."
-echo ""
-
-# Start arecord in background with output
-arecord -D dsnooper -f S16_LE -r 48000 -c 2 -d 2 /tmp/test_dsnooper_diag.wav 2>&1 &
-ARECORD_PID=$!
-
-# Monitor for 3 seconds
-for i in {1..6}; do
-    sleep 0.5
-    if ! ps -p $ARECORD_PID > /dev/null; then
-        log_success "arecord completed normally"
-        SIZE=$(stat -c%s /tmp/test_dsnooper_diag.wav 2>/dev/null || echo "0")
-        echo "File size: ${SIZE} bytes"
-        if [ "$SIZE" -gt 50000 ]; then
-            log_success "✓✓✓ DSNOOPER WORKS!"
-        else
-            log_error "File too small"
-        fi
-        break
+    
+    # Update camera service
+    CAMERA_SCRIPT="/usr/local/bin/evvos-picam-tcp.py"
+    if [ -f "$CAMERA_SCRIPT" ]; then
+        cp "$CAMERA_SCRIPT" "${CAMERA_SCRIPT}.backup.$(date +%s)"
+        sed -i 's/"-D", "plughw:seeed2micvoicec"/"-D", "dsnooper"/g' "$CAMERA_SCRIPT"
+        sed -i 's/"-D", "hw:seeed2micvoicec"/"-D", "dsnooper"/g' "$CAMERA_SCRIPT"
+        log_success "Camera script updated"
     fi
     
-    if [ $i -eq 6 ]; then
-        log_error "arecord hung - killing it"
-        kill -9 $ARECORD_PID 2>/dev/null
-        
-        echo ""
-        log_info "Checking what arecord was doing:"
-        echo "Process info before kill:"
-        ps aux | grep arecord | grep -v grep || echo "Process already dead"
-        
-        echo ""
-        log_info "Checking kernel logs for ALSA errors:"
-        dmesg | tail -20 | grep -i "alsa\|sound\|audio" || echo "No recent ALSA errors"
+    # Start services
+    systemctl start evvos-picam-tcp
+    systemctl start evvos-pico-voice 2>/dev/null || true
+    
+    log_success "Services started"
+    echo ""
+    log_info "Test from your app now!"
+    
+else
+    log_error "═══════════════════════════════════════════════════"
+    log_error "  dsnoop DOES NOT WORK on this system"
+    log_error "═══════════════════════════════════════════════════"
+    echo ""
+    echo "This can happen because:"
+    echo "  • ALSA version too old (pre-1.0.9)"
+    echo "  • ReSpeaker driver doesn't support dsnoop"
+    echo "  • Kernel configuration doesn't allow shared access"
+    echo ""
+    log_info "SOLUTION: Use Plan B (pause voice service)"
+    echo ""
+    echo "Run this instead:"
+    echo "  sudo bash plan_b_pause_voice_service.sh"
+    echo ""
+    echo "This will:"
+    echo "  ✓ Guarantee audio recording works"
+    echo "  ✓ Pause voice service only during recording"
+    echo "  ✓ Resume voice after recording stops"
+    echo "  ✓ 100% reliable (no ALSA complexity)"
+    echo ""
+    
+    # Restore simple config
+    cat > /etc/asound.conf << 'EOF'
+# Simple direct hardware access (no sharing)
+pcm.!default {
+    type hw
+    card seeed2micvoicec
+}
+
+ctl.!default {
+    type hw
+    card seeed2micvoicec
+}
+EOF
+    
+    # Restore camera script
+    CAMERA_SCRIPT="/usr/local/bin/evvos-picam-tcp.py"
+    if [ -f "$CAMERA_SCRIPT" ]; then
+        sed -i 's/"-D", "dsnooper"/"-D", "plughw:seeed2micvoicec"/g' "$CAMERA_SCRIPT"
     fi
-done
+    
+    log_info "Restored simple configuration"
+    echo ""
+    log_info "Ready for Plan B installation"
+fi
 
-echo ""
-
-# Check strace
-log_info "Test 7: Trace system calls (detailed)"
-echo "Running arecord with strace for 2 seconds..."
-timeout 2 strace -e trace=open,openat,read,write,ioctl arecord -D dsnooper -f S16_LE -r 48000 -c 2 /tmp/test_strace.wav 2>&1 | tail -30
-echo ""
-
-# Summary
-echo ""
-echo "════════════════════════════════════════════════════"
-echo "  Diagnostic Summary"
-echo "════════════════════════════════════════════════════"
-echo ""
-
-echo "Hardware device (hw:seeed2micvoicec):"
-ls -lh /tmp/test_hw.wav 2>/dev/null || echo "  FAILED"
-
-echo ""
-echo "Plugin device (plughw:seeed2micvoicec):"
-ls -lh /tmp/test_plughw.wav 2>/dev/null || echo "  FAILED"
-
-echo ""
-echo "Shared device (dsnooper):"
-ls -lh /tmp/test_dsnooper_diag.wav 2>/dev/null || echo "  FAILED"
-
-echo ""
-echo "If dsnooper hangs, this indicates:"
-echo "  1. ALSA dsnoop plugin may not be installed"
-echo "  2. Configuration syntax error in /etc/asound.conf"
-echo "  3. Kernel driver incompatibility with dsnoop"
-echo "  4. ReSpeaker hardware doesn't support dsnoop"
-echo ""
-
-log_info "Check detailed output above for specific errors"
 echo ""
