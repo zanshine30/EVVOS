@@ -1,1 +1,1 @@
-echo "0EqhAHGwuaxJ4IzbRILT6I/pILEt25JUEoU0s6kivGRcwG8QCHbNFg==" | sudo tee /opt/evvos/picovoice_access_key.txt
+echo "0EqhAHGwuaxJ4IzbRILT6I/pILEt25JUEoU0s6kivGRcwG8QCHbNFg==" | sudo tee /opt/evvos-pico-voice/picovoice_access_key.txt
