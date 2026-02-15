@@ -34,15 +34,12 @@ log_success "Services stopped"
 echo ""
 
 # Find the voice service Python script
-VOICE_SCRIPT=""
-if [ -f "/opt/evvos-pico-voice/evvos_pico_voice.py" ]; then
-    VOICE_SCRIPT="/opt/evvos-pico-voice/evvos_pico_voice.py"
-elif [ -f "/opt/evvos/evvos_pico_voice.py" ]; then
-    VOICE_SCRIPT="/opt/evvos/evvos_pico_voice.py"
-else
-    log_error "Voice service script not found"
+VOICE_SCRIPT="/usr/local/bin/evvos-pico-voice-service.py"
+
+if [ ! -f "$VOICE_SCRIPT" ]; then
+    log_error "Voice service script not found at $VOICE_SCRIPT"
     log_info "Looking in common locations..."
-    find /opt -name "*pico*voice*.py" 2>/dev/null | head -5
+    find /usr/local/bin /opt -name "*pico*voice*.py" 2>/dev/null | head -5
     exit 1
 fi
 
