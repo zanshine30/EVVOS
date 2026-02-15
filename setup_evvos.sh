@@ -554,12 +554,12 @@ network={{
 
     def _get_wlan0_ip(self) -> Optional[str]:
         """
-        Return the current wlan0 IPv4 address, or None if not yet assigned.
-        Skips the hotspot address (192.168.50.1) so we only return the real
-        network IP assigned by the user's router / mobile hotspot.
-        This value is written to device_credentials.ip_address in Supabase so
-        the mobile app (RecordingScreen) can open the TCP socket to the Pi
-        without any hardcoded address.
+        Return the current wlan0 IPv4 address assigned by the user's router,
+        or None if not yet available. Skips 192.168.50.1 (hotspot address).
+
+        Written to device_credentials.ip_address in Supabase so the mobile
+        app (RecordingScreen) can open the Pi Camera TCP socket without any
+        hardcoded address.
         """
         try:
             result = subprocess.run(
@@ -568,13 +568,63 @@ network={{
             )
             for line in result.stdout.split("\n"):
                 if "inet " in line and "192.168.50.1" not in line:
-                    # Line looks like: "    inet 192.168.1.42/24 brd ..."
                     ip = line.strip().split()[1].split("/")[0]
                     logger.debug(f"[IP] Detected wlan0 IP: {ip}")
                     return ip
         except Exception as e:
             logger.warning(f"[IP] Could not detect wlan0 IP: {e}")
         return None
+
+    async def _patch_ip_address_direct(self, user_id: str) -> bool:
+        """
+        Directly PATCH device_credentials.ip_address via the Supabase REST API.
+
+        The other Edge Functions (set-device-connected, update-device-heartbeat)
+        were written before ip_address existed and silently ignore that field.
+        This method writes ip_address independently using the same direct REST
+        approach used by _delete_old_credentials(), bypassing Edge Functions
+        entirely.
+
+        Called:
+          - After _report_to_supabase() on initial pairing
+          - After _update_device_status_connected() on every reboot
+          - Once per heartbeat cycle to keep the IP current
+        """
+        try:
+            ip = self._get_wlan0_ip()
+            if not ip:
+                logger.warning("[IP_PATCH] wlan0 IP not available — skipping")
+                return False
+
+            url = f"{SUPABASE_URL}/rest/v1/device_credentials"
+            params = {
+                "user_id":   f"eq.{user_id}",
+                "device_id": f"eq.{self.device_id}",
+            }
+            headers = {
+                "apikey":        SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {SUPABASE_ANON_KEY}",
+                "Content-Type":  "application/json",
+                "Prefer":        "return=minimal",
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.patch(
+                    url, params=params,
+                    json={"ip_address": ip},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status in (200, 204):
+                        logger.info(f"[IP_PATCH] ✓ ip_address updated to {ip}")
+                        return True
+                    else:
+                        body = await resp.text()
+                        logger.warning(f"[IP_PATCH] PATCH failed: HTTP {resp.status} — {body[:200]}")
+                        return False
+        except Exception as e:
+            logger.warning(f"[IP_PATCH] Exception: {e}")
+            return False
 
     async def _check_internet(self) -> bool:
         """Check if device has internet connectivity"""
@@ -646,14 +696,14 @@ network={{
             # 2. Encrypt the password
             encrypted_password = self._encrypt_password(password)
             
-            # Detect current wlan0 IP so the mobile app can connect to the
-            # Pi Camera TCP service without any hardcoded address.
+            # Detect the Pi's current network IP so the mobile app can connect
+            # to the Pi Camera TCP service without any hardcoded address.
             current_ip = self._get_wlan0_ip()
             if current_ip:
                 logger.info(f"[REGISTER]   - ip_address: {current_ip}")
             else:
-                logger.warning("[REGISTER]   - ip_address: not yet available (will be updated on heartbeat)")
-            
+                logger.warning("[REGISTER]   - ip_address: not yet available (will be patched on heartbeat)")
+
             payload = {
                 "device_id": self.device_id,
                 "user_id": user_id,
@@ -733,7 +783,6 @@ network={{
             payload = {
                 "device_id": self.device_id,
                 "user_id": user_id,
-                "ip_address": self._get_wlan0_ip(),
             }
             
             async with aiohttp.ClientSession() as session:
@@ -850,10 +899,6 @@ network={{
                 "device_id": self.device_id,
                 "user_id": user_id,
                 "last_seen": self._get_manila_time().isoformat(),
-                # Refresh IP on every heartbeat — the router may reassign it
-                # after a DHCP lease expires, so this keeps device_credentials
-                # in sync and the mobile app can always find the Pi.
-                "ip_address": self._get_wlan0_ip(),
             }
             
             async with aiohttp.ClientSession() as session:
@@ -1721,6 +1766,11 @@ cache-size=1000
                 if await self._report_to_supabase(ssid, password, user_id=user_id):
                     logger.info("✓ Credentials reported to Supabase")
                     
+                    # Write ip_address directly — the Edge Function only recently
+                    # gained ip_address support; this direct PATCH guarantees the
+                    # column is populated regardless of Edge Function version.
+                    await self._patch_ip_address_direct(user_id)
+                    
                     # Update device status to connected after successful connection
                     if await self._update_device_status_connected(user_id):
                         logger.info("✓ Provisioning successful! Device now in 'connected' state.")
@@ -1788,6 +1838,9 @@ cache-size=1000
                         user_id = self.credentials.get("user_id", "")
                         if user_id:
                             await self._update_device_status_connected(user_id)
+                            # Keep ip_address fresh after every reboot — the router
+                            # may assign a new DHCP address since last session.
+                            await self._patch_ip_address_direct(user_id)
                         return True
                     await asyncio.sleep(3)
                 
@@ -1846,6 +1899,9 @@ cache-size=1000
                                 result = await self._update_device_heartbeat(user_id=user_id)
                                 if result:
                                     logger.info(f"[MONITOR] ✓ Heartbeat sent successfully - last_seen updated")
+                                    # Refresh ip_address on every heartbeat so the mobile app
+                                    # always has the current IP even after DHCP lease renewal.
+                                    await self._patch_ip_address_direct(user_id)
                                 else:
                                     logger.warning(f"[MONITOR] ✗ Heartbeat failed - last_seen NOT updated. Check if device_credentials table has matching row")
                             else:
