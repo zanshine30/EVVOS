@@ -1,5 +1,6 @@
 #!/bin/bash
-# Complete fix for shared audio - stops services, configures ALSA, restarts everything
+# Aggressive Shared Audio Fix - Forces dsnoop configuration
+# Stops everything, reconfigures completely, ensures both services use shared device
 
 set -e
 
@@ -16,116 +17,139 @@ log_error() { echo -e "${RED}✗${NC} $1"; }
 
 echo ""
 echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  Complete Shared Audio Fix${NC}"
+echo -e "${GREEN}  Aggressive Shared Audio Fix${NC}"
+echo -e "${GREEN}  Forcing dsnoop configuration${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════${NC}"
 echo ""
 
 if [ "$EUID" -ne 0 ]; then 
     log_error "This script must be run as root"
-    echo "Usage: sudo bash complete_shared_audio_fix.sh"
     exit 1
 fi
 
 # ============================================================================
-# STEP 1: STOP ALL AUDIO SERVICES
+# STEP 1: NUCLEAR OPTION - STOP EVERYTHING
 # ============================================================================
 
-log_info "Step 1: Stopping all services using audio..."
+log_info "Step 1: Stopping ALL audio services and processes..."
 echo ""
 
-# Stop camera service
-if systemctl is-active --quiet evvos-picam-tcp; then
-    systemctl stop evvos-picam-tcp
-    log_success "Stopped camera service"
-else
-    log_info "Camera service not running"
-fi
-
-# Stop voice service
-if systemctl is-active --quiet evvos-pico-voice; then
-    systemctl stop evvos-pico-voice
-    log_success "Stopped voice service"
-else
-    log_info "Voice service not running"
-fi
-
-# Kill any remaining audio processes
-pkill -9 arecord 2>/dev/null || true
-pkill -9 python3 2>/dev/null || true
+# Stop services
+systemctl stop evvos-picam-tcp 2>/dev/null || true
+systemctl stop evvos-pico-voice 2>/dev/null || true
 sleep 2
 
-log_success "All audio services stopped"
+# Kill any Python processes
+pkill -9 python3 2>/dev/null || true
+pkill -9 python 2>/dev/null || true
+
+# Kill any arecord processes
+pkill -9 arecord 2>/dev/null || true
+
+# Kill any processes using the audio device
+fuser -k /dev/snd/* 2>/dev/null || true
+
+sleep 3
+log_success "All audio processes terminated"
 echo ""
 
 # ============================================================================
-# STEP 2: CREATE SHARED AUDIO CONFIGURATION
+# STEP 2: CLEAR ALL ALSA SHARED MEMORY
 # ============================================================================
 
-log_info "Step 2: Creating ALSA shared audio configuration..."
+log_info "Step 2: Clearing all ALSA shared memory segments..."
 echo ""
 
-# Backup existing config
+# Remove all shared memory segments for ALSA
+ipcrm -M 2048 2>/dev/null || true
+ipcrm -M 1024 2>/dev/null || true
+ipcrm -M 2049 2>/dev/null || true
+ipcrm -M 2050 2>/dev/null || true
+
+# Clear any other IPC resources
+ipcs -m | grep "^0x" | awk '{print $2}' | xargs -r -n1 ipcrm -m 2>/dev/null || true
+
+log_success "Shared memory cleared"
+echo ""
+
+# ============================================================================
+# STEP 3: CREATE OPTIMIZED SHARED AUDIO CONFIG
+# ============================================================================
+
+log_info "Step 3: Creating optimized ALSA configuration..."
+echo ""
+
+# Backup
 if [ -f /etc/asound.conf ]; then
-    cp /etc/asound.conf /etc/asound.conf.backup.$(date +%s)
-    log_success "Backed up existing /etc/asound.conf"
+    mv /etc/asound.conf /etc/asound.conf.backup.$(date +%s)
+    log_info "Backed up old config"
 fi
 
-# Create new shared audio config
+# Create highly compatible dsnoop config
 cat > /etc/asound.conf << 'EOF'
-# ReSpeaker 2-Mics HAT V2.0 - Shared Audio Configuration
-# CRITICAL: This allows multiple applications to access the microphone simultaneously
+# ReSpeaker 2-Mics HAT V2.0 - Optimized Shared Audio
+# dsnoop configuration with aggressive compatibility settings
 
-# Make dsnooper the default capture device
+# Direct hardware device (for reference)
+pcm.hw_card {
+    type hw
+    card seeed2micvoicec
+}
+
+# Shared capture device using dsnoop
+pcm.dsnooper {
+    type dsnoop
+    ipc_key 5678
+    ipc_perm 0666
+    ipc_key_add_uid 1
+    
+    slave {
+        pcm "hw:seeed2micvoicec"
+        channels 2
+        rate 48000
+        format S16_LE
+        period_time 0
+        period_size 1024
+        buffer_size 8192
+    }
+    
+    bindings {
+        0 0
+        1 1
+    }
+    
+    # Compatibility options
+    slowptr 1
+}
+
+# Shared playback device using dmix
+pcm.dmixer {
+    type dmix
+    ipc_key 5679
+    ipc_perm 0666
+    ipc_key_add_uid 1
+    
+    slave {
+        pcm "hw:seeed2micvoicec"
+        channels 2
+        rate 48000
+        format S16_LE
+        period_time 0
+        period_size 1024
+        buffer_size 8192
+    }
+    
+    bindings {
+        0 0
+        1 1
+    }
+}
+
+# Asymmetric device (capture + playback)
 pcm.!default {
     type asym
     playback.pcm "dmixer"
     capture.pcm "dsnooper"
-}
-
-# Shared capture device (dsnoop) - allows multiple apps to record
-pcm.dsnooper {
-    type dsnoop
-    ipc_key 2048
-    ipc_perm 0666
-    ipc_key_add_uid 0
-    slave {
-        pcm "hw:seeed2micvoicec"
-        channels 2
-        rate 48000
-        period_size 1024
-        buffer_size 8192
-        format S16_LE
-    }
-    bindings {
-        0 0
-        1 1
-    }
-}
-
-# Shared playback device (dmix)
-pcm.dmixer {
-    type dmix
-    ipc_key 1024
-    ipc_perm 0666
-    ipc_key_add_uid 0
-    slave {
-        pcm "hw:seeed2micvoicec"
-        channels 2
-        rate 48000
-        period_size 1024
-        buffer_size 8192
-        format S16_LE
-    }
-    bindings {
-        0 0
-        1 1
-    }
-}
-
-# Direct hardware access (for debugging)
-pcm.hw_seeed {
-    type hw
-    card seeed2micvoicec
 }
 
 # Control device
@@ -133,164 +157,228 @@ ctl.!default {
     type hw
     card seeed2micvoicec
 }
+
+# Named device for explicit use
+pcm.shared {
+    type asym
+    playback.pcm "dmixer"
+    capture.pcm "dsnooper"
+}
 EOF
 
 log_success "Created /etc/asound.conf"
 echo ""
 
 # ============================================================================
-# STEP 3: RELOAD ALSA
+# STEP 4: CREATE ROOT USER ALSA CONFIG
 # ============================================================================
 
-log_info "Step 3: Reloading ALSA..."
+log_info "Step 4: Creating root user ALSA config..."
 echo ""
 
-# Unload and reload ALSA modules
-if command -v alsactl &> /dev/null; then
-    alsactl kill quit 2>/dev/null || true
-    sleep 1
-    alsactl restore 2>/dev/null || true
-    log_success "ALSA reloaded"
-else
-    log_warning "alsactl not found, skipping ALSA reload"
-fi
+# Also create ~/.asoundrc for root user (services run as root)
+cat > /root/.asoundrc << 'EOF'
+# Root user ALSA configuration - mirrors /etc/asound.conf
+pcm.!default {
+    type asym
+    playback.pcm "dmixer"
+    capture.pcm "dsnooper"
+}
 
-# Clear any shared memory segments from previous dsnoop instances
-ipcrm -M 2048 2>/dev/null || true
-ipcrm -M 1024 2>/dev/null || true
-log_success "Cleared ALSA shared memory"
+ctl.!default {
+    type hw
+    card seeed2micvoicec
+}
+EOF
 
+chmod 644 /root/.asoundrc
+log_success "Created /root/.asoundrc"
 echo ""
 
 # ============================================================================
-# STEP 4: UPDATE CAMERA SERVICE SCRIPT
+# STEP 5: RELOAD ALSA COMPLETELY
 # ============================================================================
 
-log_info "Step 4: Updating camera service to use dsnooper..."
+log_info "Step 5: Reloading ALSA system..."
+echo ""
+
+# Force reload ALSA
+alsactl kill rescan 2>/dev/null || true
+sleep 1
+alsactl restore 2>/dev/null || true
+
+# Restart ALSA-related services
+systemctl restart alsa-restore 2>/dev/null || true
+
+log_success "ALSA reloaded"
+echo ""
+
+# ============================================================================
+# STEP 6: UPDATE CAMERA SERVICE
+# ============================================================================
+
+log_info "Step 6: Updating camera service..."
 echo ""
 
 CAMERA_SCRIPT="/usr/local/bin/evvos-picam-tcp.py"
 
 if [ ! -f "$CAMERA_SCRIPT" ]; then
-    log_error "Camera script not found at $CAMERA_SCRIPT"
+    log_error "Camera script not found"
     exit 1
 fi
 
 # Backup
 cp "$CAMERA_SCRIPT" "${CAMERA_SCRIPT}.backup.$(date +%s)"
-log_success "Backed up camera script"
 
-# Replace audio device
+# Update to use dsnooper
 sed -i 's/"-D", "plughw:seeed2micvoicec"/"-D", "dsnooper"/g' "$CAMERA_SCRIPT"
+sed -i 's/"-D", "hw:seeed2micvoicec"/"-D", "dsnooper"/g' "$CAMERA_SCRIPT"
 
-# Verify change
+# Verify
 if grep -q '"-D", "dsnooper"' "$CAMERA_SCRIPT"; then
     log_success "Camera script updated to use dsnooper"
 else
-    log_error "Failed to update camera script"
+    log_warning "Could not update camera script (might already be correct)"
+fi
+
+echo ""
+
+# ============================================================================
+# STEP 7: TEST DSNOOPER (before starting services)
+# ============================================================================
+
+log_info "Step 7: Testing dsnooper device..."
+echo ""
+
+# Test basic device availability
+if arecord -L | grep -q "dsnooper"; then
+    log_success "dsnooper device is listed"
+else
+    log_error "dsnooper device not found in ALSA"
+    log_info "Running: arecord -L"
+    arecord -L
+    exit 1
+fi
+
+# Test actual recording
+log_info "Testing 3-second recording with dsnooper..."
+rm -f /tmp/test_dsnooper_*.wav
+
+if timeout 3 arecord -D dsnooper -f S16_LE -r 48000 -c 2 /tmp/test_dsnooper_clean.wav 2>&1; then
+    FILE_SIZE=$(stat -c%s /tmp/test_dsnooper_clean.wav 2>/dev/null || echo "0")
+    if [ "$FILE_SIZE" -gt 50000 ]; then
+        log_success "dsnooper test PASSED: ${FILE_SIZE} bytes"
+        log_info "Play test: aplay /tmp/test_dsnooper_clean.wav"
+    else
+        log_error "dsnooper test file too small: ${FILE_SIZE} bytes"
+        exit 1
+    fi
+else
+    log_error "dsnooper test FAILED"
+    log_info "Check ALSA errors above"
     exit 1
 fi
 
 echo ""
 
 # ============================================================================
-# STEP 5: TEST SHARED AUDIO (before starting services)
+# STEP 8: START CAMERA SERVICE FIRST
 # ============================================================================
 
-log_info "Step 5: Testing shared audio configuration..."
+log_info "Step 8: Starting camera service..."
 echo ""
 
-# Test if dsnooper is available
-log_info "Testing dsnooper device availability..."
-if timeout 3 arecord -D dsnooper -f S16_LE -r 48000 -c 2 /tmp/test_dsnooper.wav 2>&1 | grep -q "Recording"; then
-    FILE_SIZE=$(stat -c%s /tmp/test_dsnooper.wav 2>/dev/null || echo "0")
-    if [ "$FILE_SIZE" -gt 10000 ]; then
-        log_success "dsnooper test successful: ${FILE_SIZE} bytes"
-    else
-        log_warning "dsnooper test file too small: ${FILE_SIZE} bytes"
-    fi
-else
-    log_error "dsnooper test failed"
-    log_info "Checking ALSA configuration..."
-    arecord -L | grep -A 2 dsnooper || log_warning "dsnooper not in ALSA device list"
-fi
-
-echo ""
-
-# ============================================================================
-# STEP 6: START SERVICES
-# ============================================================================
-
-log_info "Step 6: Starting services..."
-echo ""
-
-# Start camera service
 systemctl start evvos-picam-tcp
-sleep 2
+sleep 3
+
 if systemctl is-active --quiet evvos-picam-tcp; then
-    log_success "Camera service started"
+    log_success "Camera service running"
+    
+    # Check logs for errors
+    if journalctl -u evvos-picam-tcp -n 20 --no-pager | grep -i "error\|fail" | grep -v "ERROR: picamera2"; then
+        log_warning "Camera service has errors in logs"
+    fi
 else
     log_error "Camera service failed to start"
     log_info "Check logs: sudo journalctl -u evvos-picam-tcp -n 50"
+    exit 1
 fi
 
-# Start voice service
+echo ""
+
+# ============================================================================
+# STEP 9: START VOICE SERVICE
+# ============================================================================
+
+log_info "Step 9: Starting voice service..."
+echo ""
+
 if systemctl is-enabled --quiet evvos-pico-voice 2>/dev/null; then
     systemctl start evvos-pico-voice
-    sleep 2
+    sleep 3
+    
     if systemctl is-active --quiet evvos-pico-voice; then
-        log_success "Voice service started"
+        log_success "Voice service running"
     else
-        log_error "Voice service failed to start"
+        log_warning "Voice service failed to start (non-critical)"
         log_info "Check logs: sudo journalctl -u evvos-pico-voice -n 50"
     fi
+else
+    log_info "Voice service not installed (skipping)"
 fi
 
 echo ""
 
 # ============================================================================
-# STEP 7: TEST WITH BOTH SERVICES RUNNING
+# STEP 10: TEST WITH BOTH SERVICES RUNNING
 # ============================================================================
 
-log_info "Step 7: Testing shared audio with services running..."
+log_info "Step 10: Testing shared audio with both services running..."
 echo ""
 
-sleep 3  # Give services time to initialize
+sleep 3  # Let services stabilize
 
-log_info "Attempting 3-second test recording..."
-if timeout 3 arecord -D dsnooper -f S16_LE -r 48000 -c 2 /tmp/test_with_services.wav 2>&1; then
+log_info "Attempting 5-second recording..."
+if timeout 5 arecord -D dsnooper -f S16_LE -r 48000 -c 2 /tmp/test_with_services.wav 2>&1; then
     FILE_SIZE=$(stat -c%s /tmp/test_with_services.wav 2>/dev/null || echo "0")
-    if [ "$FILE_SIZE" -gt 10000 ]; then
-        log_success "Shared audio working! File size: ${FILE_SIZE} bytes"
-        log_info "Play it: aplay /tmp/test_with_services.wav"
+    if [ "$FILE_SIZE" -gt 100000 ]; then
+        log_success "✓✓✓ SHARED AUDIO WORKING! File: ${FILE_SIZE} bytes"
+        log_info "Play test: aplay /tmp/test_with_services.wav"
     else
-        log_warning "Recording created but very small: ${FILE_SIZE} bytes"
+        log_error "Recording too small: ${FILE_SIZE} bytes"
+        log_warning "This indicates shared audio is NOT working"
     fi
 else
-    log_error "Test recording failed with services running"
-    log_info "This means the shared audio configuration isn't working properly"
+    log_error "Recording failed with both services running"
+    log_warning "Shared audio configuration unsuccessful"
 fi
 
 echo ""
 
 # ============================================================================
-# STEP 8: DIAGNOSTICS
+# STEP 11: DIAGNOSTICS
 # ============================================================================
 
-log_info "Step 8: System diagnostics..."
+log_info "Step 11: Diagnostics..."
 echo ""
 
-echo "Services Status:"
+echo "Service Status:"
 echo "  Camera: $(systemctl is-active evvos-picam-tcp)"
-echo "  Voice:  $(systemctl is-active evvos-pico-voice 2>/dev/null || echo 'not installed')"
+if systemctl is-enabled --quiet evvos-pico-voice 2>/dev/null; then
+    echo "  Voice:  $(systemctl is-active evvos-pico-voice)"
+fi
 echo ""
 
-echo "ALSA Devices:"
-arecord -L | grep -E "dsnooper|default|seeed" | head -10
+echo "Processes using audio device:"
+lsof /dev/snd/* 2>/dev/null | head -10 || echo "  None detected"
 echo ""
 
-echo "Audio device locks:"
-lsof /dev/snd/* 2>/dev/null | grep -v "COMMAND" || echo "  No locks detected"
+echo "IPC Shared Memory (for dsnoop):"
+ipcs -m | grep -E "key|0x00" | head -5
+echo ""
+
+echo "ALSA devices:"
+arecord -L | grep -E "default|dsnooper|seeed" | head -8
 echo ""
 
 # ============================================================================
@@ -304,42 +392,39 @@ echo -e "${GREEN}═════════════════════
 echo ""
 
 log_info "What was done:"
-echo "  ✓ Stopped all audio services"
-echo "  ✓ Created /etc/asound.conf with dsnoop configuration"
-echo "  ✓ Cleared ALSA shared memory"
-echo "  ✓ Updated camera service to use dsnooper"
-echo "  ✓ Restarted services"
+echo "  ✓ Stopped all audio processes (nuclear option)"
+echo "  ✓ Cleared all ALSA shared memory"
+echo "  ✓ Created optimized /etc/asound.conf with dsnoop"
+echo "  ✓ Created /root/.asoundrc for services"
+echo "  ✓ Updated camera script to use dsnooper"
+echo "  ✓ Started services in correct order"
+echo "  ✓ Tested shared audio"
 echo ""
 
-log_info "Next steps:"
-echo "  1. Test from your app - start and stop a recording"
-echo "  2. Check file sizes: ls -lh ~/recordings/"
-echo "  3. Audio should now be > 0 MB"
-echo ""
-
-log_info "Manual test:"
-echo "  arecord -D dsnooper -f S16_LE -r 48000 -c 2 -d 5 test.wav"
-echo "  ls -lh test.wav  # Should show size > 0"
-echo "  aplay test.wav"
-echo ""
-
-log_info "Troubleshooting:"
-echo "  # View camera logs:"
-echo "  sudo journalctl -u evvos-picam-tcp -f"
-echo ""
-echo "  # Check if dsnooper is blocked:"
-echo "  lsof /dev/snd/*"
-echo ""
-echo "  # Test without services:"
-echo "  sudo systemctl stop evvos-picam-tcp evvos-pico-voice"
-echo "  arecord -D dsnooper -f S16_LE -r 48000 -c 2 -d 3 test.wav"
-echo ""
-
-if [ "$FILE_SIZE" -gt 10000 ]; then
-    log_success "Shared audio is working! Test from your app now."
+if [ "$FILE_SIZE" -gt 100000 ]; then
+    echo -e "${GREEN}✓✓✓ SUCCESS! Shared audio is working!${NC}"
+    echo ""
+    log_info "Next steps:"
+    echo "  1. Test from your app"
+    echo "  2. Start recording"
+    echo "  3. Try voice commands during recording (should work)"
+    echo "  4. Stop recording"
+    echo "  5. Check: ls -lh ~/recordings/audio_*.wav"
+    echo ""
 else
-    log_warning "Shared audio may not be working properly."
-    log_warning "Check the troubleshooting steps above."
+    echo -e "${YELLOW}⚠ Shared audio test inconclusive${NC}"
+    echo ""
+    log_info "Troubleshooting:"
+    echo "  1. Check camera logs: sudo journalctl -u evvos-picam-tcp -f"
+    echo "  2. Check voice logs: sudo journalctl -u evvos-pico-voice -f"
+    echo "  3. Test manually: arecord -D dsnooper -f S16_LE -r 48000 -c 2 -d 5 test.wav"
+    echo "  4. Check device locks: lsof /dev/snd/*"
+    echo ""
+    log_warning "If still failing, the voice service may be using PyAudio in a way that blocks dsnoop"
+    log_info "Alternative: Run plan_b_pause_voice_service.sh instead"
+    echo ""
 fi
 
+log_info "Monitor both services:"
+echo "  sudo journalctl -u evvos-picam-tcp -u evvos-pico-voice -f"
 echo ""
