@@ -1,0 +1,189 @@
+#!/bin/bash
+# fix_picam_video.sh  (v3 — line-by-line, no regex)
+#
+# Fixes:
+#   1. Adds -framerate to ffmpeg so MP4 files have valid timestamps
+#   2. Updates _notify_edge_function to pass video_size_mb + session_id
+#
+# Run on the Pi:
+#   curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/fix_picam_video.sh | sudo bash
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo ""
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}  EVVOS Pi Camera — Video + Metadata Fix (v3)     ${NC}"
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo ""
+
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}ERROR: Run as root: curl ... | sudo bash${NC}"
+    exit 1
+fi
+
+SCRIPT_PATH="/usr/local/bin/evvos-picam-tcp.py"
+
+if [ ! -f "$SCRIPT_PATH" ]; then
+    echo -e "${RED}ERROR: $SCRIPT_PATH not found${NC}"
+    exit 1
+fi
+
+BACKUP="${SCRIPT_PATH}.bak.$(date +%Y%m%d_%H%M%S)"
+cp "$SCRIPT_PATH" "$BACKUP"
+echo -e "${GREEN}✓ Backup: $BACKUP${NC}"
+
+# ── Show ALL lines containing -i or current_video_path so we can see exactly what's there
+echo ""
+echo -e "${YELLOW}Lines referencing current_video_path in script:${NC}"
+grep -n "current_video_path" "$SCRIPT_PATH" || echo "(none found)"
+echo ""
+echo -e "${YELLOW}Lines referencing ffmpeg:${NC}"
+grep -n "ffmpeg" "$SCRIPT_PATH" || echo "(none found)"
+echo ""
+
+PATCH_FILE="/tmp/fix_picam_video.py"
+
+cat > "$PATCH_FILE" << 'PYTHON_EOF'
+import sys
+
+SCRIPT_PATH = "/usr/local/bin/evvos-picam-tcp.py"
+
+with open(SCRIPT_PATH) as fh:
+    lines = fh.readlines()
+
+fix1_count = 0
+
+# ── Pre-check: already patched? ──────────────────────────────────────────────
+full_source = "".join(lines)
+already_has_framerate = "-framerate" in full_source
+already_has_size      = "video_size_mb=None" in full_source
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX 1 & 2: Walk line by line.
+# Whenever we see a line containing "-i", str(current_video_path)
+# AND the previous non-blank line does NOT already have -framerate,
+# insert a -framerate line before it with matching indentation.
+# ─────────────────────────────────────────────────────────────────────────────
+
+new_lines = []
+
+if already_has_framerate:
+    print("⚠ -framerate already present — skipping Fix 1 & 2")
+    new_lines = lines
+else:
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Match any line that passes current_video_path as an -i input to ffmpeg
+        # Handles both:  "-i", str(current_video_path),
+        # and:           '-i', str(current_video_path),
+        stripped = line.strip()
+        if (
+            ('"-i"' in stripped or "'-i'" in stripped)
+            and 'str(current_video_path)' in stripped
+        ):
+            # Get indentation of this line
+            indent = len(line) - len(line.lstrip())
+            pad = " " * indent
+            framerate_line = f'{pad}"-framerate", str(CAMERA_FPS),   # synthesise PTS — raw H.264 has no timestamps\n'
+            new_lines.append(framerate_line)
+            fix1_count += 1
+
+        new_lines.append(line)
+        i += 1
+
+    if fix1_count == 0:
+        print(
+            "⚠ Fix 1 & 2: Could not find '\"-i\", str(current_video_path)' lines.\n"
+            "  The -framerate fix was NOT applied.\n"
+            "  Paste the full grep output above so the pattern can be adjusted."
+        )
+    else:
+        print(f"✓ Fix 1 & 2: -framerate inserted before {fix1_count} ffmpeg -i line(s)")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fixes 3/4/5 operate on the joined source — only if queue patch was applied
+# ─────────────────────────────────────────────────────────────────────────────
+
+source = "".join(new_lines)
+
+# Fix 3: signature
+OLD_SIG = "def _notify_edge_function(incident_id, video_url, storage_path, auth_token=None):"
+NEW_SIG = "def _notify_edge_function(incident_id, video_url, storage_path, auth_token=None, video_size_mb=None, session_id=None):"
+
+if already_has_size:
+    print("⚠ Fix 3 (notify signature) already applied — skipping")
+elif OLD_SIG not in source:
+    print("⚠ Fix 3: _notify_edge_function not found — run install_picam_upload.sh first, then re-run this script")
+else:
+    source = source.replace(OLD_SIG, NEW_SIG, 1)
+    print("✓ Fix 3: _notify_edge_function signature updated")
+
+# Fix 4: json body — replace compact dict with expanded one including new fields
+OLD_JSON = '"incident_id": incident_id, "video_url": video_url, "storage_path": storage_path'
+NEW_JSON = (
+    '"incident_id":   incident_id,\n'
+    '                "video_url":     video_url,\n'
+    '                "storage_path":  storage_path,\n'
+    '                "video_size_mb": video_size_mb,\n'
+    '                "session_id":    session_id'
+)
+
+if '"video_size_mb": video_size_mb' in source:
+    print("⚠ Fix 4 (notify json body) already applied — skipping")
+elif OLD_JSON not in source:
+    print("⚠ Fix 4: notify json pattern not found — run install_picam_upload.sh first")
+else:
+    source = source.replace(OLD_JSON, NEW_JSON, 1)
+    print("✓ Fix 4: video_size_mb + session_id added to edge function payload")
+
+# Fix 5: _do_upload call to _notify_edge_function
+OLD_CALL = "_notify_edge_function(incident_id, video_url, storage_path, auth_token)"
+NEW_CALL = "_notify_edge_function(incident_id, video_url, storage_path, auth_token, video_size_mb=file_size_mb, session_id=session_id)"
+
+if "video_size_mb=file_size_mb" in source:
+    print("⚠ Fix 5 (_do_upload call) already applied — skipping")
+elif OLD_CALL not in source:
+    print("⚠ Fix 5: _notify_edge_function call not found — run install_picam_upload.sh first")
+else:
+    source = source.replace(OLD_CALL, NEW_CALL, 1)
+    print("✓ Fix 5: _do_upload passes size + session_id to edge function")
+
+with open(SCRIPT_PATH, "w") as fh:
+    fh.write(source)
+
+print(f"\n✓ Saved to {SCRIPT_PATH}")
+PYTHON_EOF
+
+echo "Running patch..."
+echo ""
+python3 "$PATCH_FILE"
+EXIT_CODE=$?
+
+rm -f "$PATCH_FILE"
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo -e "${RED}✗ Patch failed — restoring backup${NC}"
+    cp "$BACKUP" "$SCRIPT_PATH"
+    exit $EXIT_CODE
+fi
+
+echo ""
+echo "↻ Restarting evvos-picam-tcp..."
+systemctl restart evvos-picam-tcp.service
+echo -e "${GREEN}✓ Service restarted${NC}"
+
+echo ""
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}✓ Fix complete!${NC}"
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo ""
+echo "Verify: sudo journalctl -u evvos-picam-tcp -f"
