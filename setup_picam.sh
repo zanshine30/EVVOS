@@ -189,7 +189,7 @@ current_audio_path = None
 current_session_id = None
 audio_process = None
 recording_lock = threading.Lock()
-pi_ip_address = None  # Will be auto-detected
+# pi_ip_address is initialized in main block below
 
 # ============================================================================
 # CAMERA SETUP
@@ -246,7 +246,7 @@ def setup_camera():
 
 def start_recording_handler():
     """Start video + audio recording"""
-    global recording, current_video_path, current_audio_path, current_session_id, audio_process
+    global recording, current_video_path, current_audio_path, current_session_id, audio_process, pi_ip_address
     
     with recording_lock:
         if recording:
@@ -304,7 +304,7 @@ def start_recording_handler():
 
 def stop_recording_handler():
     """Stop video + audio recording"""
-    global recording, audio_process, current_session_id
+    global recording, audio_process, current_session_id, pi_ip_address
     
     with recording_lock:
         if not recording:
@@ -404,6 +404,8 @@ def start_http_server():
 
 def get_recording_info_handler():
     """Get current recording session info (for reconnection scenarios)"""
+    global pi_ip_address
+    
     with recording_lock:
         if not recording or not current_session_id:
             return {
@@ -507,13 +509,15 @@ def start_tcp_server():
 # MAIN
 # ============================================================================
 
+# Detect Pi IP address first (module-level assignment)
+pi_ip_address = None
+
 if __name__ == "__main__":
     print("=" * 60)
     print("EVVOS Pi Camera TCP Control Service")
     print("=" * 60)
     
-    # Detect Pi IP address
-    global pi_ip_address
+    # Detect and set Pi IP address
     pi_ip_address = get_pi_ip_address()
     if not pi_ip_address:
         print("[WARNING] Could not detect Pi IP address - file URLs will be unavailable")
