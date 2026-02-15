@@ -24,12 +24,12 @@
 #
 # This second script configures:
 #   ✓ PicoVoice Rhino intent recognition engine
-#   ✓ Custom EVVOSVOICE context model
+#   ✓ Custom EVVOS context model
 #   ✓ LED feedback (RGB APA102)
 #   ✓ Systemd service for auto-start on boot
 # ═══════════════════════════════════════════════════════════════════════════
 #
-# Intent Model (EVVOSVOICE.yml):
+# Intent Model (EVVOS.yml):
 # - recording_control: "start recording", "stop recording"
 # - emergency_action: "emergency backup", "backup backup backup"
 # - incident_capture: "mark incident", "timestamp", "incident", "snapshot", "screenshot"
@@ -464,8 +464,8 @@ log_success "PyAudio verification complete"
 
 log_section "Step 5: Deploy Rhino Context File"
 
-CONTEXT_FILE="/opt/evvos/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
-UPLOADED_CONTEXT="/mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
+CONTEXT_FILE="/opt/evvos/EVVOS_en_raspberry-pi_v4_0_0.rhn"
+UPLOADED_CONTEXT="/mnt/user-data/uploads/EVVOS_en_raspberry-pi_v4_0_0.rhn"
 
 log_info "Checking for Rhino context file..."
 
@@ -491,7 +491,7 @@ if [ -f "$CONTEXT_FILE" ]; then
             chmod 644 "$CONTEXT_FILE"
             log_success "Context file updated from: $UPLOADED_CONTEXT"
             log_info "  To skip this prompt next time, delete the uploaded copy:"
-            log_info "  rm /mnt/user-data/uploads/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
+            log_info "  rm /mnt/user-data/uploads/EVVOS_en_raspberry-pi_v4_0_0.rhn"
         else
             log_info "Keeping existing context file (no changes made)"
         fi
@@ -506,7 +506,7 @@ else
         log_error ""
         log_error "Solution:"
         log_error "  1. Go to: https://console.picovoice.ai"
-        log_error "  2. Create/train EVVOSVOICE context model"
+        log_error "  2. Create/train EVVOS context model"
         log_error "  3. Compile and download the .rhn file"
         log_error "  4. Copy to: $UPLOADED_CONTEXT"
         log_error "     Or directly to: $CONTEXT_FILE"
@@ -693,7 +693,7 @@ except ImportError:
 
 # File paths
 ACCESS_KEY_FILE = "/opt/evvos/picovoice_access_key.txt"
-CONTEXT_FILE = "/opt/evvos/EVVOSVOICE_en_raspberry-pi_v4_0_0.rhn"
+CONTEXT_FILE = "/opt/evvos/EVVOS_en_raspberry-pi_v4_0_0.rhn"
 LOG_FILE = "/var/log/evvos-pico-voice.log"
 
 # Audio configuration for ReSpeaker 2-Mics HAT
@@ -1353,8 +1353,7 @@ echo ""
 log_info "Configuration Summary:"
 echo "  • Hardware: Raspberry Pi Zero 2 W + ReSpeaker 2-Mics HAT V2.0"
 echo "  • Audio Codec: TLV320AIC3104 (via $CARD_NAME)"
-echo "  • Audio Device: Shared via ALSA dsnooper (allows simultaneous recording)"
-echo "  • Intent Model: EVVOSVOICE Custom Context"
+echo "  • Intent Model: EVVOS Custom Context"
 echo "  • Python Environment: $VENV_PATH"
 echo "  • Service: evvos-pico-voice.service"
 echo "  • Log File: $LOG_FILE"
@@ -1362,7 +1361,7 @@ echo "  • Access Key: $ACCESS_KEY_FILE"
 echo "  • Custom Context: $CONTEXT_FILE"
 echo ""
 
-log_info "Recognized Intents and Commands (from EVVOSVOICE.yml):"
+log_info "Recognized Intents and Commands (from EVVOS.yml):"
 echo ""
 echo "  ${CYAN}recording_control${NC}:"
 echo "    • 'start recording'"
@@ -1429,7 +1428,7 @@ echo "  # Save settings permanently:"
 echo "  sudo alsactl store"
 echo ""
 echo "  # Test microphone:"
-echo "  arecord -D dsnooper -f S16_LE -r 48000 -c 2 -d 3 /tmp/test.wav && aplay /tmp/test.wav"
+echo "  arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav && aplay /tmp/test.wav"
 echo ""
 
 log_info "Troubleshooting:"
@@ -1459,8 +1458,7 @@ echo "     Get free key from: https://console.picovoice.ai"
 echo ""
 echo "  Q: No intents recognized?"
 echo "  A: Check microphone gain: sudo amixer -c $CARD_NAME sset 'PGA' 25"
-echo "     Test microphone with shared device: arecord -D dsnooper -f S16_LE -r 48000 -c 2 -d 3 /tmp/test.wav"
-echo "     Verify shared audio config: cat /etc/asound.conf | grep dsnooper"
+echo "     Test microphone: arecord -f S16_LE -r 16000 -d 3 /tmp/test.wav"
 echo ""
 echo "  Q: Service keeps restarting?"
 echo "  A: Check logs: sudo journalctl -u evvos-pico-voice --no-pager"
@@ -1494,8 +1492,6 @@ echo ""
 log_info "Audio System Configuration:"
 echo "  • Rhino requires 16kHz mono audio input"
 echo "  • Service will suppress ALSA lib errors for cleaner logs"
-echo "  • Uses shared audio via ALSA dsnooper (configured in /etc/asound.conf)"
-echo "  • Voice commands work simultaneously with camera recording"
 echo "  • If ReSpeaker not found, service falls back to first available input device"
 echo "  • .asoundrc file configured at /root/.asoundrc for daemon operation"
 echo ""
@@ -1521,7 +1517,7 @@ echo "  │ Layer 2: Voice Recognition (THIS SCRIPT)                    │"
 echo "  ├─────────────────────────────────────────────────────────────┤"
 echo "  │ ✓ PicoVoice Rhino SDK 4.0.1 installed                       │"
 echo "  │ ✓ PyAudio configured for audio capture                      │"
-echo "  │ ✓ Custom EVVOSVOICE context model deployed                  │"
+echo "  │ ✓ Custom EVVOS context model deployed                  │"
 echo "  │ ✓ PicoVoice access key configured                           │"
 echo "  │ ✓ Systemd service created (evvos-pico-voice.service)        │"
 echo "  │ ✓ LED control via SPI (optional, if SPI enabled)            │"
