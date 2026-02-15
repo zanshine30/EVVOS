@@ -552,6 +552,30 @@ network={{
             logger.warning(f"Could not check WiFi connection status: {e}")
             return False
 
+    def _get_wlan0_ip(self) -> Optional[str]:
+        """
+        Return the current wlan0 IPv4 address, or None if not yet assigned.
+        Skips the hotspot address (192.168.50.1) so we only return the real
+        network IP assigned by the user's router / mobile hotspot.
+        This value is written to device_credentials.ip_address in Supabase so
+        the mobile app (RecordingScreen) can open the TCP socket to the Pi
+        without any hardcoded address.
+        """
+        try:
+            result = subprocess.run(
+                ["ip", "addr", "show", "dev", "wlan0"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in result.stdout.split("\n"):
+                if "inet " in line and "192.168.50.1" not in line:
+                    # Line looks like: "    inet 192.168.1.42/24 brd ..."
+                    ip = line.strip().split()[1].split("/")[0]
+                    logger.debug(f"[IP] Detected wlan0 IP: {ip}")
+                    return ip
+        except Exception as e:
+            logger.warning(f"[IP] Could not detect wlan0 IP: {e}")
+        return None
+
     async def _check_internet(self) -> bool:
         """Check if device has internet connectivity"""
         try:
@@ -622,6 +646,14 @@ network={{
             # 2. Encrypt the password
             encrypted_password = self._encrypt_password(password)
             
+            # Detect current wlan0 IP so the mobile app can connect to the
+            # Pi Camera TCP service without any hardcoded address.
+            current_ip = self._get_wlan0_ip()
+            if current_ip:
+                logger.info(f"[REGISTER]   - ip_address: {current_ip}")
+            else:
+                logger.warning("[REGISTER]   - ip_address: not yet available (will be updated on heartbeat)")
+            
             payload = {
                 "device_id": self.device_id,
                 "user_id": user_id,
@@ -629,6 +661,7 @@ network={{
                 "encrypted_ssid": ssid,
                 "encrypted_password": encrypted_password,
                 "device_status": "connected",
+                "ip_address": current_ip,
             }
             
             logger.info(f"[REGISTER] Step 2: Payload prepared:")
@@ -700,6 +733,7 @@ network={{
             payload = {
                 "device_id": self.device_id,
                 "user_id": user_id,
+                "ip_address": self._get_wlan0_ip(),
             }
             
             async with aiohttp.ClientSession() as session:
@@ -816,6 +850,10 @@ network={{
                 "device_id": self.device_id,
                 "user_id": user_id,
                 "last_seen": self._get_manila_time().isoformat(),
+                # Refresh IP on every heartbeat — the router may reassign it
+                # after a DHCP lease expires, so this keeps device_credentials
+                # in sync and the mobile app can always find the Pi.
+                "ip_address": self._get_wlan0_ip(),
             }
             
             async with aiohttp.ClientSession() as session:
