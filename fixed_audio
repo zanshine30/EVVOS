@@ -1,0 +1,75 @@
+#!/bin/bash
+# Fix syntax error in voice service script
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+log_info() { echo -e "${BLUE}ℹ${NC} $1"; }
+log_success() { echo -e "${GREEN}✓${NC} $1"; }
+log_error() { echo -e "${RED}✗${NC} $1"; }
+
+echo ""
+echo "════════════════════════════════════════════════════"
+echo "  Fix Voice Service Syntax Error"
+echo "════════════════════════════════════════════════════"
+echo ""
+
+if [ "$EUID" -ne 0 ]; then 
+    log_error "Run as root"
+    exit 1
+fi
+
+VOICE_SCRIPT="/usr/local/bin/evvos-pico-voice-service.py"
+
+if [ ! -f "$VOICE_SCRIPT" ]; then
+    log_error "Voice script not found"
+    exit 1
+fi
+
+log_info "Fixing syntax error..."
+
+# Fix the "elif if" error - should be just "elif"
+sed -i "s/elif if 'seeed'/elif 'seeed'/g" "$VOICE_SCRIPT"
+
+# Verify the fix
+if grep -q "elif if" "$VOICE_SCRIPT"; then
+    log_error "Still has 'elif if' syntax error"
+    log_info "Checking line:"
+    grep -n "elif if" "$VOICE_SCRIPT"
+    exit 1
+else
+    log_success "Syntax error fixed"
+fi
+
+# Test if Python can parse it
+log_info "Validating Python syntax..."
+if python3 -m py_compile "$VOICE_SCRIPT" 2>&1; then
+    log_success "Python syntax is valid"
+else
+    log_error "Still has syntax errors"
+    python3 -m py_compile "$VOICE_SCRIPT" 2>&1 | tail -10
+    exit 1
+fi
+
+echo ""
+log_info "Restarting voice service..."
+systemctl restart evvos-pico-voice
+
+sleep 3
+
+if systemctl is-active --quiet evvos-pico-voice; then
+    log_success "Voice service restarted successfully"
+else
+    log_error "Voice service failed to start"
+    log_info "Check logs: sudo journalctl -u evvos-pico-voice -n 50"
+    exit 1
+fi
+
+echo ""
+log_success "✓ Fixed! Voice service is running"
+echo ""
+log_info "Now test shared audio:"
+echo "  sudo bash final_shared_audio_deployment.sh"
+echo ""
