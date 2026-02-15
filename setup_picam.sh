@@ -126,8 +126,8 @@ log_success "Camera interface enabled in $CONFIG_FILE"
 log_section "Step 2: Installing Camera Dependencies"
 
 apt-get update -qq
-apt-get install -y python3-picamera2 python3-opencv ffmpeg --no-install-recommends
-log_success "Installed picamera2, opencv, and ffmpeg"
+apt-get install -y python3-picamera2 python3-opencv python3-requests ffmpeg --no-install-recommends
+log_success "Installed picamera2, opencv, requests, and ffmpeg"
 
 # ============================================================================
 # STEP 3: CREATE TCP CAMERA SERVICE SCRIPT
@@ -220,7 +220,49 @@ def get_pi_ip_address():
     
     return None
 
-def setup_camera():
+def report_ip_to_supabase():
+    """
+    PATCH device_credentials.ip_address so the mobile app can discover
+    this Pi's current local network address without any hardcoded value.
+
+    Reads credentials from environment variables written to
+    /etc/evvos/config.env by the provisioning service:
+      SUPABASE_URL       — e.g. https://xxxx.supabase.co
+      SUPABASE_ANON_KEY  — project anon/public key
+      EVVOS_DEVICE_ID    — device_id stored in device_credentials table
+    """
+    import os, requests as _req
+
+    url     = os.environ.get('SUPABASE_URL', '').rstrip('/')
+    key     = os.environ.get('SUPABASE_ANON_KEY', '')
+    dev_id  = os.environ.get('EVVOS_DEVICE_ID', '')
+
+    if not all([url, key, dev_id]):
+        print("[SUPABASE] Skipping IP report — SUPABASE_URL / SUPABASE_ANON_KEY / EVVOS_DEVICE_ID not set in /etc/evvos/config.env")
+        return
+
+    if not pi_ip_address:
+        print("[SUPABASE] Skipping IP report — Pi IP not yet detected")
+        return
+
+    try:
+        resp = _req.patch(
+            f"{url}/rest/v1/device_credentials?device_id=eq.{dev_id}",
+            headers={
+                "apikey":         key,
+                "Authorization":  f"Bearer {key}",
+                "Content-Type":   "application/json",
+                "Prefer":         "return=minimal",
+            },
+            json={"ip_address": pi_ip_address},
+            timeout=10,
+        )
+        if resp.status_code in (200, 204):
+            print(f"[SUPABASE] ✓ Reported Pi IP {pi_ip_address} to Supabase device_credentials")
+        else:
+            print(f"[SUPABASE] ⚠ IP report failed: HTTP {resp.status_code} — {resp.text[:200]}")
+    except Exception as e:
+        print(f"[SUPABASE] Error reporting IP to Supabase: {e}")
     """Initialize Pi Camera"""
     global camera
     try:
@@ -521,6 +563,10 @@ if __name__ == "__main__":
     pi_ip_address = get_pi_ip_address()
     if not pi_ip_address:
         print("[WARNING] Could not detect Pi IP address - file URLs will be unavailable")
+    else:
+        # Push IP to Supabase so the mobile app can read it without
+        # any hardcoded addresses in RecordingScreen.
+        report_ip_to_supabase()
     
     # Initialize camera
     if not setup_camera():
@@ -563,6 +609,9 @@ StandardError=journal
 
 # Environment
 Environment="PYTHONUNBUFFERED=1"
+# Supabase credentials and device ID written by the provisioning service.
+# Edit /etc/evvos/config.env to set the correct values.
+EnvironmentFile=-/etc/evvos/config.env
 
 [Install]
 WantedBy=multi-user.target
@@ -571,8 +620,38 @@ SERVICE_EOF
 log_success "Created systemd service: $SERVICE_FILE"
 
 # ============================================================================
-# STEP 5: CREATE RECORDINGS DIRECTORY
+# STEP 4b: CREATE SUPABASE CREDENTIALS CONFIG FILE
 # ============================================================================
+
+log_section "Step 4b: Creating Supabase Credentials Config"
+
+EVVOS_CONFIG_DIR="/etc/evvos"
+EVVOS_CONFIG_FILE="$EVVOS_CONFIG_DIR/config.env"
+
+mkdir -p "$EVVOS_CONFIG_DIR"
+
+# Only create the file if it doesn't already exist (preserve existing values
+# written by the provisioning service).
+if [ ! -f "$EVVOS_CONFIG_FILE" ]; then
+    cat > "$EVVOS_CONFIG_FILE" << CONF_EOF
+# EVVOS Pi Camera — Supabase credentials
+# These values are filled in automatically by the provisioning service
+# (setup_provisioning.sh) when the Pi first connects to the cloud.
+# You can also set them manually:
+#
+#   SUPABASE_URL=https://YOUR_PROJECT_ID.supabase.co
+#   SUPABASE_ANON_KEY=your_anon_key_here
+#   EVVOS_DEVICE_ID=device_id_from_device_credentials_table
+
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+EVVOS_DEVICE_ID=
+CONF_EOF
+    chmod 600 "$EVVOS_CONFIG_FILE"   # root-only read (contains API key)
+    log_success "Created $EVVOS_CONFIG_FILE (fill in Supabase credentials)"
+else
+    log_info "$EVVOS_CONFIG_FILE already exists — leaving existing values intact"
+fi
 
 log_section "Step 5: Creating Recordings Directory"
 
