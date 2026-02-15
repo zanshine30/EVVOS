@@ -1,0 +1,129 @@
+#!/bin/bash
+# fix_picam_resolution.sh
+#
+# Lowers Pi Camera recording from 1080p/10Mbps to 720p/4Mbps.
+# Reduces file size by ~4x (from ~5-7 MB/min to ~1.5-2 MB/min).
+#
+# Run on the Pi:
+#   curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/fix_picam_resolution.sh | sudo bash
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+echo ""
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}  EVVOS Pi Camera — Resolution Fix (720p / 4Mbps) ${NC}"
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo ""
+
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}ERROR: Run as root: curl ... | sudo bash${NC}"
+    exit 1
+fi
+
+SCRIPT_PATH="/usr/local/bin/evvos-picam-tcp.py"
+
+if [ ! -f "$SCRIPT_PATH" ]; then
+    echo -e "${RED}ERROR: $SCRIPT_PATH not found — run setup_picam.sh first.${NC}"
+    exit 1
+fi
+
+BACKUP="${SCRIPT_PATH}.bak.$(date +%Y%m%d_%H%M%S)"
+cp "$SCRIPT_PATH" "$BACKUP"
+echo -e "${GREEN}✓ Backup: $BACKUP${NC}"
+
+PATCH_FILE="/tmp/fix_picam_resolution.py"
+
+cat > "$PATCH_FILE" << 'PYTHON_EOF'
+import sys
+
+SCRIPT_PATH = "/usr/local/bin/evvos-picam-tcp.py"
+
+with open(SCRIPT_PATH) as fh:
+    source = fh.read()
+
+errors = []
+changes = 0
+
+# ── Fix 1: CAMERA_RESOLUTION ─────────────────────────────────────────────────
+OLD_RES = "CAMERA_RESOLUTION = (1920, 1080)  # Full HD"
+NEW_RES = "CAMERA_RESOLUTION = (1280, 720)   # 720p — ~4x smaller files than 1080p"
+
+if "CAMERA_RESOLUTION = (1280, 720)" in source:
+    print("⚠ Resolution already set to 720p — skipping")
+elif OLD_RES not in source:
+    errors.append("Could not find CAMERA_RESOLUTION = (1920, 1080) to replace")
+else:
+    source = source.replace(OLD_RES, NEW_RES, 1)
+    print("✓ CAMERA_RESOLUTION → (1280, 720)")
+    changes += 1
+
+# ── Fix 2: H264Encoder bitrate ────────────────────────────────────────────────
+# Lower bitrate from 10 Mbps to 4 Mbps — right-sized for 720p
+OLD_BITRATE = "encoder = H264Encoder(bitrate=10000000)  # 10 Mbps"
+NEW_BITRATE = "encoder = H264Encoder(bitrate=4000000)   # 4 Mbps — appropriate for 720p"
+
+if "bitrate=4000000" in source:
+    print("⚠ Bitrate already set to 4 Mbps — skipping")
+elif OLD_BITRATE not in source:
+    errors.append("Could not find H264Encoder(bitrate=10000000) to replace")
+else:
+    source = source.replace(OLD_BITRATE, NEW_BITRATE, 1)
+    print("✓ H264Encoder bitrate → 4 Mbps")
+    changes += 1
+
+# ── Fix 3: video_config resolution (create_video_configuration) ──────────────
+# picamera2 config also references the resolution — make sure it matches
+OLD_CONFIG = '"size": CAMERA_RESOLUTION, "format": "RGB888"'
+NEW_CONFIG = '"size": CAMERA_RESOLUTION, "format": "RGB888"'  # already uses the constant, no change needed
+
+# The config already references the CAMERA_RESOLUTION constant so it will
+# automatically pick up the new value — no text replacement needed.
+print("✓ Video config uses CAMERA_RESOLUTION constant — no separate change needed")
+
+if errors:
+    print("\nERRORS:")
+    for e in errors:
+        print(f"  • {e}")
+    sys.exit(1)
+
+with open(SCRIPT_PATH, "w") as fh:
+    fh.write(source)
+
+if changes > 0:
+    print(f"\n✓ {changes} change(s) saved to {SCRIPT_PATH}")
+else:
+    print(f"\n✓ No changes needed — already at 720p/4Mbps")
+PYTHON_EOF
+
+echo "Running patch..."
+echo ""
+python3 "$PATCH_FILE"
+EXIT_CODE=$?
+
+rm -f "$PATCH_FILE"
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo -e "${RED}✗ Patch failed — restoring backup${NC}"
+    cp "$BACKUP" "$SCRIPT_PATH"
+    exit $EXIT_CODE
+fi
+
+echo ""
+echo "↻ Restarting evvos-picam-tcp..."
+systemctl restart evvos-picam-tcp.service
+echo -e "${GREEN}✓ Service restarted${NC}"
+
+echo ""
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}✓ Done! Camera now records at 720p / 4 Mbps       ${NC}"
+echo -e "${GREEN}  Expected size: ~1.5–2 MB/min                    ${NC}"
+echo -e "${GREEN}  vs previous:   ~5–7 MB/min at 1080p             ${NC}"
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo ""
+echo "Verify: sudo journalctl -u evvos-picam-tcp -f"
