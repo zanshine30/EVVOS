@@ -535,7 +535,7 @@ fi
 
 log_section "Step 6: Configure PicoVoice Access Key"
 
-ACCESS_KEY_FILE="/opt/evvos/picovoice_access_key.txt"
+ACCESS_KEY=$(cat /opt/evvos/picovoice_access_key.txt | tr -d '\n')
 
 log_info "Setting up PicoVoice Access Key..."
 echo ""
