@@ -38,6 +38,31 @@ if [ "$EUID" -ne 0 ]; then
 fi
 log_success "Running as root"
 
+# ============================================================================
+# DETECT ACTUAL USER (not 'pi' on newer systems)
+# ============================================================================
+
+# Get the actual user who invoked sudo
+if [ -n "$SUDO_USER" ]; then
+    ACTUAL_USER="$SUDO_USER"
+else
+    # Fallback: find first user with UID >= 1000 (regular user)
+    ACTUAL_USER=$(awk -F: '$3 >= 1000 && $3 < 60000 {print $1; exit}' /etc/passwd)
+fi
+
+if [ -z "$ACTUAL_USER" ]; then
+    log_error "Could not detect actual user"
+    exit 1
+fi
+
+ACTUAL_HOME=$(eval echo ~$ACTUAL_USER)
+RECORDINGS_DIR="$ACTUAL_HOME/recordings"
+
+log_success "Detected user: $ACTUAL_USER"
+log_success "Home directory: $ACTUAL_HOME"
+log_success "Recordings will be stored in: $RECORDINGS_DIR"
+echo ""
+
 # Check Python3
 if ! command -v python3 &> /dev/null; then
     log_error "Python3 not found"
@@ -112,7 +137,7 @@ log_section "Step 3: Creating TCP Camera Service Script"
 
 CAMERA_SCRIPT="/usr/local/bin/evvos-picam-tcp.py"
 
-cat > "$CAMERA_SCRIPT" << 'CAMERA_SCRIPT_EOF'
+cat > "$CAMERA_SCRIPT" << CAMERA_SCRIPT_EOF
 #!/usr/bin/env python3
 """
 EVVOS Pi Camera TCP Control Service
@@ -148,7 +173,7 @@ import subprocess
 
 TCP_HOST = "0.0.0.0"  # Listen on all interfaces
 TCP_PORT = 3001       # Different port from voice service (3000)
-RECORDINGS_DIR = Path("/home/pi/recordings")
+RECORDINGS_DIR = Path("$RECORDINGS_DIR")  # Will be replaced by shell
 CAMERA_RESOLUTION = (1920, 1080)  # Full HD
 CAMERA_FPS = 30
 HTTP_PORT = 8080      # HTTP server for file downloads
@@ -547,10 +572,11 @@ log_success "Created systemd service: $SERVICE_FILE"
 
 log_section "Step 5: Creating Recordings Directory"
 
-mkdir -p /home/pi/recordings
-chown pi:pi /home/pi/recordings
-chmod 755 /home/pi/recordings
-log_success "Created /home/pi/recordings"
+mkdir -p "$RECORDINGS_DIR"
+chown "$ACTUAL_USER:$ACTUAL_USER" "$RECORDINGS_DIR"
+chmod 755 "$RECORDINGS_DIR"
+log_success "Created $RECORDINGS_DIR"
+log_success "Owned by: $ACTUAL_USER:$ACTUAL_USER"
 
 # ============================================================================
 # STEP 6: ENABLE AND START SERVICE
@@ -587,7 +613,8 @@ echo "  • Audio: ReSpeaker 2-Mics HAT (48kHz stereo)"
 echo "  • TCP Port: 3001 (command control)"
 echo "  • HTTP Port: 8080 (file serving)"
 echo "  • Service: evvos-picam-tcp.service"
-echo "  • Recordings: /home/pi/recordings/"
+echo "  • User: $ACTUAL_USER"
+echo "  • Recordings: $RECORDINGS_DIR"
 echo "  • Supabase Bucket: incident-videos"
 echo "  • File Size Limit: 50MB per file"
 echo ""
@@ -689,7 +716,7 @@ echo ""
 echo "  Q: HTTP file download fails?"
 echo "  A: Verify HTTP server is running and files exist:"
 echo "     curl http://PI_IP:8080/video_TIMESTAMP.h264"
-echo "     ls -lh /home/pi/recordings/"
+echo "     ls -lh $RECORDINGS_DIR"
 echo ""
 echo "  Q: No audio in recordings?"
 echo "  A: Verify ReSpeaker HAT is detected:"
