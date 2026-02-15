@@ -126,8 +126,8 @@ log_success "Camera interface enabled in $CONFIG_FILE"
 log_section "Step 2: Installing Camera Dependencies"
 
 apt-get update -qq
-apt-get install -y python3-picamera2 python3-opencv ffmpeg --no-install-recommends
-log_success "Installed picamera2, opencv, and ffmpeg"
+apt-get install -y python3-picamera2 python3-opencv python3-requests ffmpeg --no-install-recommends
+log_success "Installed picamera2, opencv, requests, and ffmpeg"
 
 # ============================================================================
 # STEP 3: CREATE TCP CAMERA SERVICE SCRIPT
@@ -156,20 +156,13 @@ from datetime import datetime
 from pathlib import Path
 
 # Camera imports
-PICAMERA2_AVAILABLE = True
 try:
     from picamera2 import Picamera2
     from picamera2.encoders import H264Encoder
     from picamera2.outputs import FileOutput
 except ImportError:
-    print("[CAMERA] WARNING: picamera2 not installed — camera features disabled", file=sys.stderr)
-    print("[CAMERA]   Install with: sudo apt-get install python3-picamera2", file=sys.stderr)
-    print("[CAMERA]   TCP server will still start so the app can receive a clear error", file=sys.stderr)
-    PICAMERA2_AVAILABLE = False
-    # Define stubs so the rest of the module can be imported cleanly
-    Picamera2 = None
-    H264Encoder = None
-    FileOutput = None
+    print("[CAMERA] ERROR: picamera2 not installed", file=sys.stderr)
+    sys.exit(1)
 
 # Audio recording (using arecord for ReSpeaker)
 import subprocess
@@ -227,12 +220,51 @@ def get_pi_ip_address():
     
     return None
 
-def setup_camera():
+def report_ip_to_supabase():
+    """
+    PATCH device_credentials.ip_address so the mobile app can discover
+    this Pi's current local network address without any hardcoded value.
+
+    Reads credentials from environment variables written to
+    /etc/evvos/config.env by the provisioning service:
+      SUPABASE_URL       — e.g. https://xxxx.supabase.co
+      SUPABASE_ANON_KEY  — project anon/public key
+      EVVOS_DEVICE_ID    — device_id stored in device_credentials table
+    """
+    import os, requests as _req
+
+    url     = os.environ.get('SUPABASE_URL', '').rstrip('/')
+    key     = os.environ.get('SUPABASE_ANON_KEY', '')
+    dev_id  = os.environ.get('EVVOS_DEVICE_ID', '')
+
+    if not all([url, key, dev_id]):
+        print("[SUPABASE] Skipping IP report — SUPABASE_URL / SUPABASE_ANON_KEY / EVVOS_DEVICE_ID not set in /etc/evvos/config.env")
+        return
+
+    if not pi_ip_address:
+        print("[SUPABASE] Skipping IP report — Pi IP not yet detected")
+        return
+
+    try:
+        resp = _req.patch(
+            f"{url}/rest/v1/device_credentials?device_id=eq.{dev_id}",
+            headers={
+                "apikey":         key,
+                "Authorization":  f"Bearer {key}",
+                "Content-Type":   "application/json",
+                "Prefer":         "return=minimal",
+            },
+            json={"ip_address": pi_ip_address},
+            timeout=10,
+        )
+        if resp.status_code in (200, 204):
+            print(f"[SUPABASE] ✓ Reported Pi IP {pi_ip_address} to Supabase device_credentials")
+        else:
+            print(f"[SUPABASE] ⚠ IP report failed: HTTP {resp.status_code} — {resp.text[:200]}")
+    except Exception as e:
+        print(f"[SUPABASE] Error reporting IP to Supabase: {e}")
     """Initialize Pi Camera"""
     global camera
-    if not PICAMERA2_AVAILABLE:
-        print("[CAMERA] Cannot init camera: picamera2 not installed", file=sys.stderr)
-        return False
     try:
         print("[CAMERA] Initializing Pi Camera Rev 1.3...")
         camera = Picamera2()
@@ -263,23 +295,6 @@ def start_recording_handler():
             print("[CAMERA] Already recording, ignoring START_RECORDING")
             return {"status": "already_recording"}
         
-        # Camera may not have been ready at service startup — retry init now.
-        # This handles the common case where the service started before the
-        # camera hardware finished its boot sequence.
-        if camera is None:
-            print("[CAMERA] Camera not initialised at startup — retrying now...")
-            if not setup_camera():
-                print("[CAMERA] ✗ Camera still not available after retry")
-                return {
-                    "status": "error",
-                    "message": (
-                        "Camera hardware not available. "
-                        "Check the ribbon cable and run: vcgencmd get_camera  "
-                        "If it shows 'detected=0', the camera is not connected."
-                    )
-                }
-            print("[CAMERA] ✓ Camera initialised on retry")
-        
         try:
             # Create recordings directory
             RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
@@ -300,11 +315,12 @@ def start_recording_handler():
             encoder = H264Encoder(bitrate=10000000)  # 10 Mbps
             camera.start_recording(encoder, str(current_video_path))
             
-            # Start audio recording (ReSpeaker HAT)
-            # Using arecord with 48kHz (ReSpeaker native sample rate)
+            # Start audio recording (ReSpeaker HAT via shared device)
+            # Using dsnooper for shared microphone access (allows voice commands during recording)
+            # Native ReSpeaker sample rate is 48kHz
             audio_process = subprocess.Popen([
                 "arecord",
-                "-D", "plughw:seeed2micvoicec",  # ReSpeaker card
+                "-D", "dsnooper",  # Shared capture device (configured in /etc/asound.conf)
                 "-f", "S16_LE",
                 "-r", "48000",
                 "-c", "2",  # Stereo
@@ -548,22 +564,15 @@ if __name__ == "__main__":
     pi_ip_address = get_pi_ip_address()
     if not pi_ip_address:
         print("[WARNING] Could not detect Pi IP address - file URLs will be unavailable")
+    else:
+        # Push IP to Supabase so the mobile app can read it without
+        # any hardcoded addresses in RecordingScreen.
+        report_ip_to_supabase()
     
-    # Attempt camera initialisation.
-    #
-    # IMPORTANT: we intentionally do NOT exit if setup_camera() returns False.
-    # Previously the service called sys.exit(1) here, which meant the TCP server
-    # never started → port 3001 was never open → the mobile app got ECONNREFUSED
-    # even though the network was fine.
-    #
-    # Now the TCP server always starts.  If the camera is not yet ready,
-    # start_recording_handler() will retry init and return a clean JSON error
-    # message the app can display, instead of a raw connection-refused error.
+    # Initialize camera
     if not setup_camera():
-        print("[CAMERA] ⚠ Camera init failed — TCP server will start anyway.")
-        print("[CAMERA]   START_RECORDING will retry camera init when commanded.")
-        print("[CAMERA]   To diagnose: vcgencmd get_camera")
-        print("[CAMERA]   If camera is not detected, check the ribbon cable.")
+        print("[CAMERA] Failed to initialize camera, exiting...")
+        sys.exit(1)
     
     # Start HTTP file server in background thread
     http_thread = threading.Thread(target=start_http_server, daemon=True)
@@ -601,6 +610,9 @@ StandardError=journal
 
 # Environment
 Environment="PYTHONUNBUFFERED=1"
+# Supabase credentials and device ID written by the provisioning service.
+# Edit /etc/evvos/config.env to set the correct values.
+EnvironmentFile=-/etc/evvos/config.env
 
 [Install]
 WantedBy=multi-user.target
@@ -609,8 +621,38 @@ SERVICE_EOF
 log_success "Created systemd service: $SERVICE_FILE"
 
 # ============================================================================
-# STEP 5: CREATE RECORDINGS DIRECTORY
+# STEP 4b: CREATE SUPABASE CREDENTIALS CONFIG FILE
 # ============================================================================
+
+log_section "Step 4b: Creating Supabase Credentials Config"
+
+EVVOS_CONFIG_DIR="/etc/evvos"
+EVVOS_CONFIG_FILE="$EVVOS_CONFIG_DIR/config.env"
+
+mkdir -p "$EVVOS_CONFIG_DIR"
+
+# Only create the file if it doesn't already exist (preserve existing values
+# written by the provisioning service).
+if [ ! -f "$EVVOS_CONFIG_FILE" ]; then
+    cat > "$EVVOS_CONFIG_FILE" << CONF_EOF
+# EVVOS Pi Camera — Supabase credentials
+# These values are filled in automatically by the provisioning service
+# (setup_provisioning.sh) when the Pi first connects to the cloud.
+# You can also set them manually:
+#
+#   SUPABASE_URL=https://YOUR_PROJECT_ID.supabase.co
+#   SUPABASE_ANON_KEY=your_anon_key_here
+#   EVVOS_DEVICE_ID=device_id_from_device_credentials_table
+
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+EVVOS_DEVICE_ID=
+CONF_EOF
+    chmod 600 "$EVVOS_CONFIG_FILE"   # root-only read (contains API key)
+    log_success "Created $EVVOS_CONFIG_FILE (fill in Supabase credentials)"
+else
+    log_info "$EVVOS_CONFIG_FILE already exists — leaving existing values intact"
+fi
 
 log_section "Step 5: Creating Recordings Directory"
 
@@ -630,27 +672,6 @@ systemctl daemon-reload
 systemctl enable evvos-picam-tcp.service
 systemctl start evvos-picam-tcp.service
 log_success "Service enabled and started"
-
-# ── Open firewall ports ───────────────────────────────────────────────────────
-# Port 3001 — TCP command socket (mobile app → Pi)
-# Port 8080 — HTTP file server (Pi → mobile app for video download)
-#
-# We only configure ufw if it is installed AND currently active.
-# On a fresh Raspberry Pi OS Lite the firewall is typically inactive,
-# so this block is usually a no-op, but it prevents hard-to-diagnose
-# ECONNREFUSED failures on setups where ufw has been enabled.
-if command -v ufw &>/dev/null; then
-    UFW_STATUS=$(ufw status 2>/dev/null | head -1)
-    if echo "$UFW_STATUS" | grep -q "active"; then
-        ufw allow 3001/tcp comment "EVVOS Pi Camera TCP control"
-        ufw allow 8080/tcp comment "EVVOS Pi Camera HTTP file server"
-        log_success "Firewall rules added: ports 3001 and 8080 are now open"
-    else
-        log_info "ufw is installed but not active — no firewall rules needed"
-    fi
-else
-    log_info "ufw not installed — no firewall rules needed"
-fi
 
 sleep 2
 echo ""
@@ -672,7 +693,8 @@ echo ""
 log_info "Configuration Summary:"
 echo "  • Hardware: Raspberry Pi Zero 2 W + Pi Camera Rev 1.3"
 echo "  • Resolution: 1920x1080 @ 30fps"
-echo "  • Audio: ReSpeaker 2-Mics HAT (48kHz stereo)"
+echo "  • Audio: ReSpeaker 2-Mics HAT (48kHz stereo, shared via dsnooper)"
+echo "  • Audio Device: dsnooper (allows simultaneous voice commands)"
 echo "  • TCP Port: 3001 (command control)"
 echo "  • HTTP Port: 8080 (file serving)"
 echo "  • Service: evvos-picam-tcp.service"
@@ -782,9 +804,11 @@ echo "     curl http://PI_IP:8080/video_TIMESTAMP.h264"
 echo "     ls -lh $RECORDINGS_DIR"
 echo ""
 echo "  Q: No audio in recordings?"
-echo "  A: Verify ReSpeaker HAT is detected:"
+echo "  A: Verify ReSpeaker HAT is detected and shared audio is configured:"
 echo "     arecord -l | grep seeed"
+echo "     cat /etc/asound.conf | grep dsnooper"
 echo "     If not found, run setup_respeaker_enhanced.sh first"
+echo "     Test shared audio: arecord -D dsnooper -f S16_LE -r 48000 -c 2 -d 3 test.wav"
 echo ""
 echo "  Q: Supabase upload fails with 'File too large'?"
 echo "  A: Bucket limit is 50MB. Check recording duration:"
