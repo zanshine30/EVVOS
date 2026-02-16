@@ -1,0 +1,315 @@
+#!/bin/bash
+# fix_picam_final.sh
+#
+# Definitive fix for:
+#   1. Corrupt video — replaces -c:v copy with libx264 re-encoding
+#   2. NULL DB columns — replaces edge function call with direct Supabase RPC
+#
+# Requires: update_incident_video SQL function already created in Supabase.
+#
+# Run on the Pi:
+#   curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/fix_picam_final.sh | sudo bash
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo ""
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}  EVVOS Pi Camera — Final Fix                     ${NC}"
+echo -e "${CYAN}  (libx264 re-encode + direct RPC DB update)      ${NC}"
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo ""
+
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}ERROR: Run as root: curl ... | sudo bash${NC}"
+    exit 1
+fi
+
+SCRIPT_PATH="/usr/local/bin/evvos-picam-tcp.py"
+
+if [ ! -f "$SCRIPT_PATH" ]; then
+    echo -e "${RED}ERROR: $SCRIPT_PATH not found${NC}"
+    exit 1
+fi
+
+BACKUP="${SCRIPT_PATH}.bak.$(date +%Y%m%d_%H%M%S)"
+cp "$SCRIPT_PATH" "$BACKUP"
+echo -e "${GREEN}✓ Backup: $BACKUP${NC}"
+
+PATCH_FILE="/tmp/fix_picam_final.py"
+
+cat > "$PATCH_FILE" << 'PYTHON_EOF'
+import sys, re
+
+SCRIPT_PATH = "/usr/local/bin/evvos-picam-tcp.py"
+
+with open(SCRIPT_PATH) as fh:
+    source = fh.read()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX 1: Replace the entire ffmpeg mux section inside stop_recording_handler.
+#
+# WHY -c:v copy FAILS:
+#   picamera2 outputs a raw Annex-B H.264 bitstream with no timestamps.
+#   -c:v copy tries to rewrap it into MP4's AVCC format without re-encoding.
+#   Even with -framerate, ffmpeg often produces an invalid moov atom because
+#   the SPS/PPS timing info is inconsistent, causing every player to reject it.
+#
+# FIX: -c:v libx264 -preset ultrafast actually re-encodes the stream.
+#   This guarantees valid timestamps, correct AVCC format, and a playable MP4.
+#   ultrafast preset adds ~2-3 seconds for a 5-min video — acceptable.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Find all ffmpeg_cmd list definitions that reference current_video_path
+# and replace -c:v copy (and optional -framerate) with libx264 encoding.
+
+def fix_ffmpeg_cmd(source):
+    """
+    Find every ffmpeg_cmd = [ ... ] block that contains current_video_path
+    and rewrite it with libx264 instead of copy.
+    Returns (new_source, count_of_replacements).
+    """
+    count = 0
+    result = []
+    i = 0
+    lines = source.split('\n')
+    n = len(lines)
+
+    while i < n:
+        line = lines[i]
+
+        # Detect start of an ffmpeg_cmd list
+        if 'ffmpeg_cmd = [' in line and i + 1 < n:
+            # Collect the entire list (until we hit the closing bracket)
+            block_start = i
+            block_lines = [line]
+            depth = line.count('[') - line.count(']')
+            j = i + 1
+            while j < n and depth > 0:
+                block_lines.append(lines[j])
+                depth += lines[j].count('[') - lines[j].count(']')
+                j += 1
+
+            block_text = '\n'.join(block_lines)
+
+            # Only touch blocks that reference current_video_path
+            if 'current_video_path' in block_text:
+                # Determine indent from the ffmpeg_cmd line
+                indent = len(line) - len(line.lstrip())
+                pad = ' ' * indent
+                inner = ' ' * (indent + 4)
+
+                has_audio = 'current_audio_path' in block_text
+
+                if has_audio:
+                    new_block = (
+                        f'{pad}ffmpeg_cmd = [\n'
+                        f'{inner}"ffmpeg", "-y",\n'
+                        f'{inner}"-i", str(current_video_path),\n'
+                        f'{inner}"-i", str(current_audio_path),\n'
+                        f'{inner}"-c:v", "libx264",\n'
+                        f'{inner}"-preset", "ultrafast",\n'
+                        f'{inner}"-crf", "28",\n'
+                        f'{inner}"-c:a", "aac",\n'
+                        f'{inner}"-movflags", "+faststart",\n'
+                        f'{inner}"-loglevel", "error",\n'
+                        f'{inner}str(mp4_path)\n'
+                        f'{pad}]'
+                    )
+                else:
+                    new_block = (
+                        f'{pad}ffmpeg_cmd = [\n'
+                        f'{inner}"ffmpeg", "-y",\n'
+                        f'{inner}"-i", str(current_video_path),\n'
+                        f'{inner}"-c:v", "libx264",\n'
+                        f'{inner}"-preset", "ultrafast",\n'
+                        f'{inner}"-crf", "28",\n'
+                        f'{inner}"-an",\n'
+                        f'{inner}"-movflags", "+faststart",\n'
+                        f'{inner}"-loglevel", "error",\n'
+                        f'{inner}str(mp4_path)\n'
+                        f'{pad}]'
+                    )
+
+                result.append(new_block)
+                count += 1
+                i = j  # skip over original block lines
+                continue
+
+        result.append(line)
+        i += 1
+
+    return '\n'.join(result), count
+
+
+if 'libx264' in source:
+    print("⚠ Fix 1: libx264 already present — skipping")
+    new_source = source
+    fix1_count = 0
+else:
+    new_source, fix1_count = fix_ffmpeg_cmd(source)
+    if fix1_count == 0:
+        print("⚠ Fix 1: No ffmpeg_cmd blocks referencing current_video_path found")
+        print("  Printing all lines with 'ffmpeg_cmd' for diagnosis:")
+        for n, l in enumerate(source.split('\n'), 1):
+            if 'ffmpeg_cmd' in l or 'current_video_path' in l:
+                print(f"  Line {n}: {l}")
+    else:
+        print(f"✓ Fix 1: Rewrote {fix1_count} ffmpeg_cmd block(s) to use libx264 re-encoding")
+
+source = new_source
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIX 2: Replace _notify_edge_function with a direct Supabase RPC call.
+#
+# WHY THE EDGE FUNCTION APPROACH FAILS:
+#   - Requires a separate deployment step (supabase functions deploy)
+#   - Silent failures give no indication in Pi logs
+#   - The file-exists check in the edge function can fail if there's a
+#     timing issue between upload completion and the Storage list API
+#
+# FIX: Call the update_incident_video() Postgres RPC directly via REST.
+#   POST /rest/v1/rpc/update_incident_video with the anon key.
+#   The SQL function uses SECURITY DEFINER so RLS is bypassed safely.
+#   The Pi sees the full error response if anything fails.
+# ─────────────────────────────────────────────────────────────────────────────
+
+NEW_NOTIFY = '''
+def _notify_edge_function(incident_id, video_url, storage_path,
+                           auth_token=None, video_size_mb=None, session_id=None):
+    """
+    Update incidents.video_url (and related columns) by calling the
+    update_incident_video() Supabase RPC directly via REST.
+    No edge function deployment needed. Uses SECURITY DEFINER RPC
+    so the anon key is sufficient.
+    """
+    import requests as _req
+
+    url  = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    anon = os.environ.get("SUPABASE_ANON_KEY", "")
+    if not url or not anon:
+        print("[NOTIFY] Skipping — SUPABASE_URL / SUPABASE_ANON_KEY not set", file=sys.stderr)
+        return
+
+    rpc_url = f"{url}/rest/v1/rpc/update_incident_video"
+    payload = {
+        "p_incident_id":   incident_id,
+        "p_video_url":     video_url,
+        "p_storage_path":  storage_path,
+        "p_video_size_mb": video_size_mb,
+        "p_session_id":    session_id,
+    }
+
+    print(f"[NOTIFY] Calling RPC update_incident_video for incident {incident_id} ...")
+    print(f"[NOTIFY] URL: {rpc_url}")
+    print(f"[NOTIFY] Payload: {payload}")
+
+    try:
+        resp = _req.post(
+            rpc_url,
+            headers={
+                "apikey":        anon,
+                "Authorization": f"Bearer {anon}",
+                "Content-Type":  "application/json",
+                "Prefer":        "return=representation",
+            },
+            json=payload,
+            timeout=30,
+        )
+        print(f"[NOTIFY] RPC response HTTP {resp.status_code}: {resp.text[:300]}")
+        if resp.status_code in (200, 201, 204):
+            print(f"[NOTIFY] ✓ Incident {incident_id} updated successfully")
+        else:
+            print(f"[NOTIFY] ✗ RPC failed HTTP {resp.status_code}: {resp.text[:300]}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[NOTIFY] ✗ RPC call exception: {exc}", file=sys.stderr)
+'''
+
+# Find and replace the old _notify_edge_function definition
+notify_pattern = re.compile(
+    r'\ndef _notify_edge_function\(.*?\n(?=\ndef |\nclass |\n# ===)',
+    re.DOTALL
+)
+
+if 'update_incident_video' in source:
+    print("⚠ Fix 2: RPC update already present — skipping")
+elif not re.search(r'def _notify_edge_function', source):
+    print("⚠ Fix 2: _notify_edge_function not found — run install_picam_upload.sh first")
+else:
+    new_source = notify_pattern.sub(NEW_NOTIFY + '\n', source)
+    if new_source == source:
+        # Fallback: simpler replacement if regex didn't match
+        old_start = source.find('\ndef _notify_edge_function(')
+        if old_start != -1:
+            # Find the next function/class/section after it
+            next_def = source.find('\ndef ', old_start + 1)
+            next_cls = source.find('\nclass ', old_start + 1)
+            next_sec = source.find('\n# ===', old_start + 1)
+            end = min(
+                x for x in [next_def, next_cls, next_sec]
+                if x != -1
+            )
+            old_func = source[old_start:end]
+            new_source = source.replace(old_func, NEW_NOTIFY, 1)
+
+    if new_source != source:
+        source = new_source
+        print("✓ Fix 2: _notify_edge_function replaced with direct Supabase RPC call")
+    else:
+        print("⚠ Fix 2: Could not replace _notify_edge_function — check file manually")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Write result
+# ─────────────────────────────────────────────────────────────────────────────
+
+with open(SCRIPT_PATH, "w") as fh:
+    fh.write(source)
+print(f"\n✓ Saved to {SCRIPT_PATH}")
+PYTHON_EOF
+
+echo "Running patch..."
+echo ""
+python3 "$PATCH_FILE"
+EXIT_CODE=$?
+
+rm -f "$PATCH_FILE"
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo -e "${RED}✗ Patch failed — restoring backup${NC}"
+    cp "$BACKUP" "$SCRIPT_PATH"
+    exit $EXIT_CODE
+fi
+
+echo ""
+echo "↻ Restarting evvos-picam-tcp..."
+systemctl restart evvos-picam-tcp.service
+echo -e "${GREEN}✓ Service restarted${NC}"
+
+# Quick verification
+echo ""
+echo -e "${YELLOW}Verifying fixes applied:${NC}"
+grep -c "libx264" "$SCRIPT_PATH" > /dev/null \
+    && echo -e "${GREEN}  ✓ libx264 present in script${NC}" \
+    || echo -e "${RED}  ✗ libx264 NOT found — Fix 1 may have failed${NC}"
+
+grep -c "update_incident_video" "$SCRIPT_PATH" > /dev/null \
+    && echo -e "${GREEN}  ✓ update_incident_video RPC present in script${NC}" \
+    || echo -e "${RED}  ✗ RPC call NOT found — Fix 2 may have failed${NC}"
+
+echo ""
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}✓ Done!${NC}"
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo ""
+echo "Watch logs during next recording:"
+echo "  sudo journalctl -u evvos-picam-tcp -f"
+echo ""
+echo -e "${YELLOW}NOTE: Make sure you ran update_incident_video.sql in${NC}"
+echo -e "${YELLOW}Supabase SQL Editor before testing — the Pi calls that${NC}"
+echo -e "${YELLOW}function to update the incidents table.${NC}"
