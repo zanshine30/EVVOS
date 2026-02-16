@@ -1,0 +1,142 @@
+#!/bin/bash
+# fix_picam_no_audio.sh
+#
+# Disables audio recording on the Pi (arecord removed from start_recording_handler).
+# Video-only recording until hardware is available.
+#
+# Run on the Pi:
+#   curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/fix_picam_no_audio.sh | sudo bash
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+echo ""
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}  EVVOS Pi Camera — Disable Audio Recording       ${NC}"
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo ""
+
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}ERROR: Run as root: curl ... | sudo bash${NC}"
+    exit 1
+fi
+
+SCRIPT_PATH="/usr/local/bin/evvos-picam-tcp.py"
+BACKUP="${SCRIPT_PATH}.bak.$(date +%Y%m%d_%H%M%S)"
+cp "$SCRIPT_PATH" "$BACKUP"
+echo -e "${GREEN}✓ Backup: $BACKUP${NC}"
+
+python3 << 'PYTHON_EOF'
+import sys
+
+SCRIPT_PATH = "/usr/local/bin/evvos-picam-tcp.py"
+
+with open(SCRIPT_PATH) as fh:
+    source = fh.read()
+
+# ── Fix 1: Disable arecord in start_recording_handler ────────────────────────
+# Find the arecord Popen block and replace with a no-op comment.
+# Anchored on the comment line directly above it which is unique.
+
+OLD_AUDIO = '''\
+            # Start audio recording (ReSpeaker HAT via shared device)
+            # Using dsnooper for shared microphone access (allows voice commands during recording)
+            # Native ReSpeaker sample rate is 48kHz
+            audio_process = subprocess.Popen([
+                "arecord",
+                "-D", "dsnooper",  # Shared capture device (configured in /etc/asound.conf)
+                "-f", "S16_LE",
+                "-r", "48000",
+                "-c", "2",  # Stereo
+                str(current_audio_path)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)'''
+
+NEW_AUDIO = '''\
+            # Audio recording disabled — no hardware available yet.
+            # Re-enable by restoring the arecord Popen block here.
+            audio_process = None
+            print("[CAMERA] Audio recording skipped (no hardware)")'''
+
+if 'Audio recording disabled' in source:
+    print("⚠ Audio already disabled — skipping Fix 1")
+elif OLD_AUDIO not in source:
+    # Fallback: find arecord Popen by line and null it out
+    lines = source.splitlines(keepends=True)
+    new_lines = []
+    skip = False
+    found = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Start of arecord block
+        if 'arecord' in line and 'subprocess.Popen' in line:
+            # Find indentation
+            indent = ' ' * (len(line) - len(line.lstrip()))
+            # Skip until we find the closing ], stdout=... line
+            new_lines.append(f'{indent}# Audio recording disabled — no hardware available yet.\n')
+            new_lines.append(f'{indent}audio_process = None\n')
+            new_lines.append(f'{indent}print("[CAMERA] Audio recording skipped (no hardware)")\n')
+            found = True
+            skip = True
+        elif skip:
+            # Skip lines until we pass the closing paren of Popen
+            if '], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)' in line:
+                skip = False
+        else:
+            new_lines.append(line)
+        i += 1
+
+    if found:
+        source = ''.join(new_lines)
+        print("✓ Fix 1 (fallback): arecord Popen disabled via line scan")
+    else:
+        print("✗ Could not find arecord block — check file manually")
+        sys.exit(1)
+else:
+    source = source.replace(OLD_AUDIO, NEW_AUDIO, 1)
+    print("✓ Fix 1: arecord disabled in start_recording_handler")
+
+# ── Fix 2: Remove audio termination from stop_recording_handler ──────────────
+# arecord is no longer started, so terminating it is a no-op, but clean it up.
+OLD_STOP_AUDIO = '''\
+            # ── Stop audio ───────────────────────────────────────────────────
+            if audio_process:
+                audio_process.terminate()
+                audio_process.wait(timeout=5)
+                audio_process = None'''
+
+NEW_STOP_AUDIO = '''\
+            # Audio process disabled — nothing to stop
+            audio_process = None'''
+
+if OLD_STOP_AUDIO not in source:
+    print("⚠ Fix 2: audio stop block not found or already patched — skipping")
+else:
+    source = source.replace(OLD_STOP_AUDIO, NEW_STOP_AUDIO, 1)
+    print("✓ Fix 2: audio stop block removed from stop_recording_handler")
+
+with open(SCRIPT_PATH, 'w') as fh:
+    fh.write(source)
+
+print(f"✓ Saved to {SCRIPT_PATH}")
+PYTHON_EOF
+
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+    echo -e "${RED}✗ Failed — restoring backup${NC}"
+    cp "$BACKUP" "$SCRIPT_PATH"
+    exit $EXIT_CODE
+fi
+
+echo ""
+echo "↻ Restarting evvos-picam-tcp..."
+systemctl restart evvos-picam-tcp.service
+echo -e "${GREEN}✓ Service restarted${NC}"
+echo ""
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}✓ Done! Pi now records video-only (no audio)      ${NC}"
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
