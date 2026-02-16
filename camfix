@@ -1,0 +1,134 @@
+#!/bin/bash
+# fix_picam_libx264.sh
+#
+# Targeted fix: replaces "-c:v", "copy" with libx264 re-encoding
+# in /usr/local/bin/evvos-picam-tcp.py
+#
+# Run on the Pi:
+#   curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/fix_picam_libx264.sh | sudo bash
+
+set -e
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+echo ""
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}  EVVOS Pi Camera — libx264 Fix                   ${NC}"
+echo -e "${CYAN}══════════════════════════════════════════════════${NC}"
+echo ""
+
+if [ "$EUID" -ne 0 ]; then
+    echo -e "${RED}ERROR: Run as root: curl ... | sudo bash${NC}"
+    exit 1
+fi
+
+SCRIPT_PATH="/usr/local/bin/evvos-picam-tcp.py"
+
+if [ ! -f "$SCRIPT_PATH" ]; then
+    echo -e "${RED}ERROR: $SCRIPT_PATH not found${NC}"
+    exit 1
+fi
+
+BACKUP="${SCRIPT_PATH}.bak.$(date +%Y%m%d_%H%M%S)"
+cp "$SCRIPT_PATH" "$BACKUP"
+echo -e "${GREEN}✓ Backup: $BACKUP${NC}"
+
+# ── Diagnose: show every ffmpeg-related line ──────────────────────────────────
+echo ""
+echo -e "${YELLOW}All ffmpeg-related lines currently in script:${NC}"
+grep -n 'ffmpeg\|"-c:v"\|"-c:a"\|"-i"\|copy\|libx264\|framerate\|preset\|faststart\|mp4_path' \
+    "$SCRIPT_PATH" || echo "(none found)"
+echo ""
+
+# ── Apply fix in Python ───────────────────────────────────────────────────────
+
+python3 << 'PYTHON_EOF'
+import sys
+
+SCRIPT_PATH = "/usr/local/bin/evvos-picam-tcp.py"
+
+with open(SCRIPT_PATH) as fh:
+    lines = fh.readlines()
+
+if any('libx264' in l for l in lines):
+    print("⚠ libx264 already present — no changes needed")
+    sys.exit(0)
+
+new_lines = []
+i = 0
+changes = 0
+
+while i < len(lines):
+    line = lines[i]
+    stripped = line.strip()
+
+    # ── Remove any -framerate lines added by previous patches ─────────────
+    if '"-framerate"' in stripped or "'-framerate'" in stripped:
+        print(f"  Removed stale -framerate line: {stripped}")
+        i += 1
+        continue
+
+    # ── Replace: "-c:v", "copy",  →  libx264 block ───────────────────────
+    # This is the one line that is always present regardless of patching history.
+    if ('"-c:v"' in stripped or "'-c:v'" in stripped) and \
+       ('"copy"' in stripped or "'copy'" in stripped):
+
+        indent = len(line) - len(line.lstrip())
+        pad = ' ' * indent
+
+        # Check whether to use single or double quotes (match the file style)
+        q = '"'
+
+        new_lines.append(f'{pad}{q}-c:v{q}, {q}libx264{q},\n')
+        new_lines.append(f'{pad}{q}-preset{q}, {q}ultrafast{q},\n')
+        new_lines.append(f'{pad}{q}-crf{q}, {q}28{q},\n')
+        changes += 1
+        print(f"  Replaced '-c:v copy' with libx264 at line {i+1}")
+        i += 1
+        continue
+
+    new_lines.append(line)
+    i += 1
+
+if changes == 0:
+    print("⚠ No '-c:v', 'copy' lines found.")
+    print("  Check the grep output above — the line may use different formatting.")
+    sys.exit(1)
+
+with open(SCRIPT_PATH, 'w') as fh:
+    fh.writelines(new_lines)
+
+print(f"\n✓ {changes} replacement(s) made — script saved")
+PYTHON_EOF
+
+EXIT_CODE=$?
+
+if [ $EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo -e "${RED}✗ Patch failed — restoring backup${NC}"
+    cp "$BACKUP" "$SCRIPT_PATH"
+    exit $EXIT_CODE
+fi
+
+# ── Verify ────────────────────────────────────────────────────────────────────
+echo ""
+echo -e "${YELLOW}ffmpeg lines after patch:${NC}"
+grep -n 'ffmpeg\|"-c:v"\|"-c:a"\|"-i"\|libx264\|preset\|crf\|faststart' \
+    "$SCRIPT_PATH" || echo "(none found)"
+echo ""
+
+echo "↻ Restarting evvos-picam-tcp..."
+systemctl restart evvos-picam-tcp.service
+echo -e "${GREEN}✓ Service restarted${NC}"
+
+echo ""
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo -e "${GREEN}✓ Done! Pi will now re-encode video with libx264  ${NC}"
+echo -e "${GREEN}  Valid MP4 guaranteed — players will open it.    ${NC}"
+echo -e "${GREEN}══════════════════════════════════════════════════${NC}"
+echo ""
+echo "Watch logs: sudo journalctl -u evvos-picam-tcp -f"
