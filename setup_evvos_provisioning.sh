@@ -187,55 +187,46 @@ class EVVOSWiFiProvisioner:
     def _on_button_held(self) -> None:
         """
         Handler for button held event (5 seconds).
-        Deletes stored credentials and restarts provisioning service.
+        Resets provisioning by deleting stored credentials and restarting
+        the evvos-provisioning service so the device starts fresh.
         """
         logger.warning("=" * 70)
-        logger.warning("🔘 BUTTON HELD 5 SECONDS - INITIATING FACTORY RESET")
+        logger.warning("🔘 BUTTON HELD 5 SECONDS - INITIATING PROVISIONING RESET")
         logger.warning("=" * 70)
-        
-        # Delete stored WiFi credentials
-        logger.warning("[BUTTON] Step 1: Deleting stored hotspot credentials...")
-        self._delete_credentials()
-        
-        # Disconnect from WiFi if connected
-        logger.warning("[BUTTON] Step 2: Disconnecting from WiFi...")
+
+        # Step 1: Delete stored WiFi credentials so the device will not
+        # attempt to reconnect to the previously saved network on restart.
+        logger.warning("[BUTTON] Step 1: Deleting stored credentials (%s)...", CREDS_FILE)
         try:
-            subprocess.run(["nmcli", "device", "disconnect", "wlan0"], 
-                         capture_output=True, timeout=5)
-            subprocess.run(["killall", "-q", "wpa_supplicant"], 
-                         capture_output=True, timeout=5)
-            subprocess.run(["killall", "-q", "dhclient"], 
-                         capture_output=True, timeout=5)
+            if os.path.exists(CREDS_FILE):
+                os.remove(CREDS_FILE)
+                self.credentials = None
+                logger.warning("[BUTTON] ✓ Credentials file deleted successfully")
+            else:
+                logger.warning("[BUTTON] ✓ No credentials file found - nothing to delete")
         except Exception as e:
-            logger.warning(f"[BUTTON] Could not disconnect WiFi: {e}")
-        
-        # Reset WiFi interface to hotspot mode
-        logger.warning("[BUTTON] Step 3: Resetting interface for hotspot mode...")
+            logger.error("[BUTTON] ❌ Failed to delete credentials file: %s", e)
+
+        # Step 2: Restart the evvos-provisioning service.
+        # systemd will bring the service back up with a clean state,
+        # which will start the hotspot provisioning flow from scratch.
+        logger.warning("[BUTTON] Step 2: Restarting evvos-provisioning service...")
         try:
-            subprocess.run(["ip", "addr", "flush", "dev", "wlan0"], 
-                         capture_output=True, timeout=5)
+            subprocess.run(
+                ["sudo", "systemctl", "restart", "evvos-provisioning"],
+                timeout=15,
+                check=True,
+            )
+            logger.warning("[BUTTON] ✓ Service restart command accepted by systemd")
+        except subprocess.TimeoutExpired:
+            logger.error("[BUTTON] ❌ systemctl restart timed out")
+        except subprocess.CalledProcessError as e:
+            logger.error("[BUTTON] ❌ systemctl restart failed (exit %s)", e.returncode)
         except Exception as e:
-            logger.warning(f"[BUTTON] Could not flush IP: {e}")
-        
-        # Clear state file
-        if os.path.exists(self.state_file):
-            try:
-                os.remove(self.state_file)
-                logger.warning("[BUTTON] Step 4: State file deleted")
-            except Exception as e:
-                logger.warning(f"[BUTTON] Could not delete state file: {e}")
-        
-        # Restart provisioning service
-        logger.warning("[BUTTON] Step 5: Restarting evvos-provisioning service...")
-        try:
-            subprocess.run(["systemctl", "restart", "evvos-provisioning"], 
-                         timeout=10)
-            logger.warning("[BUTTON] ✓ Service restart command sent")
-        except Exception as e:
-            logger.error(f"[BUTTON] ❌ Failed to restart service: {e}")
-        
+            logger.error("[BUTTON] ❌ Unexpected error restarting service: %s", e)
+
         logger.warning("=" * 70)
-        logger.warning("[BUTTON] Factory reset complete - provisioning will restart")
+        logger.warning("[BUTTON] Provisioning reset complete - service is restarting")
         logger.warning("=" * 70)
 
     def _encrypt_password(self, password: str) -> str:
