@@ -650,36 +650,22 @@ log_info "Removed any legacy .asoundrc files"
 #   and share the microphone without either one blocking the other.
 #
 cat > /etc/asound.conf << ASOUND_EOF
-# /etc/asound.conf — EVVOS shared microphone configuration
-# Enables concurrent access to the ReSpeaker 2-Mics HAT from multiple services
-# (PicoVoice voice recognition + PiCam audio recording) via ALSA dsnoop.
-
-# ── dsnoop: shared capture device ────────────────────────────────────────────
-# Any service can open "dsnoop:seeed2micvoicec" or just "dsnoop" and read from
-# the ReSpeaker microphone simultaneously with other services.
-pcm.dsnoop {
+pcm.shared_mic {
     type dsnoop
-    ipc_key 2048          # unique shared-memory key — change only if clashing
-    ipc_key_add_uid false # share across all users/services (root + pi)
-    slave {
+    ipc_key 2048
+    ipc_key_add_uid false
+    slaves {
         pcm "hw:${RESPEAKER_CARD_NUM},0"
         channels 2
         rate 48000
         period_size 1024
         buffer_size 8192
     }
-    bindings {
-        0 0               # bind dsnoop channel 0 → hw channel 0 (left mic)
-        1 1               # bind dsnoop channel 1 → hw channel 1 (right mic)
-    }
 }
 
-# ── default capture: route "default" to dsnoop ───────────────────────────────
-# Tools that open the generic "default" device (e.g. arecord -D default) will
-# automatically use the shared dsnoop device instead of the raw hardware.
 pcm.!default {
     type asym
-    capture.pcm "dsnoop"
+    capture.pcm "shared_mic"
 }
 
 ctl.!default {
@@ -1100,20 +1086,20 @@ class PicoVoiceService:
             dev_idx = None
             dev_name = None
 
-            # Priority 1: dsnoop virtual device (shared, non-exclusive)
+            # Priority 1: shared_mic virtual device (dsnoop-backed, shared, non-exclusive)
             for i in range(self.pa.get_device_count()):
                 info = self.pa.get_device_info_by_index(i)
-                if 'dsnoop' in info['name'].lower() and info['maxInputChannels'] > 0:
+                if 'shared_mic' in info['name'].lower() and info['maxInputChannels'] > 0:
                     dev_idx = i
                     dev_name = info['name']
-                    logger.info(f"Found shared dsnoop device: {dev_name} (index {i}) — mic will be shared with PiCam")
+                    logger.info(f"Found shared_mic device: {dev_name} (index {i}) — mic will be shared with PiCam")
                     logger.info(f"  Sample Rate: {int(info['defaultSampleRate'])} Hz")
                     logger.info(f"  Input Channels: {info['maxInputChannels']}")
                     break
 
             # Priority 2: ReSpeaker hardware device (seeed)
             if dev_idx is None:
-                logger.warning("dsnoop device not found — falling back to direct ReSpeaker device (mic sharing disabled)")
+                logger.warning("shared_mic device not found — falling back to direct ReSpeaker device (mic sharing disabled)")
                 for i in range(self.pa.get_device_count()):
                     info = self.pa.get_device_info_by_index(i)
                     if 'seeed' in info['name'].lower() and info['maxInputChannels'] > 0:
