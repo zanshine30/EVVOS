@@ -58,16 +58,27 @@ apt-get install -y python3-picamera2 python3-requests ffmpeg pulseaudio pulseaud
 # Install whisper-ctranslate2 for offline speech-to-text transcription.
 # Uses the 'tiny' model — small enough for Pi Zero 2 W (39 MB, ~1-2 min per recording on CPU).
 # faster-whisper/ctranslate2 is significantly faster than openai-whisper on ARM CPU.
-pip3 install whisper-ctranslate2 --break-system-packages --quiet 2>/dev/null || \
+# IMPORTANT: Use the explicit python3 binary that the service uses (/usr/bin/python3)
+# to ensure the package is installed in the same environment the service imports from.
+/usr/bin/python3 -m pip install whisper-ctranslate2 --break-system-packages --quiet || \
     echo "⚠ whisper-ctranslate2 install failed — transcription will be skipped at runtime"
 
+# Verify the import works under the same Python the service will use
+if /usr/bin/python3 -c "from faster_whisper import WhisperModel" 2>/dev/null; then
+    echo "✓ faster-whisper import verified under /usr/bin/python3"
+else
+    echo "⚠ faster-whisper import failed — retrying install..."
+    /usr/bin/python3 -m pip install faster-whisper --break-system-packages --quiet
+    /usr/bin/python3 -m pip install ctranslate2 --break-system-packages --quiet
+fi
+
 # Pre-download the tiny model so first recording doesn't stall waiting for a download
-python3 -c "
+/usr/bin/python3 -c "
 from faster_whisper import WhisperModel
 print('[WHISPER] Downloading tiny model...')
 WhisperModel('tiny', device='cpu', compute_type='int8')
 print('[WHISPER] Model ready')
-" 2>/dev/null || echo "⚠ Whisper model pre-download failed — will download on first use"
+" || echo "⚠ Whisper model pre-download failed — will download on first use"
 
 log_success "Camera firmware, audio, and transcription dependencies ready"
 
@@ -299,28 +310,22 @@ def transcribe_audio(audio_path):
 
     try:
         print("[WHISPER] Transcribing audio (tiny model, CPU)...")
-        res = subprocess.run(
-            [
-                "whisper-ctranslate2",
-                str(audio_path),
-                "--model",         "tiny",
-                "--language",      "en",
-                "--output_format", "txt",
-                "--output_dir",    str(RECORDINGS_DIR),
-                "--device",        "cpu",
-                "--compute_type",  "int8",
-            ],
-            capture_output=True, text=True, timeout=300
-        )
 
-        txt_path = Path(audio_path).with_suffix(".txt")
-        if txt_path.exists():
-            transcript = txt_path.read_text(encoding="utf-8").strip()
-            txt_path.unlink(missing_ok=True)
-        elif res.stdout.strip():
-            transcript = res.stdout.strip()
-        else:
-            print(f"[WHISPER] No transcript output. stderr: {res.stderr[:300]}")
+        # Use faster_whisper Python API directly — avoids CLI PATH issues when
+        # running as a systemd service where whisper-ctranslate2 binary may not
+        # be on the service PATH even if the Python package is installed.
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            print("[WHISPER] faster_whisper not importable — run setup_picam.sh to install")
+            return result
+
+        model = WhisperModel("tiny", device="cpu", compute_type="int8")
+        segments, info = model.transcribe(str(audio_path), language="en", beam_size=5)
+        transcript = " ".join(seg.text.strip() for seg in segments).strip()
+
+        if not transcript:
+            print("[WHISPER] Transcription returned empty result")
             return result
 
         print(f"[WHISPER] Raw transcript: {transcript[:300]}")
@@ -380,12 +385,6 @@ def transcribe_audio(audio_path):
 
         return result
 
-    except subprocess.TimeoutExpired:
-        print("[WHISPER] Transcription timed out after 300s")
-        return result
-    except FileNotFoundError:
-        print("[WHISPER] whisper-ctranslate2 not installed -- run: pip install whisper-ctranslate2")
-        return result
     except Exception as e:
         print(f"[WHISPER] Unexpected error: {e}")
         import traceback
