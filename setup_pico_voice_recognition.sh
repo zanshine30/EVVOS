@@ -535,7 +535,13 @@ fi
 
 log_section "Step 6: Configure PicoVoice Access Key"
 
-ACCESS_KEY=$(cat /opt/evvos/picovoice_access_key.txt | tr -d '\n')
+ACCESS_KEY_FILE="/opt/evvos/picovoice_access_key.txt"
+
+# Pre-read existing key only if the file already exists
+ACCESS_KEY=""
+if [ -f "$ACCESS_KEY_FILE" ]; then
+    ACCESS_KEY=$(cat "$ACCESS_KEY_FILE" | tr -d '\n')
+fi
 
 log_info "Setting up PicoVoice Access Key..."
 echo ""
