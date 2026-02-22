@@ -131,6 +131,38 @@ def setup_camera():
 
 # ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
 
+def stop_picovoice():
+    """Stop PicoVoice service so it releases the microphone hardware lock."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "stop", "evvos-pico-voice"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            print("[CAMERA] PicoVoice stopped — microphone released")
+        else:
+            print(f"[CAMERA] Warning: PicoVoice stop returned {result.returncode}: {result.stderr.strip()}")
+        # Give ALSA a moment to fully release the hardware
+        time.sleep(1)
+    except Exception as e:
+        print(f"[CAMERA] Warning: Could not stop PicoVoice: {e}")
+
+
+def start_picovoice():
+    """Restart PicoVoice service after recording is done."""
+    try:
+        result = subprocess.run(
+            ["systemctl", "start", "evvos-pico-voice"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            print("[CAMERA] PicoVoice restarted — microphone returned")
+        else:
+            print(f"[CAMERA] Warning: PicoVoice start returned {result.returncode}: {result.stderr.strip()}")
+    except Exception as e:
+        print(f"[CAMERA] Warning: Could not restart PicoVoice: {e}")
+
+
 def start_recording_handler():
     global recording, current_session_id, current_video_path, current_audio_path, audio_process, recording_start_time
     with recording_lock:
@@ -153,24 +185,32 @@ def start_recording_handler():
             current_audio_path   = RECORDINGS_DIR / f"audio_{ts}.wav"
             recording_start_time = time.time()
 
+            # Stop PicoVoice so it releases exclusive hold on hw:0,0.
+            # ALSA does not support simultaneous capture from the same hardware
+            # device without a working dsnoop/pulse setup. Stopping PicoVoice
+            # during recording is safe — voice commands are not needed while
+            # an incident is actively being recorded. PicoVoice is restarted
+            # automatically in stop_recording_handler().
+            stop_picovoice()
+
             print(f"[CAMERA] Starting: {current_session_id}")
             encoder = H264Encoder(bitrate=2500000, framerate=CAMERA_FPS)
             camera.start_recording(encoder, str(current_video_path))
-            
-            # Start background audio recording using ALSA dsnoop (shared capture device).
-            #
-            # WHY "dsnoop" not "hw:seeed2micvoicec" or "default":
-            #   PicoVoice starts on boot and holds an open stream to the ReSpeaker mic.
-            #   ALSA grants exclusive access to hw:X,0 to the first opener, so a second
-            #   open here returns EBUSY and arecord records silence or crashes.
-            #   dsnoop is an ALSA sharing plugin (configured by setup_pico_voice_recognition_respeaker.sh)
-            #   that lets both services read the same hardware stream simultaneously.
-            #   Using "-D dsnoop" by plugin name is more reliable than "-D default"
-            #   because it bypasses any system-default PCM remapping.
+
+            # Record audio directly from hardware now that PicoVoice released it
             audio_process = subprocess.Popen([
-                "arecord", "-D", "shared_mic", "-f", "S16_LE", "-r", "48000", "-c", "2", str(current_audio_path)
-            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            
+                "arecord", "-D", "hw:0,0", "-f", "S16_LE", "-r", "48000", "-c", "2", str(current_audio_path)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+            # Give arecord a moment to open and verify it started cleanly
+            time.sleep(0.5)
+            if audio_process.poll() is not None:
+                err = audio_process.stderr.read().decode().strip()
+                print(f"[CAMERA] Warning: arecord exited immediately: {err}")
+                audio_process = None
+            else:
+                print("[CAMERA] arecord started on hw:0,0")
+
             recording = True
 
             return {
@@ -184,6 +224,8 @@ def start_recording_handler():
             }
         except Exception as e:
             print(f"[CAMERA] Start Error: {e}")
+            # Make sure PicoVoice is restarted even if recording failed
+            start_picovoice()
             return {"status": "error", "message": str(e)}
 
 
@@ -218,7 +260,7 @@ def stop_recording_handler():
                     audio_process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     audio_process.kill()
-                    
+
             recording            = False
             recording_start_time = None
             time.sleep(0.5)
@@ -267,6 +309,9 @@ def stop_recording_handler():
                 print(f"[FFMPEG] Error: {res.stderr}")
                 size_mb = mp4_path.stat().st_size / 1024 / 1024 if mp4_path.exists() else 0
 
+            # Restart PicoVoice now that recording and muxing are done
+            start_picovoice()
+
             return {
                 "status":         "recording_stopped",
                 "session_id":     current_session_id,
@@ -279,6 +324,8 @@ def stop_recording_handler():
             }
         except Exception as e:
             print(f"[CAMERA] Stop Error: {e}")
+            # Always restart PicoVoice even if stop failed
+            start_picovoice()
             return {"status": "error", "message": str(e)}
 
 
