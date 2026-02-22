@@ -53,40 +53,106 @@ grep -q "^start_x=1" "$CONFIG_FILE" || echo "start_x=1" >> "$CONFIG_FILE"
 grep -q "^gpu_mem="   "$CONFIG_FILE" || echo "gpu_mem=128" >> "$CONFIG_FILE"
 
 apt-get update -qq
-apt-get install -y python3-picamera2 python3-requests ffmpeg pulseaudio pulseaudio-utils --no-install-recommends
+apt-get install -y \
+    python3-picamera2 python3-requests ffmpeg \
+    pulseaudio pulseaudio-utils \
+    git cmake build-essential \
+    libopenblas-dev libopenblas-base \
+    --no-install-recommends
+log_success "Camera firmware and dependencies ready"
 
-# Install whisper-ctranslate2 into the evvos virtualenv to avoid system Python
-# dependency conflicts. The venv already has compatible numpy/ctranslate2 versions
-# from the PicoVoice setup, so resolution succeeds there where it fails system-wide.
-VENV_PIP="/opt/evvos/venv/bin/pip"
-VENV_PYTHON="/opt/evvos/venv/bin/python3"
+# ============================================================================
+# STEP 2.5: INSTALL WHISPER.CPP  (32-bit ARM / armhf — Bookworm compatible)
+# ============================================================================
+# WHY whisper.cpp instead of faster-whisper / whisper-ctranslate2:
+#
+#   • ctranslate2 (required by both faster-whisper and whisper-ctranslate2)
+#     publishes NO pre-built armhf wheel on PyPI.  `pip install ctranslate2`
+#     fails immediately on any 32-bit Raspberry Pi OS.
+#
+#   • openai-whisper requires PyTorch.  The official torch project stopped
+#     publishing armhf wheels; the Debian package (python3-torch in Bookworm)
+#     is built without Metal/CUDA and peaks at ~470 MB RSS on tiny — leaving
+#     virtually zero headroom on the Pi Zero 2 W's 512 MB.
+#
+#   • whisper.cpp is pure C++17, compiles cleanly on armhf Bookworm, links
+#     against OpenBLAS for BLAS-accelerated matrix ops, and uses only ~75 MB
+#     RSS with the tiny.en GGML model.  Inference time: 60–120 s on Pi Zero 2 W.
+# ============================================================================
+log_section "Step 2.5: Building whisper.cpp (32-bit ARM, OpenBLAS)"
 
-if [ -f "$VENV_PIP" ]; then
-    echo "Installing whisper-ctranslate2 into /opt/evvos/venv..."
-    "$VENV_PIP" install whisper-ctranslate2 --quiet || \
-        echo "⚠ whisper-ctranslate2 install failed in venv"
+WHISPER_DIR="/opt/whisper.cpp"
+WHISPER_MODEL_NAME="tiny.en"
+WHISPER_MODEL_FILE="${WHISPER_DIR}/models/ggml-${WHISPER_MODEL_NAME}.bin"
+WHISPER_BIN="${WHISPER_DIR}/build/bin/whisper-cli"
 
-    # Verify the import works inside the venv
-    if "$VENV_PYTHON" -c "from faster_whisper import WhisperModel" 2>/dev/null; then
-        echo "✓ faster-whisper import verified in evvos venv"
-    else
-        echo "⚠ faster-whisper import failed — trying faster-whisper directly..."
-        "$VENV_PIP" install faster-whisper --quiet
-    fi
-
-    # Pre-download the tiny model
-    "$VENV_PYTHON" -c "
-from faster_whisper import WhisperModel
-print('[WHISPER] Downloading tiny model...')
-WhisperModel('tiny', device='cpu', compute_type='int8')
-print('[WHISPER] Model ready')
-" || echo "⚠ Whisper model pre-download failed — will download on first use"
-
+# ── Clone (or update) ─────────────────────────────────────────────────────────
+if [ -d "$WHISPER_DIR/.git" ]; then
+    log_info "whisper.cpp already cloned — pulling latest..."
+    git -C "$WHISPER_DIR" pull --ff-only || true
 else
-    echo "⚠ evvos venv not found at /opt/evvos/venv — run setup_pico_voice_recognition_respeaker.sh first"
+    log_info "Cloning whisper.cpp..."
+    git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
 fi
 
-log_success "Camera firmware, audio, and transcription dependencies ready"
+# ── CMake build with OpenBLAS ─────────────────────────────────────────────────
+# -DWHISPER_BLAS=ON   → link OpenBLAS (2-3× faster matrix multiply vs plain C)
+# -j2                 → parallel build; keeps thermals manageable on Pi Zero 2 W
+# Build takes ~20-30 min on Pi Zero 2 W — this is normal and expected.
+log_info "Building whisper.cpp with OpenBLAS — this takes 20–30 min on Pi Zero 2 W..."
+cmake -B "${WHISPER_DIR}/build" \
+      -S "${WHISPER_DIR}" \
+      -DWHISPER_BLAS=ON \
+      -DWHISPER_NO_AVX=ON \
+      -DWHISPER_NO_AVX2=ON \
+      -DWHISPER_NO_F16C=ON \
+      -DWHISPER_NO_FMA=ON \
+      -DCMAKE_BUILD_TYPE=Release
+cmake --build "${WHISPER_DIR}/build" --config Release -j2
+
+# Confirm binary exists (name changed from `main` → `whisper-cli` in 1.6+)
+if [ ! -f "$WHISPER_BIN" ]; then
+    WHISPER_BIN_LEGACY="${WHISPER_DIR}/build/bin/main"
+    if [ -f "$WHISPER_BIN_LEGACY" ]; then
+        ln -sf "$WHISPER_BIN_LEGACY" "$WHISPER_BIN"
+        log_info "Symlinked legacy 'main' binary → whisper-cli"
+    else
+        log_error "whisper-cli binary not found after build — check cmake output"
+        exit 1
+    fi
+fi
+log_success "whisper.cpp built: $WHISPER_BIN"
+
+# ── Download tiny.en GGML model ───────────────────────────────────────────────
+# tiny.en: 77 MB, English-only, fastest on CPU, sufficient for field audio.
+# For multilingual support swap to 'tiny' (same size, slightly lower accuracy).
+if [ -f "$WHISPER_MODEL_FILE" ]; then
+    log_info "Model already downloaded: $WHISPER_MODEL_FILE"
+else
+    log_info "Downloading ggml-${WHISPER_MODEL_NAME}.bin (~77 MB)..."
+    bash "${WHISPER_DIR}/models/download-ggml-model.sh" "$WHISPER_MODEL_NAME"
+    if [ ! -f "$WHISPER_MODEL_FILE" ]; then
+        log_error "Model download failed — check internet access and try again"
+        exit 1
+    fi
+fi
+log_success "Model ready: $WHISPER_MODEL_FILE"
+
+# ── Smoke-test ────────────────────────────────────────────────────────────────
+if "$WHISPER_BIN" --help >/dev/null 2>&1; then
+    log_success "whisper-cli smoke-test passed"
+else
+    log_error "whisper-cli --help failed — binary may be corrupt"
+    exit 1
+fi
+
+# ── Write config file for the Python service ──────────────────────────────────
+mkdir -p /etc/evvos
+cat > /etc/evvos/whisper.env << WENV_EOF
+WHISPER_BIN=${WHISPER_BIN}
+WHISPER_MODEL=${WHISPER_MODEL_FILE}
+WENV_EOF
+log_success "Whisper config written to /etc/evvos/whisper.env"
 
 # ============================================================================
 # STEP 3: CREATE ENHANCED TCP CAMERA SERVICE SCRIPT
@@ -160,6 +226,171 @@ def setup_camera():
     except Exception as e:
         print(f"[CAMERA] ERROR: {e}")
         return False
+
+# ── WHISPER TRANSCRIPTION ─────────────────────────────────────────────────────
+import re as _re, os as _os
+
+WHISPER_BIN   = _os.environ.get("WHISPER_BIN",   "/opt/whisper.cpp/build/bin/whisper-cli")
+WHISPER_MODEL = _os.environ.get("WHISPER_MODEL",  "/opt/whisper.cpp/models/ggml-tiny.en.bin")
+
+
+def _extract_plate_number(text: str) -> str:
+    """
+    Match Philippine LTO plate formats in the transcript.
+    Common formats:
+      Private vehicles  : ABC 1234  or  ABC-1234  (3 alpha + 4 digits)
+      Motorcycles       : 1234 AB   or  1234-AB   (4 digits + 2 alpha)
+      Government/PNP    : SFX 123   (3 alpha + 3 digits, rare but possible)
+    """
+    patterns = [
+        r'\b([A-Z]{3})[\s\-]?(\d{4})\b',   # ABC 1234 — most common private
+        r'\b([A-Z]{3})[\s\-]?(\d{3})\b',    # ABC 123  — gov/special series
+        r'\b(\d{4})[\s\-]?([A-Z]{2})\b',    # 1234 AB  — motorcycle
+    ]
+    for pat in patterns:
+        m = _re.search(pat, text.upper())
+        if m:
+            return ' '.join(m.groups())
+    return ''
+
+
+def _extract_driver_name(text: str) -> str:
+    """
+    Heuristic: look for common name-announcing phrases spoken by the officer.
+    Works best when the officer says "Driver is Juan dela Cruz" or
+    "name: Juan dela Cruz" into the mic.  Falls back to empty string.
+    """
+    patterns = [
+        r"(?:driver(?:'s)?\s+(?:name\s+)?is|name\s*[:is]+)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
+        r"(?:apprehended|stopped)\s+(?:a\s+)?(?:driver\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
+    ]
+    for pat in patterns:
+        m = _re.search(pat, text, _re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+    return ''
+
+
+_VIOLATION_KEYWORDS = {
+    "beating the red light":      "Beating Red Light",
+    "ran a red light":            "Beating Red Light",
+    "red light":                  "Beating Red Light",
+    "no helmet":                  "No Helmet",
+    "overspeeding":               "Overspeeding",
+    "over speed":                 "Overspeeding",
+    "speeding":                   "Overspeeding",
+    "illegal parking":            "Illegal Parking",
+    "no seatbelt":                "No Seatbelt",
+    "seatbelt":                   "No Seatbelt",
+    "no license":                 "No Driver's License",
+    "no driver's license":        "No Driver's License",
+    "expired license":            "Expired License",
+    "expired registration":       "Expired Registration",
+    "no registration":            "No Registration",
+    "reckless driving":           "Reckless Driving",
+    "counterflow":                "Counterflow",
+    "counter flow":               "Counterflow",
+    "obstruction":                "Obstruction",
+    "loading":                    "Illegal Loading/Unloading",
+    "unloading":                  "Illegal Loading/Unloading",
+    "no or":                      "No Official Receipt",
+    "no cr":                      "No Certificate of Registration",
+    "smoke belching":             "Smoke Belching",
+    "colorum":                    "Colorum",
+    "no franchise":               "No Franchise",
+}
+
+
+def _extract_violations(text: str) -> list:
+    found = []
+    lower = text.lower()
+    for keyword, label in _VIOLATION_KEYWORDS.items():
+        if keyword in lower and label not in found:
+            found.append(label)
+    return found
+
+
+def transcribe_audio(audio_path: Path) -> dict:
+    """
+    Run whisper.cpp on the recorded WAV, return:
+      { transcript, driver_name, plate_number, violations }
+
+    whisper-cli flags used:
+      -m  model path
+      -f  input audio (WAV / any FFmpeg-readable format)
+      -otxt          write transcript to <audio>.txt
+      -nt            no timestamps (cleaner output)
+      -np            no progress bar
+      -l  en         force English (tiny.en model is English-only)
+      --threads 2    use both cores on Pi Zero 2 W
+    """
+    empty = {"transcript": "", "driver_name": "", "plate_number": "", "violations": []}
+
+    if not Path(WHISPER_BIN).exists():
+        print(f"[WHISPER] Binary not found: {WHISPER_BIN} — skipping transcription")
+        return empty
+    if not Path(WHISPER_MODEL).exists():
+        print(f"[WHISPER] Model not found: {WHISPER_MODEL} — skipping transcription")
+        return empty
+    if not audio_path.exists() or audio_path.stat().st_size < 1000:
+        print("[WHISPER] Audio file missing or too small — skipping transcription")
+        return empty
+
+    print(f"[WHISPER] Transcribing {audio_path.name} (60–120 s on Pi Zero 2 W)...")
+    txt_path = audio_path.with_suffix(audio_path.suffix + ".txt")  # e.g. audio_*.wav.txt
+
+    try:
+        result = subprocess.run(
+            [
+                WHISPER_BIN,
+                "-m",  WHISPER_MODEL,
+                "-f",  str(audio_path),
+                "-otxt",          # write <audio>.txt
+                "-nt",            # no timestamps
+                "-np",            # no progress
+                "-l",  "en",      # force English
+                "--threads", "2", # use both A53 cores
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,          # 5 min absolute hard limit
+        )
+
+        if result.returncode != 0:
+            print(f"[WHISPER] Non-zero exit {result.returncode}: {result.stderr[:200]}")
+            # Still try to read partial output if the txt was written
+        
+        # Prefer the .txt sidecar file (most reliable)
+        if txt_path.exists():
+            transcript = txt_path.read_text(encoding="utf-8", errors="replace").strip()
+            txt_path.unlink(missing_ok=True)  # clean up
+        else:
+            transcript = result.stdout.strip()
+
+        if not transcript:
+            print("[WHISPER] Transcription produced no output")
+            return empty
+
+        print(f"[WHISPER] ✓ Transcript ({len(transcript)} chars): {transcript[:120]}...")
+
+        driver_name  = _extract_driver_name(transcript)
+        plate_number = _extract_plate_number(transcript)
+        violations   = _extract_violations(transcript)
+
+        print(f"[WHISPER] Driver: {driver_name!r}  Plate: {plate_number!r}  Violations: {violations}")
+        return {
+            "transcript":   transcript,
+            "driver_name":  driver_name,
+            "plate_number": plate_number,
+            "violations":   violations,
+        }
+
+    except subprocess.TimeoutExpired:
+        print("[WHISPER] Transcription timed out after 5 min — returning empty")
+        return empty
+    except Exception as e:
+        print(f"[WHISPER] Unexpected error: {e}")
+        return empty
 
 # ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
 
@@ -236,177 +467,6 @@ def get_status_handler():
         }
 
 
-def transcribe_audio(audio_path):
-    """
-    Transcribe audio using faster-whisper (tiny model, CPU, int8).
-    Parses three enforcer-spoken fields:
-
-    1. DRIVER NAME
-       Trigger:  "Driver's name" / "Driver name" / "The driver's name is"
-       Captures: Full name in Title Case until sentence boundary or next trigger.
-       Example:  "Driver's name John Santos" -> "John Santos"
-
-    2. PLATE NUMBER
-       The enforcer spells character by character so Whisper transcribes each
-       letter/digit as a separate word, e.g. "Plate number A B C 1 2 3".
-       Maps: single letters, NATO phonetic words, spoken digit words, bare numerals.
-       Stops collecting when a non-plate word is encountered.
-       Result joined without spaces: "ABC123"
-
-    3. VIOLATIONS
-       Trigger:  "Violations are" / "Violations" / "Violation"
-       Captures: Everything after trigger, split on commas and "and".
-       Example:  "Violations are Not Wearing Helmet, No License Plate"
-                 -> ["Not Wearing Helmet", "No License Plate"]
-    """
-    import re
-
-    result = {
-        "transcript":   "",
-        "driver_name":  "",
-        "plate_number": "",
-        "violations":   [],
-    }
-
-    if not audio_path or not Path(audio_path).exists():
-        print("[WHISPER] No audio file -- skipping transcription")
-        return result
-
-    NATO = {
-        "alpha": "A", "bravo": "B", "charlie": "C", "delta": "D",
-        "echo": "E", "foxtrot": "F", "golf": "G", "hotel": "H",
-        "india": "I", "juliet": "J", "kilo": "K", "lima": "L",
-        "mike": "M", "november": "N", "oscar": "O", "papa": "P",
-        "quebec": "Q", "romeo": "R", "sierra": "S", "tango": "T",
-        "uniform": "U", "victor": "V", "whiskey": "W", "xray": "X",
-        "x-ray": "X", "yankee": "Y", "zulu": "Z",
-    }
-
-    WORD_TO_DIGIT = {
-        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
-    }
-
-    PLATE_STOP_WORDS = {
-        "violation", "violations", "driver", "name", "the", "and",
-        "are", "is", "no", "not", "license", "helmet", "wearing",
-    }
-
-    def parse_plate_tokens(tokens):
-        plate_chars = []
-        for tok in tokens:
-            t = tok.lower().strip(".,;:")
-            if not t:
-                continue
-            if t in PLATE_STOP_WORDS:
-                break
-            if t in NATO:
-                plate_chars.append(NATO[t])
-            elif t in WORD_TO_DIGIT:
-                plate_chars.append(WORD_TO_DIGIT[t])
-            elif len(t) == 1 and t.isalnum():
-                plate_chars.append(t.upper())
-            elif t.isdigit():
-                plate_chars.append(t)
-            elif re.match(r'^[a-z0-9]{2,4}$', t):
-                plate_chars.append(t.upper())
-            else:
-                break
-        return "".join(plate_chars)
-
-    try:
-        print("[WHISPER] Transcribing audio (tiny model, CPU)...")
-
-        # Use faster_whisper Python API directly.
-        # faster_whisper is installed in the evvos venv (/opt/evvos/venv) to avoid
-        # system Python dependency conflicts. We add the venv site-packages to
-        # sys.path so the service (which runs under /usr/bin/python3) can import it.
-        try:
-            import sys
-            venv_site = "/opt/evvos/venv/lib/python3.11/site-packages"
-            # Try python3.11 first, then fall back to any python3.x found in the venv
-            import glob as _glob
-            candidates = _glob.glob("/opt/evvos/venv/lib/python3.*/site-packages")
-            for candidate in candidates:
-                if candidate not in sys.path:
-                    sys.path.insert(0, candidate)
-            from faster_whisper import WhisperModel
-        except ImportError:
-            print("[WHISPER] faster_whisper not importable from evvos venv — run setup_picam.sh to install")
-            return result
-
-        model = WhisperModel("tiny", device="cpu", compute_type="int8")
-        segments, info = model.transcribe(str(audio_path), language="en", beam_size=5)
-        transcript = " ".join(seg.text.strip() for seg in segments).strip()
-
-        if not transcript:
-            print("[WHISPER] Transcription returned empty result")
-            return result
-
-        print(f"[WHISPER] Raw transcript: {transcript[:300]}")
-        result["transcript"] = transcript
-        tokens = transcript.split()
-        tokens_lower = [t.lower().strip(".,;:") for t in tokens]
-
-        # 1. DRIVER NAME
-        name_match = re.search(
-            r"driver(?:'s|s)?\s+name(?:\s+is)?\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)",
-            transcript,
-            re.IGNORECASE,
-        )
-        if name_match:
-            raw_name = name_match.group(1).strip()
-            result["driver_name"] = " ".join(w.capitalize() for w in raw_name.split())
-            print(f"[WHISPER] Driver name: '{result['driver_name']}'")
-        else:
-            print("[WHISPER] Driver name not found in transcript")
-
-        # 2. PLATE NUMBER
-        plate_trigger_idx = None
-        for i, tok in enumerate(tokens_lower):
-            if tok == "plate":
-                if i + 1 < len(tokens_lower) and tokens_lower[i + 1] == "number":
-                    plate_trigger_idx = i + 2
-                else:
-                    plate_trigger_idx = i + 1
-                break
-
-        if plate_trigger_idx is not None:
-            plate = parse_plate_tokens(tokens[plate_trigger_idx:])
-            if plate:
-                result["plate_number"] = plate
-                print(f"[WHISPER] Plate number: '{result['plate_number']}'")
-            else:
-                print("[WHISPER] Plate trigger found but could not parse characters")
-        else:
-            print("[WHISPER] Plate number trigger not found in transcript")
-
-        # 3. VIOLATIONS
-        viol_match = re.search(
-            r"violations?\s+(?:are\s+)?(.+?)(?:\.|$)",
-            transcript,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if viol_match:
-            raw_violations = viol_match.group(1).strip()
-            parts = re.split(r",\s*|\s+and\s+", raw_violations, flags=re.IGNORECASE)
-            result["violations"] = [
-                " ".join(w.capitalize() for w in p.strip().split())
-                for p in parts if p.strip()
-            ]
-            print(f"[WHISPER] Violations: {result['violations']}")
-        else:
-            print("[WHISPER] Violations trigger not found in transcript")
-
-        return result
-
-    except Exception as e:
-        print(f"[WHISPER] Unexpected error: {e}")
-        import traceback
-        print(traceback.format_exc())
-        return result
-
-
 def stop_recording_handler():
     global recording, current_session_id, current_video_path, current_audio_path, audio_process, recording_start_time
     with recording_lock:
@@ -432,9 +492,6 @@ def stop_recording_handler():
             mp4_path = current_video_path.with_suffix(".mp4")
             raw_size = current_video_path.stat().st_size if current_video_path.exists() else 0
             print(f"[CAMERA] Raw H264 size: {raw_size / 1024 / 1024:.2f} MB")
-
-            # ── TRANSCRIPTION (runs before ffmpeg so audio file still exists) ──
-            transcription = transcribe_audio(current_audio_path)
 
             # ── SPEED FIX & AUDIO MUXING ──────────────────
             print("[FFMPEG] Muxing audio & fixing speed (Constant 24 FPS)...")
@@ -470,11 +527,23 @@ def stop_recording_handler():
                 size_mb = mp4_path.stat().st_size / 1024 / 1024
                 print(f"[FFMPEG] ✓ Success: {mp4_path.name} ({size_mb:.2f} MB)")
                 current_video_path.unlink(missing_ok=True)
-                if current_audio_path:
-                    current_audio_path.unlink(missing_ok=True)
+                # NOTE: keep current_audio_path alive — whisper reads it next
             else:
                 print(f"[FFMPEG] Error: {res.stderr}")
                 size_mb = mp4_path.stat().st_size / 1024 / 1024 if mp4_path.exists() else 0
+
+            # ── WHISPER TRANSCRIPTION ──────────────────────────────────────────
+            # Run AFTER ffmpeg so audio is no longer being written.
+            # The raw WAV is kept until transcription completes, then deleted.
+            transcription = {"transcript": "", "driver_name": "", "plate_number": "", "violations": []}
+            if current_audio_path and current_audio_path.exists():
+                transcription = transcribe_audio(current_audio_path)
+                # Now safe to clean up the raw WAV
+                try:
+                    current_audio_path.unlink(missing_ok=True)
+                except Exception as _e:
+                    print(f"[CAMERA] Could not delete audio file: {_e}")
+            # ──────────────────────────────────────────────────────────────────
 
             return {
                 "status":         "recording_stopped",
@@ -485,11 +554,11 @@ def stop_recording_handler():
                 "video_url":      f"http://{get_pi_ip()}:{HTTP_PORT}/{mp4_path.name}",
                 "pi_ip":          get_pi_ip(),
                 "http_port":      HTTP_PORT,
-                # ── Transcription fields (pre-fill IncidentSummaryScreen) ──
-                "transcript":     transcription["transcript"],
-                "driver_name":    transcription["driver_name"],
-                "plate_number":   transcription["plate_number"],
-                "violations":     transcription["violations"],
+                # ── Transcription fields (pre-fill IncidentSummaryScreen) ────
+                "transcript":   transcription["transcript"],
+                "driver_name":  transcription["driver_name"],
+                "plate_number": transcription["plate_number"],
+                "violations":   transcription["violations"],
             }
         except Exception as e:
             print(f"[CAMERA] Stop Error: {e}")
@@ -703,6 +772,7 @@ Restart=always
 RestartSec=5
 Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=-/etc/evvos/config.env
+EnvironmentFile=-/etc/evvos/whisper.env
 
 [Install]
 WantedBy=multi-user.target
@@ -717,4 +787,11 @@ systemctl enable evvos-picam-tcp.service
 systemctl restart evvos-picam-tcp.service
 
 log_success "Service installed and started"
-log_success "Setup complete! Camera records via PulseAudio with concurrent voice recognition."
+log_success "Setup complete!"
+echo ""
+echo -e "${CYAN}  Whisper binary : ${WHISPER_BIN}${NC}"
+echo -e "${CYAN}  Whisper model  : ${WHISPER_MODEL_FILE}${NC}"
+echo -e "${CYAN}  Transcription  : ~60–120 s per recording on Pi Zero 2 W (tiny.en, CPU)${NC}"
+echo -e "${CYAN}  To swap model  : edit /etc/evvos/whisper.env and restart evvos-picam-tcp${NC}"
+echo ""
+log_success "Camera records via PulseAudio. Whisper transcription runs after each stop."
