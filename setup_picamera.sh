@@ -55,30 +55,36 @@ grep -q "^gpu_mem="   "$CONFIG_FILE" || echo "gpu_mem=128" >> "$CONFIG_FILE"
 apt-get update -qq
 apt-get install -y python3-picamera2 python3-requests ffmpeg pulseaudio pulseaudio-utils --no-install-recommends
 
-# Install whisper-ctranslate2 for offline speech-to-text transcription.
-# Uses the 'tiny' model — small enough for Pi Zero 2 W (39 MB, ~1-2 min per recording on CPU).
-# faster-whisper/ctranslate2 is significantly faster than openai-whisper on ARM CPU.
-# IMPORTANT: Use the explicit python3 binary that the service uses (/usr/bin/python3)
-# to ensure the package is installed in the same environment the service imports from.
-/usr/bin/python3 -m pip install whisper-ctranslate2 --break-system-packages --quiet || \
-    echo "⚠ whisper-ctranslate2 install failed — transcription will be skipped at runtime"
+# Install whisper-ctranslate2 into the evvos virtualenv to avoid system Python
+# dependency conflicts. The venv already has compatible numpy/ctranslate2 versions
+# from the PicoVoice setup, so resolution succeeds there where it fails system-wide.
+VENV_PIP="/opt/evvos/venv/bin/pip"
+VENV_PYTHON="/opt/evvos/venv/bin/python3"
 
-# Verify the import works under the same Python the service will use
-if /usr/bin/python3 -c "from faster_whisper import WhisperModel" 2>/dev/null; then
-    echo "✓ faster-whisper import verified under /usr/bin/python3"
-else
-    echo "⚠ faster-whisper import failed — retrying install..."
-    /usr/bin/python3 -m pip install faster-whisper --break-system-packages --quiet
-    /usr/bin/python3 -m pip install ctranslate2 --break-system-packages --quiet
-fi
+if [ -f "$VENV_PIP" ]; then
+    echo "Installing whisper-ctranslate2 into /opt/evvos/venv..."
+    "$VENV_PIP" install whisper-ctranslate2 --quiet || \
+        echo "⚠ whisper-ctranslate2 install failed in venv"
 
-# Pre-download the tiny model so first recording doesn't stall waiting for a download
-/usr/bin/python3 -c "
+    # Verify the import works inside the venv
+    if "$VENV_PYTHON" -c "from faster_whisper import WhisperModel" 2>/dev/null; then
+        echo "✓ faster-whisper import verified in evvos venv"
+    else
+        echo "⚠ faster-whisper import failed — trying faster-whisper directly..."
+        "$VENV_PIP" install faster-whisper --quiet
+    fi
+
+    # Pre-download the tiny model
+    "$VENV_PYTHON" -c "
 from faster_whisper import WhisperModel
 print('[WHISPER] Downloading tiny model...')
 WhisperModel('tiny', device='cpu', compute_type='int8')
 print('[WHISPER] Model ready')
 " || echo "⚠ Whisper model pre-download failed — will download on first use"
+
+else
+    echo "⚠ evvos venv not found at /opt/evvos/venv — run setup_pico_voice_recognition_respeaker.sh first"
+fi
 
 log_success "Camera firmware, audio, and transcription dependencies ready"
 
@@ -311,13 +317,22 @@ def transcribe_audio(audio_path):
     try:
         print("[WHISPER] Transcribing audio (tiny model, CPU)...")
 
-        # Use faster_whisper Python API directly — avoids CLI PATH issues when
-        # running as a systemd service where whisper-ctranslate2 binary may not
-        # be on the service PATH even if the Python package is installed.
+        # Use faster_whisper Python API directly.
+        # faster_whisper is installed in the evvos venv (/opt/evvos/venv) to avoid
+        # system Python dependency conflicts. We add the venv site-packages to
+        # sys.path so the service (which runs under /usr/bin/python3) can import it.
         try:
+            import sys
+            venv_site = "/opt/evvos/venv/lib/python3.11/site-packages"
+            # Try python3.11 first, then fall back to any python3.x found in the venv
+            import glob as _glob
+            candidates = _glob.glob("/opt/evvos/venv/lib/python3.*/site-packages")
+            for candidate in candidates:
+                if candidate not in sys.path:
+                    sys.path.insert(0, candidate)
             from faster_whisper import WhisperModel
         except ImportError:
-            print("[WHISPER] faster_whisper not importable — run setup_picam.sh to install")
+            print("[WHISPER] faster_whisper not importable from evvos venv — run setup_picam.sh to install")
             return result
 
         model = WhisperModel("tiny", device="cpu", compute_type="int8")
