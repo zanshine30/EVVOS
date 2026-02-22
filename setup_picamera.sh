@@ -168,7 +168,7 @@ def start_recording_handler():
             #   Using "-D dsnoop" by plugin name is more reliable than "-D default"
             #   because it bypasses any system-default PCM remapping.
             audio_process = subprocess.Popen([
-                "arecord", "-D", "dsnoop", "-f", "S16_LE", "-r", "48000", "-c", "2", str(current_audio_path)
+                "arecord", "-D", "shared_mic", "-f", "S16_LE", "-r", "48000", "-c", "2", str(current_audio_path)
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             
             recording = True
@@ -320,6 +320,19 @@ def upload_to_supabase_handler(incident_id, auth_token, video_filename=None):
                 "p_video_url":    public_url,
                 "p_storage_path": storage_path,
             }, timeout=15)
+            # ── Audio stream verification (logged before file is deleted) ──────
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_streams", "-select_streams", "a", str(file_path)],
+                    capture_output=True, text=True
+                )
+                if probe.stdout.strip():
+                    print(f"[UPLOAD] ✓ Audio stream confirmed in uploaded file")
+                else:
+                    print(f"[UPLOAD] ⚠ No audio stream found in uploaded file — check arecord/dsnoop")
+            except Exception as probe_err:
+                print(f"[UPLOAD] ffprobe check failed: {probe_err}")
+            # ────────────────────────────────────────────────────────────────────
             file_path.unlink()
             return {"status": "upload_complete", "video_url": public_url, "storage_path": storage_path}
         else:
