@@ -1,12 +1,6 @@
 #!/bin/bash
-# EVVOS Pi Camera Setup - 24 FPS Speed Fix + Resilient Disconnect + Supabase Upload
+# EVVOS Pi Camera Setup - 24 FPS Speed Fix + Resilient Disconnect + Supabase Upload + Shared Audio
 # Optimized for: Raspberry Pi Zero 2 W
-#
-# CHANGES IN THIS VERSION:
-#   - Pi no longer crashes with a traceback when the phone disconnects/backgrounds
-#   - Recording keeps running even if the phone turns off or the app is killed
-#   - New GET_STATUS command lets the phone re-sync after reconnecting
-#   - START_RECORDING is idempotent — reconnecting phone gets the existing session back
 
 set -e  # Exit on error
 
@@ -74,9 +68,8 @@ cat > "$CAMERA_SCRIPT" << 'CAMERA_SCRIPT_EOF'
 """
 EVVOS Pi Camera TCP Control Service
   - 24 FPS Speed Fixed
-  - Resilient to phone disconnect (backgrounded / screen off / app killed)
-  - Recording survives connection loss — phone can reconnect and re-attach
-  - New GET_STATUS command for post-reconnect sync
+  - Resilient to phone disconnect
+  - Muxes shared audio (dsnoop) with ffmpeg
 """
 import socket, json, os, sys, time, threading, subprocess
 from datetime import datetime
@@ -103,7 +96,9 @@ recording            = False
 recording_lock       = threading.Lock()
 current_session_id   = None
 current_video_path   = None
-recording_start_time = None   # tracks wall-clock start so elapsed seconds survive reconnects
+current_audio_path   = None
+audio_process        = None
+recording_start_time = None
 
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
@@ -137,14 +132,12 @@ def setup_camera():
 # ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
 
 def start_recording_handler():
-    global recording, current_session_id, current_video_path, recording_start_time
+    global recording, current_session_id, current_video_path, current_audio_path, audio_process, recording_start_time
     with recording_lock:
-        # ✅ IDEMPOTENT: if the phone reconnects and sends START_RECORDING again,
-        #    return the existing session instead of trying to start a second one.
         if recording:
-            print("[CAMERA] Already recording — returning existing session to reconnected client")
+            print("[CAMERA] Already recording — returning existing session")
             return {
-                "status":          "recording_started",   # same key the phone expects
+                "status":          "recording_started",
                 "session_id":      current_session_id,
                 "video_path":      str(current_video_path),
                 "pi_ip":           get_pi_ip(),
@@ -157,11 +150,27 @@ def start_recording_handler():
             ts                   = datetime.now().strftime("%Y%m%d_%H%M%S")
             current_session_id   = f"session_{ts}"
             current_video_path   = RECORDINGS_DIR / f"video_{ts}.h264"
+            current_audio_path   = RECORDINGS_DIR / f"audio_{ts}.wav"
             recording_start_time = time.time()
 
             print(f"[CAMERA] Starting: {current_session_id}")
             encoder = H264Encoder(bitrate=2500000, framerate=CAMERA_FPS)
             camera.start_recording(encoder, str(current_video_path))
+            
+            # Start background audio recording using ALSA dsnoop (shared capture device).
+            #
+            # WHY "dsnoop" not "hw:seeed2micvoicec" or "default":
+            #   PicoVoice starts on boot and holds an open stream to the ReSpeaker mic.
+            #   ALSA grants exclusive access to hw:X,0 to the first opener, so a second
+            #   open here returns EBUSY and arecord records silence or crashes.
+            #   dsnoop is an ALSA sharing plugin (configured by setup_pico_voice_recognition_respeaker.sh)
+            #   that lets both services read the same hardware stream simultaneously.
+            #   Using "-D dsnoop" by plugin name is more reliable than "-D default"
+            #   because it bypasses any system-default PCM remapping.
+            audio_process = subprocess.Popen([
+                "arecord", "-D", "dsnoop", "-f", "S16_LE", "-r", "48000", "-c", "2", str(current_audio_path)
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
             recording = True
 
             return {
@@ -179,11 +188,6 @@ def start_recording_handler():
 
 
 def get_status_handler():
-    """
-    NEW: Called by the phone immediately after reconnecting.
-    Returns current recording state so the app can re-sync its UI without
-    restarting anything.
-    """
     with recording_lock:
         elapsed = int(time.time() - recording_start_time) if recording_start_time else 0
         return {
@@ -198,7 +202,7 @@ def get_status_handler():
 
 
 def stop_recording_handler():
-    global recording, current_session_id, current_video_path, recording_start_time
+    global recording, current_session_id, current_video_path, current_audio_path, audio_process, recording_start_time
     with recording_lock:
         if not recording:
             return {"status": "not_recording"}
@@ -206,6 +210,15 @@ def stop_recording_handler():
             print("[CAMERA] Stopping...")
             camera.stop_recording()
             camera.stop()
+            
+            # Stop audio gracefully
+            if audio_process:
+                audio_process.terminate()
+                try:
+                    audio_process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    audio_process.kill()
+                    
             recording            = False
             recording_start_time = None
             time.sleep(0.5)
@@ -214,23 +227,42 @@ def stop_recording_handler():
             raw_size = current_video_path.stat().st_size if current_video_path.exists() else 0
             print(f"[CAMERA] Raw H264 size: {raw_size / 1024 / 1024:.2f} MB")
 
-            # ── SPEED FIX: Forced 24 FPS Constant Frame Rate ──────────────────
-            print("[FFMPEG] Fixing speed (Constant 24 FPS CFR)...")
+            # ── SPEED FIX & AUDIO MUXING ──────────────────
+            print("[FFMPEG] Muxing audio & fixing speed (Constant 24 FPS)...")
+            has_audio = current_audio_path and current_audio_path.exists() and current_audio_path.stat().st_size > 1000
+            
             cmd = [
                 "ffmpeg", "-y",
-                "-r", "24", "-i", str(current_video_path),
+                "-r", "24", "-i", str(current_video_path)
+            ]
+            
+            if has_audio:
+                cmd.extend(["-i", str(current_audio_path)])
+                
+            cmd.extend([
                 "-vf", "setpts=N/(24*TB)",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-                "-r", "24", "-fps_mode", "cfr", "-an",
+                "-r", "24", "-fps_mode", "cfr"
+            ])
+            
+            if has_audio:
+                cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+            else:
+                cmd.extend(["-an"])
+                
+            cmd.extend([
                 "-movflags", "+faststart", "-loglevel", "error",
                 str(mp4_path)
-            ]
+            ])
+            
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
             if res.returncode == 0:
                 size_mb = mp4_path.stat().st_size / 1024 / 1024
                 print(f"[FFMPEG] ✓ Success: {mp4_path.name} ({size_mb:.2f} MB)")
                 current_video_path.unlink(missing_ok=True)
+                if current_audio_path:
+                    current_audio_path.unlink(missing_ok=True)
             else:
                 print(f"[FFMPEG] Error: {res.stderr}")
                 size_mb = mp4_path.stat().st_size / 1024 / 1024 if mp4_path.exists() else 0
@@ -300,16 +332,6 @@ def upload_to_supabase_handler(incident_id, auth_token, video_filename=None):
 # ── TCP CLIENT HANDLER ────────────────────────────────────────────────────────
 
 def handle_client(conn, addr):
-    """
-    Handle one TCP client connection.
-
-    RESILIENCE FIX: A ConnectionResetError or BrokenPipeError simply means the
-    phone disconnected (app backgrounded, screen turned off, app killed, hotspot
-    dropped, etc.).  We catch those exceptions, log a clean message, and exit the
-    thread WITHOUT touching the recording.  The camera keeps rolling in global
-    state.  When the phone reconnects it gets a fresh thread and can call
-    GET_STATUS to re-sync, or START_RECORDING (idempotent) to re-attach.
-    """
     print(f"[TCP] Client connected: {addr}")
     buffer = ""
     try:
@@ -317,16 +339,11 @@ def handle_client(conn, addr):
             try:
                 data = conn.recv(1024)
             except (ConnectionResetError, BrokenPipeError, OSError) as e:
-                # ✅ Phone dropped — NOT an error in our service.
-                print(f"[TCP] Client {addr} disconnected "
-                      f"({e.__class__.__name__}: {e}). "
-                      f"Recording still active: {recording}")
+                print(f"[TCP] Client {addr} disconnected ({e.__class__.__name__}: {e}). Recording active: {recording}")
                 break
 
             if not data:
-                # ✅ Clean TCP FIN from the phone side.
-                print(f"[TCP] Client {addr} closed connection. "
-                      f"Recording still active: {recording}")
+                print(f"[TCP] Client {addr} closed connection. Recording active: {recording}")
                 break
 
             buffer += data.decode("utf-8")
@@ -361,9 +378,7 @@ def handle_client(conn, addr):
                         conn.sendall((json.dumps(res) + "\n").encode("utf-8"))
                         print(f"[TCP] → {res.get('status')} to {addr}")
                     except (BrokenPipeError, OSError) as send_err:
-                        # Phone disconnected between recv and sendall — totally fine.
-                        print(f"[TCP] Could not send response to {addr}: {send_err}. "
-                              f"Recording still active: {recording}")
+                        print(f"[TCP] Could not send response to {addr}: {send_err}. Recording active: {recording}")
                         return
 
                 except json.JSONDecodeError as e:
@@ -376,10 +391,7 @@ def handle_client(conn, addr):
             conn.close()
         except Exception:
             pass
-        print(f"[TCP] Thread for {addr} exited. Recording still active: {recording}")
-
-
-# ── ENTRY POINT ───────────────────────────────────────────────────────────────
+        print(f"[TCP] Thread for {addr} exited. Recording active: {recording}")
 
 if __name__ == "__main__":
     print(f"[EVVOS] Service starting — IP: {get_pi_ip()}")
@@ -399,7 +411,7 @@ if __name__ == "__main__":
 CAMERA_SCRIPT_EOF
 
 chmod +x "$CAMERA_SCRIPT"
-log_success "Service script created (resilient disconnect + GET_STATUS + idempotent START)"
+log_success "Service script created with shared ALSA audio muxing"
 
 # ============================================================================
 # STEP 4: SYSTEMD SERVICE & DIRECTORIES
@@ -434,8 +446,4 @@ systemctl enable evvos-picam-tcp.service
 systemctl restart evvos-picam-tcp.service
 
 log_success "Service installed and started"
-log_success "Setup complete! Camera runs at 24 FPS and survives phone disconnects."
-log_info "Useful commands:"
-log_info "  View live logs : sudo journalctl -u evvos-picam-tcp -f"
-log_info "  Restart service: sudo systemctl restart evvos-picam-tcp"
-log_info "  Check status   : sudo systemctl status evvos-picam-tcp"
+log_success "Setup complete! Camera records natively with shared audio."
