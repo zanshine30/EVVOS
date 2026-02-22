@@ -95,6 +95,29 @@ else
     git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
 fi
 
+# ── Patch CMakeLists.txt to link libatomic on every target ────────────────────
+# On 32-bit ARM (armhf), 64-bit atomic operations are not native CPU instructions.
+# GCC emits calls to libgcc_s/libatomic helpers (__atomic_load_8 etc.) for any
+# 64-bit std::atomic usage — which miniaudio inside common-whisper.cpp requires.
+#
+# cmake's LDFLAGS env var and CMAKE_EXE_LINKER_FLAGS are both unreliable here:
+# cmake 3.25 reads LDFLAGS only during compiler probe, not during target linking;
+# CMAKE_EXE_LINKER_FLAGS set via -D gets overridden by the project per-target.
+#
+# The only guaranteed mechanism is link_libraries(atomic) in CMakeLists.txt itself,
+# which cmake propagates to every target in the project unconditionally.
+# We inject it right after cmake_minimum_required so it applies globally.
+CMAKELISTS="${WHISPER_DIR}/CMakeLists.txt"
+ATOMIC_INJECT="link_libraries(atomic)  # armhf 32-bit: supply __atomic_load_8 etc."
+
+if grep -q "link_libraries(atomic)" "$CMAKELISTS" 2>/dev/null; then
+    log_info "CMakeLists.txt already patched for libatomic — skipping"
+else
+    # Insert after the first cmake_minimum_required(...) line
+    sed -i "/^cmake_minimum_required/a ${ATOMIC_INJECT}" "$CMAKELISTS"
+    log_success "Patched CMakeLists.txt: injected link_libraries(atomic)"
+fi
+
 # ── Swap file (REQUIRED on Pi Zero 2 W — 512 MB RAM is not enough to compile) ─
 # The C++ compiler peaks at ~480 MB RSS on the heaviest whisper.cpp translation
 # units.  Without extra swap the kernel OOM-kills the compiler at ~84% and the
@@ -156,15 +179,6 @@ if [ -d "${WHISPER_DIR}/build" ]; then
     log_info "Removing stale build directory..."
     rm -rf "${WHISPER_DIR}/build"
 fi
-
-# WHY LDFLAGS=-latomic (not CMAKE_EXE_LINKER_FLAGS):
-# On 32-bit ARM (armhf) there are no native 64-bit atomic CPU instructions.
-# GCC emits calls to libatomic helpers (__atomic_load_8, __atomic_compare_exchange_8)
-# for 64-bit std::atomic operations used in whisper.cpp's bundled miniaudio.
-# CMAKE_EXE_LINKER_FLAGS passed via -D is silently ignored on cmake 3.25 because
-# the project's CMakeLists overrides it per-target. The LDFLAGS environment
-# variable is inherited unconditionally and appended to every link command.
-export LDFLAGS="-latomic"
 
 # WHY -DWHISPER_BUILD_TESTS=OFF:
 # test-vad is the first executable cmake links after building libcommon.a, and
