@@ -59,7 +59,7 @@ apt-get install -y python3-picamera2 python3-requests ffmpeg pulseaudio pulseaud
 # Uses the 'tiny' model — small enough for Pi Zero 2 W (39 MB, ~1-2 min per recording on CPU).
 # faster-whisper/ctranslate2 is significantly faster than openai-whisper on ARM CPU.
 pip3 install whisper-ctranslate2 --break-system-packages --quiet 2>/dev/null || \
-    log_warning "whisper-ctranslate2 install failed — transcription will be skipped at runtime"
+    echo "⚠ whisper-ctranslate2 install failed — transcription will be skipped at runtime"
 
 # Pre-download the tiny model so first recording doesn't stall waiting for a download
 python3 -c "
@@ -67,7 +67,7 @@ from faster_whisper import WhisperModel
 print('[WHISPER] Downloading tiny model...')
 WhisperModel('tiny', device='cpu', compute_type='int8')
 print('[WHISPER] Model ready')
-" 2>/dev/null || log_warning "Whisper model pre-download failed — will download on first use"
+" 2>/dev/null || echo "⚠ Whisper model pre-download failed — will download on first use"
 
 log_success "Camera firmware, audio, and transcription dependencies ready"
 
