@@ -241,13 +241,45 @@ else
     exit 1
 fi
 
-# ── Write config file for the Python service ──────────────────────────────────
+# ── Write config files for the Python service ─────────────────────────────────
 mkdir -p /etc/evvos
+
 cat > /etc/evvos/whisper.env << WENV_EOF
 WHISPER_BIN=${WHISPER_BIN}
 WHISPER_MODEL=${WHISPER_MODEL_FILE}
 WENV_EOF
 log_success "Whisper config written to /etc/evvos/whisper.env"
+
+# Create config.env with Groq API key placeholder if it doesn't already exist.
+# The service loads this file at startup (EnvironmentFile in the systemd unit).
+# GROQ_API_KEY is optional — if blank the service falls back to offline Whisper.
+# Get a free key at https://console.groq.com (no credit card required).
+if [ ! -f /etc/evvos/config.env ]; then
+    cat > /etc/evvos/config.env << CONF_EOF
+# EVVOS Pi Camera Service — environment config
+# ─────────────────────────────────────────────
+# Supabase credentials (required for video upload)
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+
+# Groq Whisper API key (optional but recommended for accurate transcription)
+# Free tier: ~7,200 audio-minutes/month — sign up at https://console.groq.com
+# Leave blank to use offline whisper.cpp (tiny.en) only.
+GROQ_API_KEY=
+CONF_EOF
+    chmod 600 /etc/evvos/config.env
+    log_success "Created /etc/evvos/config.env (add your GROQ_API_KEY here)"
+else
+    # File exists — ensure GROQ_API_KEY line is present even on upgrades
+    if ! grep -q "^GROQ_API_KEY" /etc/evvos/config.env; then
+        echo "" >> /etc/evvos/config.env
+        echo "# Groq Whisper API key — free at https://console.groq.com" >> /etc/evvos/config.env
+        echo "GROQ_API_KEY=" >> /etc/evvos/config.env
+        log_success "Added GROQ_API_KEY placeholder to existing /etc/evvos/config.env"
+    else
+        log_info "/etc/evvos/config.env already has GROQ_API_KEY — not touching it"
+    fi
+fi
 
 # ============================================================================
 # STEP 3: CREATE ENHANCED TCP CAMERA SERVICE SCRIPT
@@ -405,34 +437,119 @@ def _extract_violations(text: str) -> list:
     return found
 
 
-def transcribe_audio(audio_path: Path) -> dict:
+def _has_internet(host="8.8.8.8", port=53, timeout=3) -> bool:
     """
-    Run whisper.cpp on the recorded WAV, return:
-      { transcript, driver_name, plate_number, violations }
+    Quick connectivity check: try to open a TCP socket to Google DNS.
+    Returns True only if the connection completes within `timeout` seconds.
+    This is intentionally lightweight — no HTTP, no DNS lookup overhead.
+    """
+    import socket as _socket
+    try:
+        with _socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
-    whisper-cli flags used:
-      -m  model path
-      -f  input audio (WAV / any FFmpeg-readable format)
-      -otxt          write transcript to <audio>.txt
-      -nt            no timestamps (cleaner output)
-      -np            no progress bar
-      -l  en         force English (tiny.en model is English-only)
-      --threads 2    use both cores on Pi Zero 2 W
+
+def _transcribe_groq_online(audio_path: Path) -> dict:
     """
-    empty = {"transcript": "", "driver_name": "", "plate_number": "", "violations": []}
+    Transcribe using Groq's free Whisper API (whisper-large-v3-turbo).
+
+    Why Groq?
+      • 100% free tier — ~7,200 audio-minutes/month, no credit card required.
+      • Runs whisper-large-v3-turbo server-side — far more accurate than tiny.en.
+      • From the Pi's perspective it is just one HTTPS POST with the WAV file.
+        No new packages needed beyond python3-requests (already installed).
+      • Sign up and get a free API key at: https://console.groq.com
+        Add it to /etc/evvos/config.env as:  GROQ_API_KEY=gsk_...
+
+    Returns the same dict shape as _transcribe_whisper_offline so callers are
+    interchangeable, or None if the call fails (triggers offline fallback).
+    """
+    import requests as _req, os as _os
+
+    api_key = _os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        print("[GROQ] GROQ_API_KEY not set in /etc/evvos/config.env — skipping online STT")
+        return None
+
+    if not audio_path.exists() or audio_path.stat().st_size < 1000:
+        print("[GROQ] Audio file missing or too small")
+        return None
+
+    print(f"[GROQ] Uploading {audio_path.name} ({audio_path.stat().st_size / 1024:.0f} KB) to Groq Whisper API...")
+
+    try:
+        with open(audio_path, "rb") as fh:
+            resp = _req.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (audio_path.name, fh, "audio/wav")},
+                data={
+                    "model":           "whisper-large-v3-turbo",
+                    "response_format": "text",
+                    "language":        "en",
+                },
+                timeout=60,  # 60 s should be more than enough for any field recording
+            )
+
+        if resp.status_code != 200:
+            print(f"[GROQ] API error {resp.status_code}: {resp.text[:200]}")
+            return None
+
+        transcript = resp.text.strip()
+        if not transcript:
+            print("[GROQ] API returned empty transcript")
+            return None
+
+        print(f"[GROQ] ✓ Transcript ({len(transcript)} chars): {transcript[:120]}...")
+
+        driver_name  = _extract_driver_name(transcript)
+        plate_number = _extract_plate_number(transcript)
+        violations   = _extract_violations(transcript)
+
+        print(f"[GROQ] Driver: {driver_name!r}  Plate: {plate_number!r}  Violations: {violations}")
+        return {
+            "transcript":   transcript,
+            "driver_name":  driver_name,
+            "plate_number": plate_number,
+            "violations":   violations,
+            "engine":       "groq-whisper-large-v3-turbo",
+        }
+
+    except Exception as e:
+        print(f"[GROQ] Request failed: {e}")
+        return None
+
+
+def _transcribe_whisper_offline(audio_path: Path) -> dict:
+    """
+    Offline fallback: run the local whisper.cpp binary (tiny.en model).
+    Used when internet is unavailable or the Groq API call fails.
+
+    whisper-cli flags:
+      -m  model path
+      -f  input WAV
+      -otxt   write sidecar .txt (more reliable than stdout)
+      -nt     no timestamps
+      -np     no progress bar
+      -l en   force English (tiny.en is English-only)
+      --threads 2  use both Cortex-A53 cores on Pi Zero 2 W
+    """
+    empty = {"transcript": "", "driver_name": "", "plate_number": "", "violations": [], "engine": "whisper-tiny.en-offline"}
 
     if not Path(WHISPER_BIN).exists():
-        print(f"[WHISPER] Binary not found: {WHISPER_BIN} — skipping transcription")
+        print(f"[WHISPER] Binary not found: {WHISPER_BIN} — skipping offline transcription")
         return empty
     if not Path(WHISPER_MODEL).exists():
-        print(f"[WHISPER] Model not found: {WHISPER_MODEL} — skipping transcription")
+        print(f"[WHISPER] Model not found: {WHISPER_MODEL} — skipping offline transcription")
         return empty
     if not audio_path.exists() or audio_path.stat().st_size < 1000:
-        print("[WHISPER] Audio file missing or too small — skipping transcription")
+        print("[WHISPER] Audio file missing or too small")
         return empty
 
-    print(f"[WHISPER] Transcribing {audio_path.name} (60–120 s on Pi Zero 2 W)...")
-    txt_path = audio_path.with_suffix(audio_path.suffix + ".txt")  # e.g. audio_*.wav.txt
+    print(f"[WHISPER] Offline transcription: {audio_path.name} (60–120 s on Pi Zero 2 W)...")
+    txt_path = audio_path.with_suffix(audio_path.suffix + ".txt")
 
     try:
         result = subprocess.run(
@@ -440,25 +557,23 @@ def transcribe_audio(audio_path: Path) -> dict:
                 WHISPER_BIN,
                 "-m",  WHISPER_MODEL,
                 "-f",  str(audio_path),
-                "-otxt",          # write <audio>.txt
-                "-nt",            # no timestamps
-                "-np",            # no progress
-                "-l",  "en",      # force English
-                "--threads", "2", # use both A53 cores
+                "-otxt",
+                "-nt",
+                "-np",
+                "-l",  "en",
+                "--threads", "2",
             ],
             capture_output=True,
             text=True,
-            timeout=300,          # 5 min absolute hard limit
+            timeout=300,
         )
 
         if result.returncode != 0:
             print(f"[WHISPER] Non-zero exit {result.returncode}: {result.stderr[:200]}")
-            # Still try to read partial output if the txt was written
-        
-        # Prefer the .txt sidecar file (most reliable)
+
         if txt_path.exists():
             transcript = txt_path.read_text(encoding="utf-8", errors="replace").strip()
-            txt_path.unlink(missing_ok=True)  # clean up
+            txt_path.unlink(missing_ok=True)
         else:
             transcript = result.stdout.strip()
 
@@ -478,14 +593,45 @@ def transcribe_audio(audio_path: Path) -> dict:
             "driver_name":  driver_name,
             "plate_number": plate_number,
             "violations":   violations,
+            "engine":       "whisper-tiny.en-offline",
         }
 
     except subprocess.TimeoutExpired:
-        print("[WHISPER] Transcription timed out after 5 min — returning empty")
+        print("[WHISPER] Timed out after 5 min — returning empty")
         return empty
     except Exception as e:
         print(f"[WHISPER] Unexpected error: {e}")
         return empty
+
+
+def transcribe_best(audio_path: Path) -> dict:
+    """
+    Transcription orchestrator:
+      1. Check internet connectivity (TCP to 8.8.8.8:53, 3 s timeout)
+      2. If online AND GROQ_API_KEY is configured → use Groq Whisper (accurate, free)
+      3. If offline OR Groq fails                 → fall back to local whisper.cpp (tiny.en)
+
+    The `engine` field in the returned dict tells callers which path was taken.
+    """
+    empty = {"transcript": "", "driver_name": "", "plate_number": "", "violations": [], "engine": "none"}
+
+    if not audio_path or not audio_path.exists() or audio_path.stat().st_size < 1000:
+        print("[TRANSCRIBE] Audio file missing or too small — skipping")
+        return empty
+
+    internet = _has_internet()
+    print(f"[TRANSCRIBE] Internet connectivity: {'✓ online' if internet else '✗ offline'}")
+
+    if internet:
+        result = _transcribe_groq_online(audio_path)
+        if result:
+            print("[TRANSCRIBE] ✓ Used Groq online STT (whisper-large-v3-turbo)")
+            return result
+        print("[TRANSCRIBE] Groq failed or not configured — falling back to local Whisper")
+
+    result = _transcribe_whisper_offline(audio_path)
+    print("[TRANSCRIBE] ✓ Used local whisper.cpp (tiny.en, offline)")
+    return result
 
 # ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
 
@@ -627,13 +773,15 @@ def stop_recording_handler():
                 print(f"[FFMPEG] Error: {res.stderr}")
                 size_mb = mp4_path.stat().st_size / 1024 / 1024 if mp4_path.exists() else 0
 
-            # ── WHISPER TRANSCRIPTION ──────────────────────────────────────────
-            # Run AFTER ffmpeg so audio is no longer being written.
-            # The raw WAV is kept until transcription completes, then deleted.
-            transcription = {"transcript": "", "driver_name": "", "plate_number": "", "violations": []}
+            # ── TRANSCRIPTION (online → offline fallback) ──────────────────
+            # Run AFTER ffmpeg so audio is no longer being written to disk.
+            # transcribe_best() checks internet first:
+            #   • Online  → Groq Whisper large-v3-turbo (accurate, free API)
+            #   • Offline → local whisper.cpp tiny.en (always available)
+            # The raw WAV is kept until transcription finishes, then deleted.
+            transcription = {"transcript": "", "driver_name": "", "plate_number": "", "violations": [], "engine": "none"}
             if current_audio_path and current_audio_path.exists():
-                transcription = transcribe_audio(current_audio_path)
-                # Now safe to clean up the raw WAV
+                transcription = transcribe_best(current_audio_path)
                 try:
                     current_audio_path.unlink(missing_ok=True)
                 except Exception as _e:
@@ -650,10 +798,11 @@ def stop_recording_handler():
                 "pi_ip":          get_pi_ip(),
                 "http_port":      HTTP_PORT,
                 # ── Transcription fields (pre-fill IncidentSummaryScreen) ────
-                "transcript":   transcription["transcript"],
-                "driver_name":  transcription["driver_name"],
-                "plate_number": transcription["plate_number"],
-                "violations":   transcription["violations"],
+                "transcript":         transcription["transcript"],
+                "driver_name":        transcription["driver_name"],
+                "plate_number":       transcription["plate_number"],
+                "violations":         transcription["violations"],
+                "transcription_engine": transcription.get("engine", "none"),
             }
         except Exception as e:
             print(f"[CAMERA] Stop Error: {e}")
@@ -889,4 +1038,14 @@ echo -e "${CYAN}  Whisper model  : ${WHISPER_MODEL_FILE}${NC}"
 echo -e "${CYAN}  Transcription  : ~60–120 s per recording on Pi Zero 2 W (tiny.en, CPU)${NC}"
 echo -e "${CYAN}  To swap model  : edit /etc/evvos/whisper.env and restart evvos-picam-tcp${NC}"
 echo ""
-log_success "Camera records via PulseAudio. Whisper transcription runs after each stop."
+log_success "Camera records via PulseAudio. Transcription runs after each stop."
+echo ""
+echo -e "${CYAN}  Transcription priority:${NC}"
+echo -e "${CYAN}    1. Online  → Groq Whisper large-v3-turbo (fast, accurate, free)${NC}"
+echo -e "${CYAN}    2. Offline → local whisper.cpp tiny.en   (always available)${NC}"
+echo ""
+echo -e "${YELLOW}  ⚡ ACTION REQUIRED: Add your Groq API key to enable online STT:${NC}"
+echo -e "${YELLOW}     sudo nano /etc/evvos/config.env${NC}"
+echo -e "${YELLOW}     → Set GROQ_API_KEY=gsk_...${NC}"
+echo -e "${YELLOW}     → Get a free key at https://console.groq.com (no credit card)${NC}"
+echo -e "${YELLOW}     → Then restart: sudo systemctl restart evvos-picam-tcp${NC}"
