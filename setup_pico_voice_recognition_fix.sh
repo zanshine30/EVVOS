@@ -609,7 +609,7 @@ fi
 
 echo ""
 
-log_section "Step 8: Configure ALSA Audio"
+log_section "Step 8: Configure Audio — PulseAudio System Daemon"
 
 log_info "Checking ALSA audio device status..."
 
@@ -619,29 +619,70 @@ else
     log_warning "ReSpeaker may not be detected yet, but service will auto-detect"
 fi
 
-# Remove any /etc/asound.conf that may have been written by a previous setup attempt.
-# We no longer use dsnoop for mic sharing — instead, the PiCam service stops PicoVoice
-# during recording to release the hardware, then restarts it after. This is simpler
-# and more reliable than dsnoop on Raspberry Pi OS Bookworm.
+# Install PulseAudio if not already present
+if ! command -v pulseaudio &>/dev/null; then
+    log_info "Installing PulseAudio..."
+    apt-get install -y pulseaudio pulseaudio-utils
+    log_success "PulseAudio installed"
+else
+    log_success "PulseAudio already installed: $(pulseaudio --version)"
+fi
+
+# Remove any /etc/asound.conf — not needed with PulseAudio and can cause conflicts
 if [ -f /etc/asound.conf ]; then
-    sudo rm /etc/asound.conf
-    log_success "Removed /etc/asound.conf (not needed — using stop/start approach)"
+    rm /etc/asound.conf
+    log_success "Removed /etc/asound.conf (not needed with PulseAudio)"
 else
     log_info "No /etc/asound.conf present — nothing to remove"
 fi
 
-# Remove any legacy per-user .asoundrc files that could interfere
+# Remove any legacy per-user .asoundrc files
 rm -f /root/.asoundrc /home/*/.asoundrc 2>/dev/null || true
 log_info "Cleared any legacy .asoundrc files"
 
-# Verify ALSA is clean
-if arecord -l 2>&1 | grep -qi "seeed"; then
-    log_success "ALSA healthy — ReSpeaker listed cleanly"
+# Add users to pulse-access group
+usermod -aG pulse-access root 2>/dev/null || true
+[ -n "$ACTUAL_USER" ] && usermod -aG pulse-access "$ACTUAL_USER" 2>/dev/null || true
+log_success "Added root and $ACTUAL_USER to pulse-access group"
+
+# Create PulseAudio system service if not already created by setup_picam.sh
+if [ ! -f /etc/systemd/system/pulseaudio-system.service ]; then
+    log_info "Creating PulseAudio system service..."
+    cat > /etc/systemd/system/pulseaudio-system.service << 'PULSE_SERVICE_EOF'
+[Unit]
+Description=PulseAudio System-Wide Daemon
+Before=evvos-picam-tcp.service evvos-pico-voice.service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/pulseaudio --system --daemonize=no --disallow-exit --disallow-module-loading --log-target=journal
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+PULSE_SERVICE_EOF
+    systemctl daemon-reload
+    systemctl enable pulseaudio-system.service
+    log_success "PulseAudio system service created and enabled"
 else
-    log_warning "ReSpeaker not yet visible in arecord -l (may appear after reboot)"
+    log_success "PulseAudio system service already exists"
 fi
 
-log_success "ALSA configuration complete"
+# Kill any stale PulseAudio instance and start the service cleanly
+pkill -u pulse pulseaudio 2>/dev/null || true
+sleep 1
+systemctl restart pulseaudio-system.service
+sleep 2
+
+if systemctl is-active --quiet pulseaudio-system.service; then
+    log_success "PulseAudio system daemon running"
+    pactl list sources short 2>/dev/null | head -5 || true
+else
+    log_warning "PulseAudio may not be running — check: journalctl -u pulseaudio-system -n 20"
+fi
+
+log_success "Audio configuration complete — PulseAudio handles mic sharing"
 
 # ============================================================================
 # STEP 9: CREATE PICOVOICE SERVICE SCRIPT
@@ -1258,13 +1299,16 @@ log_success "PicoVoice voice recognition service script created"
 
 log_section "Step 10: Create Systemd Service"
 
+# Add PicoVoice service user to pulse-access so PyAudio can connect to PulseAudio
+usermod -aG pulse-access root 2>/dev/null || true
+log_success "root added to pulse-access group"
+
 cat > /etc/systemd/system/evvos-pico-voice.service << 'SERVICE_FILE'
 [Unit]
 Description=EVVOS PicoVoice Rhino Intent Recognition Service
 Documentation=https://github.com/evvos
-After=network.target sound.target alsa-restore.service
-Requires=sound.target
-Wants=alsa-restore.service
+After=network.target pulseaudio-system.service
+Requires=pulseaudio-system.service
 
 [Service]
 Type=simple
@@ -1284,8 +1328,6 @@ SyslogFacility=user
 Environment="PATH=/opt/evvos/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/opt/evvos"
-# ALSA lib error suppression (note: actual suppression happens in Python code)
-Environment="ALSA_CARD_DEFAULTS=libasound.so.2"
 # Supabase Edge Function Configuration
 Environment="SUPABASE_EDGE_FUNCTION_URL=https://zekbonbxwccgsfagrrph.supabase.co/functions/v1/insert-voice-command"
 Environment="EVVOS_DEVICE_ID=EVVOS_0001"
