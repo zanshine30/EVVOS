@@ -57,7 +57,7 @@ apt-get install -y \
     python3-picamera2 python3-requests ffmpeg \
     pulseaudio pulseaudio-utils \
     git cmake build-essential \
-    libopenblas-dev libopenblas-base \
+    libopenblas-dev \
     --no-install-recommends
 log_success "Camera firmware and dependencies ready"
 
