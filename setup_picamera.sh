@@ -53,7 +53,7 @@ grep -q "^start_x=1" "$CONFIG_FILE" || echo "start_x=1" >> "$CONFIG_FILE"
 grep -q "^gpu_mem="   "$CONFIG_FILE" || echo "gpu_mem=128" >> "$CONFIG_FILE"
 
 apt-get update -qq
-apt-get install -y python3-picamera2 python3-requests ffmpeg --no-install-recommends
+apt-get install -y python3-picamera2 python3-requests ffmpeg pulseaudio pulseaudio-utils --no-install-recommends
 log_success "Camera firmware and dependencies ready"
 
 # ============================================================================
@@ -131,38 +131,6 @@ def setup_camera():
 
 # ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
 
-def stop_picovoice():
-    """Stop PicoVoice service so it releases the microphone hardware lock."""
-    try:
-        result = subprocess.run(
-            ["systemctl", "stop", "evvos-pico-voice"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            print("[CAMERA] PicoVoice stopped — microphone released")
-        else:
-            print(f"[CAMERA] Warning: PicoVoice stop returned {result.returncode}: {result.stderr.strip()}")
-        # Give ALSA a moment to fully release the hardware
-        time.sleep(1)
-    except Exception as e:
-        print(f"[CAMERA] Warning: Could not stop PicoVoice: {e}")
-
-
-def start_picovoice():
-    """Restart PicoVoice service after recording is done."""
-    try:
-        result = subprocess.run(
-            ["systemctl", "start", "evvos-pico-voice"],
-            capture_output=True, text=True, timeout=10
-        )
-        if result.returncode == 0:
-            print("[CAMERA] PicoVoice restarted — microphone returned")
-        else:
-            print(f"[CAMERA] Warning: PicoVoice start returned {result.returncode}: {result.stderr.strip()}")
-    except Exception as e:
-        print(f"[CAMERA] Warning: Could not restart PicoVoice: {e}")
-
-
 def start_recording_handler():
     global recording, current_session_id, current_video_path, current_audio_path, audio_process, recording_start_time
     with recording_lock:
@@ -185,21 +153,16 @@ def start_recording_handler():
             current_audio_path   = RECORDINGS_DIR / f"audio_{ts}.wav"
             recording_start_time = time.time()
 
-            # Stop PicoVoice so it releases exclusive hold on hw:0,0.
-            # ALSA does not support simultaneous capture from the same hardware
-            # device without a working dsnoop/pulse setup. Stopping PicoVoice
-            # during recording is safe — voice commands are not needed while
-            # an incident is actively being recorded. PicoVoice is restarted
-            # automatically in stop_recording_handler().
-            stop_picovoice()
-
             print(f"[CAMERA] Starting: {current_session_id}")
             encoder = H264Encoder(bitrate=2500000, framerate=CAMERA_FPS)
             camera.start_recording(encoder, str(current_video_path))
 
-            # Record audio directly from hardware now that PicoVoice released it
+            # Record audio via PulseAudio — allows concurrent access with PicoVoice.
+            # PulseAudio runs as a system daemon (started before both services) and
+            # acts as a hardware abstraction layer, so multiple clients can capture
+            # from the ReSpeaker simultaneously without EBUSY conflicts.
             audio_process = subprocess.Popen([
-                "arecord", "-D", "hw:0,0", "-f", "S16_LE", "-r", "48000", "-c", "2", str(current_audio_path)
+                "arecord", "-D", "pulse", "-f", "S16_LE", "-r", "16000", "-c", "1", str(current_audio_path)
             ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
             # Give arecord a moment to open and verify it started cleanly
@@ -209,7 +172,7 @@ def start_recording_handler():
                 print(f"[CAMERA] Warning: arecord exited immediately: {err}")
                 audio_process = None
             else:
-                print("[CAMERA] arecord started on hw:0,0")
+                print("[CAMERA] arecord started via PulseAudio")
 
             recording = True
 
@@ -224,8 +187,6 @@ def start_recording_handler():
             }
         except Exception as e:
             print(f"[CAMERA] Start Error: {e}")
-            # Make sure PicoVoice is restarted even if recording failed
-            start_picovoice()
             return {"status": "error", "message": str(e)}
 
 
@@ -309,9 +270,6 @@ def stop_recording_handler():
                 print(f"[FFMPEG] Error: {res.stderr}")
                 size_mb = mp4_path.stat().st_size / 1024 / 1024 if mp4_path.exists() else 0
 
-            # Restart PicoVoice now that recording and muxing are done
-            start_picovoice()
-
             return {
                 "status":         "recording_stopped",
                 "session_id":     current_session_id,
@@ -324,8 +282,6 @@ def stop_recording_handler():
             }
         except Exception as e:
             print(f"[CAMERA] Stop Error: {e}")
-            # Always restart PicoVoice even if stop failed
-            start_picovoice()
             return {"status": "error", "message": str(e)}
 
 
@@ -471,18 +427,62 @@ if __name__ == "__main__":
 CAMERA_SCRIPT_EOF
 
 chmod +x "$CAMERA_SCRIPT"
-log_success "Service script created with shared ALSA audio muxing"
+log_success "Service script created with PulseAudio shared audio"
 
 # ============================================================================
-# STEP 4: SYSTEMD SERVICE & DIRECTORIES
+# STEP 4: PULSEAUDIO SYSTEM SERVICE
 # ============================================================================
-log_section "Step 4 & 5: Service and Permissions"
+log_section "Step 4: PulseAudio System Service"
+
+# Add users to pulse-access group so services can connect to PulseAudio
+usermod -aG pulse-access root
+usermod -aG pulse-access "$ACTUAL_USER"
+log_success "Added root and $ACTUAL_USER to pulse-access group"
+
+# Create PulseAudio system service
+cat > /etc/systemd/system/pulseaudio-system.service << 'PULSE_SERVICE_EOF'
+[Unit]
+Description=PulseAudio System-Wide Daemon
+Before=evvos-picam-tcp.service evvos-pico-voice.service
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/pulseaudio --system --daemonize=no --disallow-exit --disallow-module-loading --log-target=journal
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+PULSE_SERVICE_EOF
+
+systemctl daemon-reload
+systemctl enable pulseaudio-system.service
+
+# Kill any existing PulseAudio instance cleanly before starting the service
+pkill -u pulse pulseaudio 2>/dev/null || true
+sleep 1
+
+systemctl restart pulseaudio-system.service
+sleep 2
+
+if systemctl is-active --quiet pulseaudio-system.service; then
+    log_success "PulseAudio system service running"
+    pactl list sources short 2>/dev/null | grep -v monitor | head -5 || true
+else
+    log_error "PulseAudio failed to start — check: journalctl -u pulseaudio-system -n 20"
+fi
+
+# ============================================================================
+# STEP 5: SYSTEMD SERVICE & DIRECTORIES
+# ============================================================================
+log_section "Step 5: Camera Service and Permissions"
 
 SERVICE_FILE="/etc/systemd/system/evvos-picam-tcp.service"
 cat > "$SERVICE_FILE" << SERVICE_EOF
 [Unit]
 Description=EVVOS Pi Camera TCP Service
-After=network.target
+After=network.target pulseaudio-system.service
+Requires=pulseaudio-system.service
 
 [Service]
 Type=simple
@@ -506,4 +506,4 @@ systemctl enable evvos-picam-tcp.service
 systemctl restart evvos-picam-tcp.service
 
 log_success "Service installed and started"
-log_success "Setup complete! Camera records natively with shared audio."
+log_success "Setup complete! Camera records via PulseAudio with concurrent voice recognition."
