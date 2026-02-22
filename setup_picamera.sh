@@ -150,6 +150,20 @@ fi
 rm -rf "${WHISPER_DIR}/build_flagtest"
 
 log_info "Building whisper.cpp — single core, ~30–45 min on Pi Zero 2 W. Do not interrupt..."
+
+# Clean stale build directory from the failed previous attempt.
+# cmake caches the broken config and reuses it on re-run unless wiped.
+if [ -d "${WHISPER_DIR}/build" ]; then
+    log_info "Removing stale build directory from previous attempt..."
+    rm -rf "${WHISPER_DIR}/build"
+fi
+
+# WHY -latomic:
+# On 32-bit ARM (armhf), there are no native 64-bit atomic CPU instructions.
+# GCC emits calls to libatomic helpers (__atomic_load_8, __atomic_compare_exchange_8)
+# for any 64-bit std::atomic/C11 _Atomic operations. whisper.cpp's bundled
+# miniaudio (common-whisper.cpp job queue) uses 64-bit atomics, so we must
+# link libatomic explicitly. This is a systemic armhf issue, not a whisper bug.
 cmake -B "${WHISPER_DIR}/build" \
       -S "${WHISPER_DIR}" \
       $BLAS_FLAG \
@@ -158,6 +172,8 @@ cmake -B "${WHISPER_DIR}/build" \
       -DWHISPER_NO_F16C=ON \
       -DWHISPER_NO_FMA=ON \
       -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_EXE_LINKER_FLAGS="-latomic" \
+      -DCMAKE_SHARED_LINKER_FLAGS="-latomic" \
       -Wno-dev
 
 # -j1: one compiler process at a time — prevents OOM on 512 MB + 1 GB swap
