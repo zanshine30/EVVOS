@@ -609,83 +609,39 @@ fi
 
 echo ""
 
-log_section "Step 8: Configure ALSA dsnoop for Shared Microphone Access"
+log_section "Step 8: Configure ALSA Audio"
 
 log_info "Checking ALSA audio device status..."
 
-# Verify the audio device is working
 if aplay -l 2>&1 | grep -qi "seeed"; then
     log_success "ReSpeaker audio device ready"
 else
     log_warning "ReSpeaker may not be detected yet, but service will auto-detect"
 fi
 
-# ── Detect ReSpeaker card number ───────────────────────────────────────────────
-RESPEAKER_CARD_NUM="0"
-CARD_INFO_DETECT=$(aplay -l 2>/dev/null | grep -i seeed | head -1)
-if [ -n "$CARD_INFO_DETECT" ]; then
-    RESPEAKER_CARD_NUM=$(echo "$CARD_INFO_DETECT" | grep -oP 'card \K[0-9]+')
-    log_success "ReSpeaker detected at ALSA card $RESPEAKER_CARD_NUM"
+# Remove any /etc/asound.conf that may have been written by a previous setup attempt.
+# We no longer use dsnoop for mic sharing — instead, the PiCam service stops PicoVoice
+# during recording to release the hardware, then restarts it after. This is simpler
+# and more reliable than dsnoop on Raspberry Pi OS Bookworm.
+if [ -f /etc/asound.conf ]; then
+    sudo rm /etc/asound.conf
+    log_success "Removed /etc/asound.conf (not needed — using stop/start approach)"
 else
-    log_warning "Could not auto-detect card number — defaulting to card 0"
+    log_info "No /etc/asound.conf present — nothing to remove"
 fi
 
-log_info "Configuring ALSA dsnoop virtual device (card $RESPEAKER_CARD_NUM)..."
-
-# ── Remove legacy per-user configs that might conflict ─────────────────────────
+# Remove any legacy per-user .asoundrc files that could interfere
 rm -f /root/.asoundrc /home/*/.asoundrc 2>/dev/null || true
-log_info "Removed any legacy .asoundrc files"
+log_info "Cleared any legacy .asoundrc files"
 
-# ── Write /etc/asound.conf with dsnoop ────────────────────────────────────────
-#
-# WHY dsnoop?
-#   ALSA normally grants exclusive access to a hardware capture device (hw:X,0)
-#   to the first program that opens it.  When PicoVoice starts on boot it locks
-#   hw:seeed2micvoicec, so arecord (PiCam service) gets EBUSY and records silence.
-#
-#   dsnoop is an ALSA kernel-level sharing plugin.  It opens the real hw device
-#   once and exposes a virtual capture endpoint that any number of readers can
-#   open simultaneously with zero latency penalty — identical to the original
-#   hardware stream.  Both PicoVoice AND arecord will use "dsnoop:seeed2micvoicec"
-#   and share the microphone without either one blocking the other.
-#
-cat > /etc/asound.conf << ASOUND_EOF
-pcm.shared_mic {
-    type dsnoop
-    ipc_key 2048
-    ipc_key_add_uid false
-    slaves {
-        pcm "hw:${RESPEAKER_CARD_NUM},0"
-        channels 2
-        rate 48000
-        period_size 1024
-        buffer_size 8192
-    }
-}
-
-pcm.!default {
-    type asym
-    capture.pcm "shared_mic"
-}
-
-ctl.!default {
-    type hw
-    card ${RESPEAKER_CARD_NUM}
-}
-ASOUND_EOF
-
-chmod 644 /etc/asound.conf
-log_success "Written /etc/asound.conf with dsnoop shared capture device (card $RESPEAKER_CARD_NUM)"
-
-# ── Verify dsnoop config is parseable by ALSA ─────────────────────────────────
-if arecord -L 2>/dev/null | grep -q "dsnoop"; then
-    log_success "dsnoop virtual device confirmed available to ALSA"
+# Verify ALSA is clean
+if arecord -l 2>&1 | grep -qi "seeed"; then
+    log_success "ALSA healthy — ReSpeaker listed cleanly"
 else
-    log_warning "dsnoop not yet visible (may need reboot or module reload — this is normal)"
+    log_warning "ReSpeaker not yet visible in arecord -l (may appear after reboot)"
 fi
 
-log_info "Audio error suppression will be handled in the Python service"
-log_success "ALSA dsnoop configuration complete — microphone is now shareable"
+log_success "ALSA configuration complete"
 
 # ============================================================================
 # STEP 9: CREATE PICOVOICE SERVICE SCRIPT
@@ -1073,44 +1029,24 @@ class PicoVoiceService:
                 except:
                     pass
             
-            # Find the best available capture device.
-            #
-            # Priority:
-            #   1. 'dsnoop' — the ALSA shared capture device written by Step 8 of
-            #      setup_pico_voice_recognition_respeaker.sh.  Opening dsnoop lets
-            #      PicoVoice and the PiCam arecord process share the microphone
-            #      concurrently without EBUSY / exclusive-access conflicts.
-            #   2. 'seeed'  — the raw ReSpeaker hardware device.  Works if dsnoop is
-            #      not configured, but blocks the PiCam service from recording audio.
-            #   3. First device with input channels — last-resort fallback.
+            # Find the ReSpeaker device. We no longer use dsnoop/shared_mic for
+            # sharing — the PiCam service stops PicoVoice during recording and
+            # restarts it afterward, so PicoVoice always has exclusive hardware access.
             dev_idx = None
             dev_name = None
 
-            # Priority 1: shared_mic virtual device (dsnoop-backed, shared, non-exclusive)
+            # Priority 1: ReSpeaker hardware device (seeed)
             for i in range(self.pa.get_device_count()):
                 info = self.pa.get_device_info_by_index(i)
-                if 'shared_mic' in info['name'].lower() and info['maxInputChannels'] > 0:
+                if 'seeed' in info['name'].lower() and info['maxInputChannels'] > 0:
                     dev_idx = i
                     dev_name = info['name']
-                    logger.info(f"Found shared_mic device: {dev_name} (index {i}) — mic will be shared with PiCam")
+                    logger.info(f"Found ReSpeaker device: {dev_name} (index {i})")
                     logger.info(f"  Sample Rate: {int(info['defaultSampleRate'])} Hz")
                     logger.info(f"  Input Channels: {info['maxInputChannels']}")
                     break
 
-            # Priority 2: ReSpeaker hardware device (seeed)
-            if dev_idx is None:
-                logger.warning("shared_mic device not found — falling back to direct ReSpeaker device (mic sharing disabled)")
-                for i in range(self.pa.get_device_count()):
-                    info = self.pa.get_device_info_by_index(i)
-                    if 'seeed' in info['name'].lower() and info['maxInputChannels'] > 0:
-                        dev_idx = i
-                        dev_name = info['name']
-                        logger.info(f"Found ReSpeaker device: {dev_name} (index {i})")
-                        logger.info(f"  Sample Rate: {int(info['defaultSampleRate'])} Hz")
-                        logger.info(f"  Input Channels: {info['maxInputChannels']}")
-                        break
-
-            # Priority 3: Any device with input channels
+            # Priority 2: Any device with input channels
             if dev_idx is None:
                 logger.warning("ReSpeaker device (seeed) not found, trying any available input device...")
                 for i in range(self.pa.get_device_count()):
