@@ -54,7 +54,22 @@ grep -q "^gpu_mem="   "$CONFIG_FILE" || echo "gpu_mem=128" >> "$CONFIG_FILE"
 
 apt-get update -qq
 apt-get install -y python3-picamera2 python3-requests ffmpeg pulseaudio pulseaudio-utils --no-install-recommends
-log_success "Camera firmware and dependencies ready"
+
+# Install whisper-ctranslate2 for offline speech-to-text transcription.
+# Uses the 'tiny' model — small enough for Pi Zero 2 W (39 MB, ~1-2 min per recording on CPU).
+# faster-whisper/ctranslate2 is significantly faster than openai-whisper on ARM CPU.
+pip3 install whisper-ctranslate2 --break-system-packages --quiet 2>/dev/null || \
+    log_warning "whisper-ctranslate2 install failed — transcription will be skipped at runtime"
+
+# Pre-download the tiny model so first recording doesn't stall waiting for a download
+python3 -c "
+from faster_whisper import WhisperModel
+print('[WHISPER] Downloading tiny model...')
+WhisperModel('tiny', device='cpu', compute_type='int8')
+print('[WHISPER] Model ready')
+" 2>/dev/null || log_warning "Whisper model pre-download failed — will download on first use"
+
+log_success "Camera firmware, audio, and transcription dependencies ready"
 
 # ============================================================================
 # STEP 3: CREATE ENHANCED TCP CAMERA SERVICE SCRIPT
@@ -204,6 +219,180 @@ def get_status_handler():
         }
 
 
+def transcribe_audio(audio_path):
+    """
+    Transcribe audio using faster-whisper (tiny model, CPU, int8).
+    Parses three enforcer-spoken fields:
+
+    1. DRIVER NAME
+       Trigger:  "Driver's name" / "Driver name" / "The driver's name is"
+       Captures: Full name in Title Case until sentence boundary or next trigger.
+       Example:  "Driver's name John Santos" -> "John Santos"
+
+    2. PLATE NUMBER
+       The enforcer spells character by character so Whisper transcribes each
+       letter/digit as a separate word, e.g. "Plate number A B C 1 2 3".
+       Maps: single letters, NATO phonetic words, spoken digit words, bare numerals.
+       Stops collecting when a non-plate word is encountered.
+       Result joined without spaces: "ABC123"
+
+    3. VIOLATIONS
+       Trigger:  "Violations are" / "Violations" / "Violation"
+       Captures: Everything after trigger, split on commas and "and".
+       Example:  "Violations are Not Wearing Helmet, No License Plate"
+                 -> ["Not Wearing Helmet", "No License Plate"]
+    """
+    import re
+
+    result = {
+        "transcript":   "",
+        "driver_name":  "",
+        "plate_number": "",
+        "violations":   [],
+    }
+
+    if not audio_path or not Path(audio_path).exists():
+        print("[WHISPER] No audio file -- skipping transcription")
+        return result
+
+    NATO = {
+        "alpha": "A", "bravo": "B", "charlie": "C", "delta": "D",
+        "echo": "E", "foxtrot": "F", "golf": "G", "hotel": "H",
+        "india": "I", "juliet": "J", "kilo": "K", "lima": "L",
+        "mike": "M", "november": "N", "oscar": "O", "papa": "P",
+        "quebec": "Q", "romeo": "R", "sierra": "S", "tango": "T",
+        "uniform": "U", "victor": "V", "whiskey": "W", "xray": "X",
+        "x-ray": "X", "yankee": "Y", "zulu": "Z",
+    }
+
+    WORD_TO_DIGIT = {
+        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    }
+
+    PLATE_STOP_WORDS = {
+        "violation", "violations", "driver", "name", "the", "and",
+        "are", "is", "no", "not", "license", "helmet", "wearing",
+    }
+
+    def parse_plate_tokens(tokens):
+        plate_chars = []
+        for tok in tokens:
+            t = tok.lower().strip(".,;:")
+            if not t:
+                continue
+            if t in PLATE_STOP_WORDS:
+                break
+            if t in NATO:
+                plate_chars.append(NATO[t])
+            elif t in WORD_TO_DIGIT:
+                plate_chars.append(WORD_TO_DIGIT[t])
+            elif len(t) == 1 and t.isalnum():
+                plate_chars.append(t.upper())
+            elif t.isdigit():
+                plate_chars.append(t)
+            elif re.match(r'^[a-z0-9]{2,4}$', t):
+                plate_chars.append(t.upper())
+            else:
+                break
+        return "".join(plate_chars)
+
+    try:
+        print("[WHISPER] Transcribing audio (tiny model, CPU)...")
+        res = subprocess.run(
+            [
+                "whisper-ctranslate2",
+                str(audio_path),
+                "--model",         "tiny",
+                "--language",      "en",
+                "--output_format", "txt",
+                "--output_dir",    str(RECORDINGS_DIR),
+                "--device",        "cpu",
+                "--compute_type",  "int8",
+            ],
+            capture_output=True, text=True, timeout=300
+        )
+
+        txt_path = Path(audio_path).with_suffix(".txt")
+        if txt_path.exists():
+            transcript = txt_path.read_text(encoding="utf-8").strip()
+            txt_path.unlink(missing_ok=True)
+        elif res.stdout.strip():
+            transcript = res.stdout.strip()
+        else:
+            print(f"[WHISPER] No transcript output. stderr: {res.stderr[:300]}")
+            return result
+
+        print(f"[WHISPER] Raw transcript: {transcript[:300]}")
+        result["transcript"] = transcript
+        tokens = transcript.split()
+        tokens_lower = [t.lower().strip(".,;:") for t in tokens]
+
+        # 1. DRIVER NAME
+        name_match = re.search(
+            r"driver(?:'s|s)?\s+name(?:\s+is)?\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)+)",
+            transcript,
+            re.IGNORECASE,
+        )
+        if name_match:
+            raw_name = name_match.group(1).strip()
+            result["driver_name"] = " ".join(w.capitalize() for w in raw_name.split())
+            print(f"[WHISPER] Driver name: '{result['driver_name']}'")
+        else:
+            print("[WHISPER] Driver name not found in transcript")
+
+        # 2. PLATE NUMBER
+        plate_trigger_idx = None
+        for i, tok in enumerate(tokens_lower):
+            if tok == "plate":
+                if i + 1 < len(tokens_lower) and tokens_lower[i + 1] == "number":
+                    plate_trigger_idx = i + 2
+                else:
+                    plate_trigger_idx = i + 1
+                break
+
+        if plate_trigger_idx is not None:
+            plate = parse_plate_tokens(tokens[plate_trigger_idx:])
+            if plate:
+                result["plate_number"] = plate
+                print(f"[WHISPER] Plate number: '{result['plate_number']}'")
+            else:
+                print("[WHISPER] Plate trigger found but could not parse characters")
+        else:
+            print("[WHISPER] Plate number trigger not found in transcript")
+
+        # 3. VIOLATIONS
+        viol_match = re.search(
+            r"violations?\s+(?:are\s+)?(.+?)(?:\.|$)",
+            transcript,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if viol_match:
+            raw_violations = viol_match.group(1).strip()
+            parts = re.split(r",\s*|\s+and\s+", raw_violations, flags=re.IGNORECASE)
+            result["violations"] = [
+                " ".join(w.capitalize() for w in p.strip().split())
+                for p in parts if p.strip()
+            ]
+            print(f"[WHISPER] Violations: {result['violations']}")
+        else:
+            print("[WHISPER] Violations trigger not found in transcript")
+
+        return result
+
+    except subprocess.TimeoutExpired:
+        print("[WHISPER] Transcription timed out after 300s")
+        return result
+    except FileNotFoundError:
+        print("[WHISPER] whisper-ctranslate2 not installed -- run: pip install whisper-ctranslate2")
+        return result
+    except Exception as e:
+        print(f"[WHISPER] Unexpected error: {e}")
+        import traceback
+        print(traceback.format_exc())
+        return result
+
+
 def stop_recording_handler():
     global recording, current_session_id, current_video_path, current_audio_path, audio_process, recording_start_time
     with recording_lock:
@@ -229,6 +418,9 @@ def stop_recording_handler():
             mp4_path = current_video_path.with_suffix(".mp4")
             raw_size = current_video_path.stat().st_size if current_video_path.exists() else 0
             print(f"[CAMERA] Raw H264 size: {raw_size / 1024 / 1024:.2f} MB")
+
+            # ── TRANSCRIPTION (runs before ffmpeg so audio file still exists) ──
+            transcription = transcribe_audio(current_audio_path)
 
             # ── SPEED FIX & AUDIO MUXING ──────────────────
             print("[FFMPEG] Muxing audio & fixing speed (Constant 24 FPS)...")
@@ -279,6 +471,11 @@ def stop_recording_handler():
                 "video_url":      f"http://{get_pi_ip()}:{HTTP_PORT}/{mp4_path.name}",
                 "pi_ip":          get_pi_ip(),
                 "http_port":      HTTP_PORT,
+                # ── Transcription fields (pre-fill IncidentSummaryScreen) ──
+                "transcript":     transcription["transcript"],
+                "driver_name":    transcription["driver_name"],
+                "plate_number":   transcription["plate_number"],
+                "violations":     transcription["violations"],
             }
         except Exception as e:
             print(f"[CAMERA] Stop Error: {e}")
