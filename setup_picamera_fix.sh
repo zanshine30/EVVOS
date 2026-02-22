@@ -79,7 +79,7 @@ log_success "Camera firmware and dependencies ready"
 #     against OpenBLAS for BLAS-accelerated matrix ops, and uses only ~75 MB
 #     RSS with the tiny.en GGML model.  Inference time: 60–120 s on Pi Zero 2 W.
 # ============================================================================
-log_section "Step 2.5: Building whisper.cpp (32-bit ARM, OpenBLAS)"
+log_section "Step 2.5: Building whisper.cpp (32-bit ARM, OpenBLAS, swap-assisted)"
 
 WHISPER_DIR="/opt/whisper.cpp"
 WHISPER_MODEL_NAME="tiny.en"
@@ -95,20 +95,80 @@ else
     git clone --depth=1 https://github.com/ggerganov/whisper.cpp.git "$WHISPER_DIR"
 fi
 
+# ── Swap file (REQUIRED on Pi Zero 2 W — 512 MB RAM is not enough to compile) ─
+# The C++ compiler peaks at ~480 MB RSS on the heaviest whisper.cpp translation
+# units.  Without extra swap the kernel OOM-kills the compiler at ~84% and the
+# build exits silently.  We create a 1 GB swapfile, build, then remove it.
+SWAP_FILE="/swapfile_whisper_build"
+SWAP_CREATED=0
+
+if [ ! -f "$SWAP_FILE" ]; then
+    log_info "Creating temporary 1 GB swapfile for compilation..."
+    # fallocate is fastest; fall back to dd if the filesystem doesn't support it
+    if fallocate -l 1G "$SWAP_FILE" 2>/dev/null; then
+        log_success "Swapfile allocated with fallocate"
+    else
+        log_info "fallocate failed — using dd (slower, ~30 s)..."
+        dd if=/dev/zero of="$SWAP_FILE" bs=1M count=1024 status=progress
+    fi
+    chmod 600 "$SWAP_FILE"
+    mkswap "$SWAP_FILE"
+    swapon "$SWAP_FILE"
+    SWAP_CREATED=1
+    log_success "Swapfile active — $(free -h | awk '/^Swap/{print $2}') swap available"
+else
+    log_info "Swapfile already exists — skipping creation"
+    swapon "$SWAP_FILE" 2>/dev/null || true
+    SWAP_CREATED=1
+fi
+
 # ── CMake build with OpenBLAS ─────────────────────────────────────────────────
-# -DWHISPER_BLAS=ON   → link OpenBLAS (2-3× faster matrix multiply vs plain C)
-# -j2                 → parallel build; keeps thermals manageable on Pi Zero 2 W
-# Build takes ~20-30 min on Pi Zero 2 W — this is normal and expected.
-log_info "Building whisper.cpp with OpenBLAS — this takes 20–30 min on Pi Zero 2 W..."
+# Flag name changed in whisper.cpp ≥ 1.7: WHISPER_BLAS → GGML_BLAS.
+# We detect which one cmake accepts and use the correct one automatically.
+# -j1 (single job) is mandatory — parallel compile OOMs the Pi Zero 2 W.
+# Build takes 30–45 min on Pi Zero 2 W with a single core — this is expected.
+log_info "Configuring whisper.cpp (detecting BLAS cmake flag)..."
+
+BLAS_FLAG="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
+# Try the new flag first; fall back to the old name for older checkouts
+if ! cmake -B "${WHISPER_DIR}/build_flagtest" \
+           -S "${WHISPER_DIR}" \
+           -DGGML_BLAS=ON \
+           -DCMAKE_BUILD_TYPE=Release \
+           -DWHISPER_NO_AVX=ON \
+           -DWHISPER_NO_AVX2=ON \
+           -DWHISPER_NO_F16C=ON \
+           -DWHISPER_NO_FMA=ON \
+           --log-level=WARNING \
+           -Wno-dev \
+           > /dev/null 2>&1; then
+    BLAS_FLAG="-DWHISPER_BLAS=ON -DWHISPER_BLAS_VENDOR=OpenBLAS"
+    log_info "Using legacy WHISPER_BLAS flag"
+else
+    log_info "Using GGML_BLAS flag (whisper.cpp ≥ 1.7)"
+fi
+rm -rf "${WHISPER_DIR}/build_flagtest"
+
+log_info "Building whisper.cpp — single core, ~30–45 min on Pi Zero 2 W. Do not interrupt..."
 cmake -B "${WHISPER_DIR}/build" \
       -S "${WHISPER_DIR}" \
-      -DWHISPER_BLAS=ON \
+      $BLAS_FLAG \
       -DWHISPER_NO_AVX=ON \
       -DWHISPER_NO_AVX2=ON \
       -DWHISPER_NO_F16C=ON \
       -DWHISPER_NO_FMA=ON \
-      -DCMAKE_BUILD_TYPE=Release
-cmake --build "${WHISPER_DIR}/build" --config Release -j2
+      -DCMAKE_BUILD_TYPE=Release \
+      -Wno-dev
+
+# -j1: one compiler process at a time — prevents OOM on 512 MB + 1 GB swap
+cmake --build "${WHISPER_DIR}/build" --config Release -j1
+
+# ── Remove temporary swapfile now that the build is done ──────────────────────
+if [ "$SWAP_CREATED" -eq 1 ] && [ -f "$SWAP_FILE" ]; then
+    swapoff "$SWAP_FILE" 2>/dev/null || true
+    rm -f "$SWAP_FILE"
+    log_success "Temporary swapfile removed"
+fi
 
 # Confirm binary exists (name changed from `main` → `whisper-cli` in 1.6+)
 if [ ! -f "$WHISPER_BIN" ]; then
