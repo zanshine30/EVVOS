@@ -151,19 +151,25 @@ rm -rf "${WHISPER_DIR}/build_flagtest"
 
 log_info "Building whisper.cpp — single core, ~30–45 min on Pi Zero 2 W. Do not interrupt..."
 
-# Clean stale build directory from the failed previous attempt.
-# cmake caches the broken config and reuses it on re-run unless wiped.
+# Always wipe the build directory — cmake caches broken state from prior failures.
 if [ -d "${WHISPER_DIR}/build" ]; then
-    log_info "Removing stale build directory from previous attempt..."
+    log_info "Removing stale build directory..."
     rm -rf "${WHISPER_DIR}/build"
 fi
 
-# WHY -latomic:
-# On 32-bit ARM (armhf), there are no native 64-bit atomic CPU instructions.
+# WHY LDFLAGS=-latomic (not CMAKE_EXE_LINKER_FLAGS):
+# On 32-bit ARM (armhf) there are no native 64-bit atomic CPU instructions.
 # GCC emits calls to libatomic helpers (__atomic_load_8, __atomic_compare_exchange_8)
-# for any 64-bit std::atomic/C11 _Atomic operations. whisper.cpp's bundled
-# miniaudio (common-whisper.cpp job queue) uses 64-bit atomics, so we must
-# link libatomic explicitly. This is a systemic armhf issue, not a whisper bug.
+# for 64-bit std::atomic operations used in whisper.cpp's bundled miniaudio.
+# CMAKE_EXE_LINKER_FLAGS passed via -D is silently ignored on cmake 3.25 because
+# the project's CMakeLists overrides it per-target. The LDFLAGS environment
+# variable is inherited unconditionally and appended to every link command.
+export LDFLAGS="-latomic"
+
+# WHY -DWHISPER_BUILD_TESTS=OFF:
+# test-vad is the first executable cmake links after building libcommon.a, and
+# it's the only target failing. We only need whisper-cli — disabling tests
+# skips test-vad entirely and proceeds directly to the binary we need.
 cmake -B "${WHISPER_DIR}/build" \
       -S "${WHISPER_DIR}" \
       $BLAS_FLAG \
@@ -172,8 +178,7 @@ cmake -B "${WHISPER_DIR}/build" \
       -DWHISPER_NO_F16C=ON \
       -DWHISPER_NO_FMA=ON \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_EXE_LINKER_FLAGS="-latomic" \
-      -DCMAKE_SHARED_LINKER_FLAGS="-latomic" \
+      -DWHISPER_BUILD_TESTS=OFF \
       -Wno-dev
 
 # -j1: one compiler process at a time — prevents OOM on 512 MB + 1 GB swap
