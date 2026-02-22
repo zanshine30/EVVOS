@@ -271,6 +271,13 @@ class EVVOSWiFiProvisioner:
                 json.dump(creds, f)
             os.chmod(CREDS_FILE, 0o600)
             logger.info("Credentials saved to storage")
+            # Reset the persistent failure counter whenever new creds are written
+            fail_counter_file = "/etc/evvos/.wifi_fail_count"
+            try:
+                if os.path.exists(fail_counter_file):
+                    os.remove(fail_counter_file)
+            except Exception:
+                pass
             # Update in-memory credentials
             self.credentials = creds
             return True
@@ -427,96 +434,110 @@ class EVVOSWiFiProvisioner:
             logger.error(traceback.format_exc())
 
     async def _connect_to_wifi(self, ssid: str, password: str) -> bool:
-        """Attempt to connect to WiFi network"""
+        """
+        Attempt to connect to a WiFi network via NetworkManager (nmcli).
+
+        Strategy:
+          1. Ensure wlan0 is NM-managed.
+          2. Delete any stale NM connection profile for this SSID so we start clean.
+          3. Add a NEW persistent connection profile (survives reboot) and activate it.
+          4. Fall back to wpa_supplicant only if nmcli is completely unavailable.
+
+        We deliberately do NOT kill wpa_supplicant or dhclient here — those are
+        managed by NetworkManager on Bookworm Lite; killing them races with NM
+        and breaks connectivity.
+        """
         try:
             logger.info(f"Attempting WiFi connection to: {ssid}")
             wifi_interface = "wlan0"
 
-            # 1. CLEANUP: Kill lingering processes from Hotspot mode
-            subprocess.run(["killall", "-q", "wpa_supplicant"], capture_output=True)
-            subprocess.run(["killall", "-q", "dhclient"], capture_output=True)
-            
-            # Remove old lease files to force fresh IP
-            subprocess.run(["rm", "-f", "/var/lib/dhcp/dhclient.leases"], capture_output=True)
-            
-            # 2. FLUSH IP: Clear the 192.168.50.1 address
-            logger.info("Flushing old IP configuration...")
-            subprocess.run(["ip", "addr", "flush", "dev", wifi_interface], capture_output=True)
-            
-            # Bring interface UP
-            subprocess.run(["ip", "link", "set", wifi_interface, "up"], check=True, timeout=5)
-            await asyncio.sleep(2)
+            # Ensure the interface is up and NM-managed
+            subprocess.run(["ip", "link", "set", wifi_interface, "up"], capture_output=True, timeout=5)
+            subprocess.run(["nmcli", "device", "set", wifi_interface, "managed", "yes"], capture_output=True, timeout=5)
+            await asyncio.sleep(1)
 
-            # Try nmcli first
+            # Delete any pre-existing profile for this SSID to avoid conflicts
+            subprocess.run(["nmcli", "connection", "delete", ssid], capture_output=True, timeout=10)
+            await asyncio.sleep(1)
+
             try:
-                # Ensure device is managed
-                subprocess.run(["nmcli", "device", "set", wifi_interface, "managed", "yes"], capture_output=True)
-                
-                subprocess.run(
+                # Add a PERSISTENT connection profile — this is what survives reboots.
+                # "nmcli device wifi connect" creates a volatile/temporary profile;
+                # "nmcli connection add" + "nmcli connection up" creates one that
+                # NetworkManager will auto-connect to on every subsequent boot.
+                add_result = subprocess.run(
                     [
-                        "nmcli", "device", "wifi", "connect", ssid,
-                        "password", password, "ifname", wifi_interface,
+                        "nmcli", "connection", "add",
+                        "type", "wifi",
+                        "ifname", wifi_interface,
+                        "con-name", ssid,
+                        "ssid", ssid,
+                        "wifi-sec.key-mgmt", "wpa-psk",
+                        "wifi-sec.psk", password,
+                        "connection.autoconnect", "yes",
+                        "connection.autoconnect-priority", "10",
                     ],
                     check=True,
-                    timeout=25,
+                    timeout=15,
                     capture_output=True,
+                    text=True,
                 )
-                logger.info("✓ WiFi connection sent via nmcli")
+                logger.info(f"✓ NM connection profile created: {add_result.stdout.strip()}")
+
+                # Activate it immediately
+                up_result = subprocess.run(
+                    ["nmcli", "connection", "up", ssid],
+                    check=True,
+                    timeout=30,
+                    capture_output=True,
+                    text=True,
+                )
+                logger.info(f"✓ NM connection activated: {up_result.stdout.strip()}")
                 return True
-            except Exception:
-                logger.info("nmcli failed, falling back to wpa_supplicant + DHCP...")
 
-                # FALLBACK: wpa_supplicant + dhclient
-                wpa_config = f"""ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=US
+            except subprocess.CalledProcessError as nmcli_err:
+                logger.warning(f"nmcli failed ({nmcli_err.returncode}): {nmcli_err.stderr.strip()}")
+                logger.info("Falling back to wpa_supplicant + dhclient...")
 
-network={{
-    ssid="{ssid}"
-    psk="{password}"
-    key_mgmt=WPA-PSK
-}}
-"""
+                # FALLBACK — only used if NetworkManager is absent (minimal image)
+                # Flush the hotspot IP first
+                subprocess.run(["ip", "addr", "flush", "dev", wifi_interface], capture_output=True)
+
+                wpa_config = (
+                    f'ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n'
+                    f'update_config=1\ncountry=PH\n\n'
+                    f'network={{\n'
+                    f'    ssid="{ssid}"\n'
+                    f'    psk="{password}"\n'
+                    f'    key_mgmt=WPA-PSK\n'
+                    f'}}\n'
+                )
                 wpa_file = "/etc/wpa_supplicant/wpa_supplicant.conf"
-                
-                try:
-                    with open(wpa_file, "w") as f:
-                        f.write(wpa_config)
-                    
-                    # Start wpa_supplicant manually (no sudo needed, already running as root)
-                    logger.info("Starting wpa_supplicant daemon...")
-                    subprocess.run(
-                        ["wpa_supplicant", "-B", "-i", wifi_interface, "-c", wpa_file],
-                        check=True,
-                        timeout=10,
-                        capture_output=True
-                    )
-                    
-                    # 3. REQUEST IP: Run dhclient and longer timeout
-                    logger.info("Requesting IP address via DHCP (dhclient)...")
-                    
-                    # Release any theoretical hold
-                    subprocess.run(["dhclient", "-r", wifi_interface], capture_output=True)
-                    
-                    # Request new lease (increased timeout to 30s)
-                    dhcp_result = subprocess.run(
-                        ["dhclient", "-v", wifi_interface],
-                        timeout=30,
-                        capture_output=True,
-                        text=True
-                    )
-                    
-                    if dhcp_result.returncode == 0:
-                        logger.info("✓ DHCP Lease obtained successfully")
-                        return True
-                    else:
-                        logger.error(f"DHCP request failed: {dhcp_result.stderr}")
-                        return False
+                with open(wpa_file, "w") as f:
+                    f.write(wpa_config)
 
-                except Exception as wpa_error:
-                    logger.error(f"wpa_supplicant/DHCP fallback failed: {wpa_error}")
+                subprocess.run(["killall", "-q", "wpa_supplicant"], capture_output=True)
+                await asyncio.sleep(1)
+                subprocess.run(
+                    ["wpa_supplicant", "-B", "-i", wifi_interface, "-c", wpa_file],
+                    check=True, timeout=10, capture_output=True,
+                )
+                await asyncio.sleep(3)
+
+                subprocess.run(["dhclient", "-r", wifi_interface], capture_output=True)
+                dhcp = subprocess.run(
+                    ["dhclient", "-v", wifi_interface],
+                    timeout=30, capture_output=True, text=True,
+                )
+                if dhcp.returncode == 0:
+                    logger.info("✓ DHCP lease obtained via fallback")
+                    return True
+                else:
+                    logger.error(f"DHCP failed: {dhcp.stderr}")
+                    return False
+
         except Exception as e:
-            logger.error(f"WiFi connection failed: {e}")
+            logger.error(f"WiFi connection error: {e}")
         return False
 
     def _check_wifi_connected(self) -> bool:
@@ -1792,60 +1813,104 @@ cache-size=1000
             ssid = self.credentials.get("ssid")
             password = self.credentials.get("password")
 
-            # Try to connect up to 5 times
-            connection_established = False
-            for connect_attempt in range(1, 6):
-                logger.info(f"WiFi connection attempt {connect_attempt}/5...")
-                if await self._connect_to_wifi(ssid, password):
-                    logger.info(f"Connection command sent, waiting for association and DHCP (up to 30 seconds)...")
-                    for wait_attempt in range(1, 7):
-                        await asyncio.sleep(5)
-                        logger.info(f"Checking WiFi connection status (attempt {wait_attempt}/6, {wait_attempt*5}s)...")
-                        if self._check_wifi_connected():
-                            connection_established = True
-                            logger.info(f"✓ Connection attempt {connect_attempt} succeeded - WiFi associated with IP")
+            # ----------------------------------------------------------------
+            # On boot, NetworkManager may auto-connect before our script even
+            # runs.  Check first — if we already have an IP, skip the connect
+            # dance entirely and just verify internet.
+            # ----------------------------------------------------------------
+            if self._check_wifi_connected():
+                logger.info("✓ WiFi already connected (NM auto-connected on boot)")
+                connection_established = True
+            else:
+                # Try to connect up to 5 times
+                connection_established = False
+                for connect_attempt in range(1, 6):
+                    logger.info(f"WiFi connection attempt {connect_attempt}/5...")
+                    if await self._connect_to_wifi(ssid, password):
+                        logger.info(f"Connection command sent, waiting for association and DHCP (up to 45 seconds)...")
+                        for wait_attempt in range(1, 10):
+                            await asyncio.sleep(5)
+                            logger.info(f"Checking WiFi connection status (attempt {wait_attempt}/9, {wait_attempt*5}s)...")
+                            if self._check_wifi_connected():
+                                connection_established = True
+                                logger.info(f"✓ Connection attempt {connect_attempt} succeeded - WiFi associated with IP")
+                                break
+
+                        if connection_established:
                             break
-                    
-                    if connection_established:
-                        break
+                        else:
+                            logger.warning(f"Connection attempt {connect_attempt}: WiFi not associated after 45 seconds")
+                            await asyncio.sleep(2)
                     else:
-                        logger.warning(f"Connection attempt {connect_attempt}: WiFi not associated after 30 seconds")
-                        await asyncio.sleep(2)
-                else:
-                    logger.warning(f"Connection attempt {connect_attempt} failed")
-                    await asyncio.sleep(3)
-            
+                        logger.warning(f"Connection attempt {connect_attempt} failed")
+                        await asyncio.sleep(3)
+
             # If connection established, verify internet connectivity
             if connection_established:
+                # Give DNS/routing a moment to settle after association
                 await asyncio.sleep(5)
-                
+
                 logger.info("Verifying internet connectivity...")
-                for attempt in range(1, 6):
-                    logger.info(f"Internet check attempt {attempt}/5...")
+                for attempt in range(1, 11):  # 10 attempts (~50s) to handle slow DHCP/DNS on boot
+                    logger.info(f"Internet check attempt {attempt}/10...")
                     if await self._check_internet():
                         logger.info("✓ Internet connection verified!")
-                        # Device already stored credentials on previous boot
-                        # Update device status to connected now that internet is verified
+                        # Clear the persistent failure counter on success
+                        fail_counter_file = "/etc/evvos/.wifi_fail_count"
+                        try:
+                            if os.path.exists(fail_counter_file):
+                                os.remove(fail_counter_file)
+                        except Exception:
+                            pass
                         user_id = self.credentials.get("user_id", "")
                         if user_id:
                             await self._update_device_status_connected(user_id)
-                            # Keep ip_address fresh after every reboot — the router
-                            # may assign a new DHCP address since last session.
                             await self._patch_ip_address_direct(user_id)
                         return True
-                    await asyncio.sleep(3)
-                
-                # INTERNET CHECK FAILED
-                logger.error("Internet connectivity verification failed after 5 attempts")
-                logger.warning("Deleting stored credentials due to connection failure...")
-                self._delete_credentials()
-                return False # Will trigger hotspot loop in run()
+                    await asyncio.sleep(5)
+
+                # INTERNET CHECK FAILED — but do NOT delete credentials on boot.
+                # The hotspot may be temporarily off or slow.  Log a warning and
+                # return False so the run() loop retries after 10 seconds.
+                logger.error("Internet connectivity verification failed after 10 attempts")
+                logger.warning(
+                    "Keeping stored credentials — will retry on next loop iteration. "
+                    "The hotspot may be temporarily unavailable."
+                )
+                return False  # run() will retry; credentials are preserved
             else:
-                # WIFI CONNECTION FAILED
-                logger.error("WiFi connection with stored credentials failed after 5 attempts")
-                logger.warning("Deleting stored credentials and switching to hotspot provisioning...")
-                self._delete_credentials()
-                return False # Will trigger hotspot loop in run()
+                # WiFi association itself failed 5 times.  The hotspot SSID may
+                # genuinely be gone (user deleted it, changed password, etc.).
+                # Only delete credentials after a generous number of retries so
+                # a brief hotspot restart doesn't wipe provisioning permanently.
+                # We track failures via a counter file to survive service restarts.
+                fail_counter_file = "/etc/evvos/.wifi_fail_count"
+                try:
+                    count = int(open(fail_counter_file).read().strip()) if os.path.exists(fail_counter_file) else 0
+                except Exception:
+                    count = 0
+
+                count += 1
+                try:
+                    with open(fail_counter_file, "w") as f:
+                        f.write(str(count))
+                except Exception:
+                    pass
+
+                logger.warning(f"WiFi association failed (persistent failure #{count}/10)")
+
+                if count >= 10:
+                    logger.error("WiFi connection with stored credentials failed 10 consecutive times.")
+                    logger.warning("Deleting stored credentials and switching to hotspot provisioning...")
+                    try:
+                        os.remove(fail_counter_file)
+                    except Exception:
+                        pass
+                    self._delete_credentials()
+                    return False  # Will trigger hotspot loop in run()
+                else:
+                    logger.warning(f"Keeping credentials — will retry ({count}/10 failures so far)")
+                    return False  # run() will retry after RestartSec
 
         # No stored credentials or they were just deleted
         logger.info("No stored credentials. Starting hotspot provisioning...")
@@ -1957,15 +2022,20 @@ echo "=================================="
 cat > /etc/systemd/system/evvos-provisioning.service << 'SERVICE_FILE'
 [Unit]
 Description=EVVOS WiFi Hotspot Provisioning Service
-After=network.target
+# Wait until NetworkManager has finished its startup and the network
+# stack is actually usable — "network.target" fires too early on Pi Zero 2 W.
+After=network-online.target NetworkManager.service
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/opt/evvos
+# Small extra delay so NM finishes connecting before our script runs.
+ExecStartPre=/bin/sleep 5
 ExecStart=/opt/evvos/venv/bin/python3 /usr/local/bin/evvos-provisioning
 Restart=always
-RestartSec=10
+RestartSec=15
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=evvos-provisioning
@@ -1981,6 +2051,9 @@ echo "✓ Systemd service created"
 echo ""
 echo "🔧 Step 6: Enable and Start Service"
 echo "===================================="
+# Enable NetworkManager-wait-online so our service can depend on network-online.target
+systemctl enable NetworkManager-wait-online.service 2>/dev/null || true
+
 systemctl daemon-reload
 systemctl enable evvos-provisioning
 systemctl start evvos-provisioning
