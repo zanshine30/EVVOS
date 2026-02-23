@@ -361,36 +361,81 @@ WHISPER_BIN   = _os.environ.get("WHISPER_BIN",   "/opt/whisper.cpp/build/bin/whi
 WHISPER_MODEL = _os.environ.get("WHISPER_MODEL",  "/opt/whisper.cpp/models/ggml-tiny.en.bin")
 
 
+def _normalize_plate_phonetics(text: str) -> str:
+    """
+    Normalize Filipino-accented plate number speech before pattern matching.
+    Officers may say 'pletnumber', 'platenumber', 'plate number', or spell it
+    out phonetically with Filipino vowel shifts.
+    """
+    intro_patterns = [
+        r"(?:ang\s+)?(?:plate\s*number|pletnumber|plet\s*number|platenumber|"
+        r"plato\s*number|plate\s*no\.?|plate\s*num|plate)\s*(?:nya\s+ay|ay|niya\s+ay|nila\s+ay|:)?\s*",
+    ]
+    normalized = text
+    for pat in intro_patterns:
+        normalized = _re.sub(pat, " PLATE_INTRO ", normalized, flags=_re.IGNORECASE)
+    return normalized
+
+
 def _extract_plate_number(text: str) -> str:
     """
     Match Philippine LTO plate formats in the transcript.
+    Supports Taglish phrasing:
+      "Ang plate number nya ay ABC 1234"
+      "Pletnumber ABC 1234"
+      "Plate ABC-1234"
     Common formats:
       Private vehicles  : ABC 1234  or  ABC-1234  (3 alpha + 4 digits)
       Motorcycles       : 1234 AB   or  1234-AB   (4 digits + 2 alpha)
       Government/PNP    : SFX 123   (3 alpha + 3 digits, rare but possible)
     """
+    normalized = _normalize_plate_phonetics(text)
     patterns = [
         r'\b([A-Z]{3})[\s\-]?(\d{4})\b',   # ABC 1234 — most common private
         r'\b([A-Z]{3})[\s\-]?(\d{3})\b',    # ABC 123  — gov/special series
         r'\b(\d{4})[\s\-]?([A-Z]{2})\b',    # 1234 AB  — motorcycle
     ]
-    for pat in patterns:
-        m = _re.search(pat, text.upper())
-        if m:
-            return ' '.join(m.groups())
+    for search_text in [normalized, text]:
+        for pat in patterns:
+            m = _re.search(pat, search_text.upper())
+            if m:
+                return ' '.join(m.groups())
     return ''
 
 
 def _extract_driver_name(text: str) -> str:
     """
-    Heuristic: look for common name-announcing phrases spoken by the officer.
-    Works best when the officer says "Driver is Juan dela Cruz" or
-    "name: Juan dela Cruz" into the mic.  Falls back to empty string.
+    Extract driver name from Taglish / Filipino-accented speech.
+
+    Supported phrase patterns (Tagalog, English, and mixed):
+      English  : "Driver is Juan dela Cruz"  |  "Name: Juan dela Cruz"
+      Tagalog  : "Ang nagmamaneho ay si Juan dela Cruz"
+                 "Ang nag mamaneho ay si Juan"
+                 "Ang driver ay si Juan"
+      Taglish  : "Ang driver niya ay si Juan"
+      Accented : "Drayber is Juan"
     """
+    name_pat = r'([A-Z][a-z]+(?:\s+(?:de\s+la\s+|dela\s+|del\s+|san\s+)?[A-Z][a-z]+){1,4})'
+
     patterns = [
-        r"(?:driver(?:'s)?\s+(?:name\s+)?is|name\s*[:is]+)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
-        r"(?:apprehended|stopped)\s+(?:a\s+)?(?:driver\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})",
+        # Tagalog: "Ang nag mamaneho / nagmamaneho ay si <n>"
+        r"ang\s+nag[- ]?ma[- ]?maneho\s+ay\s+si\s+" + name_pat,
+        # Tagalog: "ang driver / drayber ay si <n>"
+        r"ang\s+(?:driver|drayber|drayver)\s+ay\s+si\s+" + name_pat,
+        # Tagalog: "si <n> ang nagmamaneho / driver"
+        r"si\s+" + name_pat + r"\s+(?:ang\s+)?(?:nagmamaneho|nag\s*mamaneho|driver|drayber)",
+        # Tagalog intro: "ito si <n>"  |  "siya si <n>"
+        r"(?:ito|siya)\s+si\s+" + name_pat,
+        # Generic Tagalog copula: "ay si <n>"
+        r"ay\s+si\s+" + name_pat,
+        # English: "driver('s) (name) is <n>"
+        r"(?:driver(?:'s)?\s+(?:name\s+)?is|name\s*[:is]+)\s+" + name_pat,
+        # English: "apprehended / stopped (a) (driver) <n>"
+        r"(?:apprehended|stopped)\s+(?:a\s+)?(?:driver\s+)?" + name_pat,
+        # Taglish/accented: "drayber is <n>"
+        r"(?:drayber|drayver)\s+(?:is|name\s*:?)\s+" + name_pat,
     ]
+
     for pat in patterns:
         m = _re.search(pat, text, _re.IGNORECASE)
         if m:
@@ -398,42 +443,123 @@ def _extract_driver_name(text: str) -> str:
     return ''
 
 
+# ── Hardcoded violation keywords (offline / phonetic fallback) ────────────────
+# These are NEVER removed. Supabase violation names are merged ON TOP at startup.
+# Keys are lowercased substrings matched against the transcript.
+# Values are the canonical violation labels stored in incidents.
 _VIOLATION_KEYWORDS = {
+    # ── Red Light ─────────────────────────────────────────────────────────────
     "beating the red light":      "Beating Red Light",
     "ran a red light":            "Beating Red Light",
     "red light":                  "Beating Red Light",
+    "sinaksaw ang pula":          "Beating Red Light",
+    "tumawid sa pula":            "Beating Red Light",
+    # ── Helmet ────────────────────────────────────────────────────────────────
     "no helmet":                  "No Helmet",
+    "walang helmet":              "No Helmet",
+    "wala helmet":                "No Helmet",
+    # ── Overspeeding ──────────────────────────────────────────────────────────
     "overspeeding":               "Overspeeding",
     "over speed":                 "Overspeeding",
     "speeding":                   "Overspeeding",
+    "mabilis":                    "Overspeeding",
+    # ── Illegal Parking ───────────────────────────────────────────────────────
     "illegal parking":            "Illegal Parking",
+    "illegal na parking":         "Illegal Parking",
+    "bawal na parking":           "Illegal Parking",
+    # ── Seatbelt ──────────────────────────────────────────────────────────────
     "no seatbelt":                "No Seatbelt",
     "seatbelt":                   "No Seatbelt",
+    "walang seatbelt":            "No Seatbelt",
+    "wala seatbelt":              "No Seatbelt",
+    "walang seat belt":           "No Seatbelt",
+    # ── License ───────────────────────────────────────────────────────────────
     "no license":                 "No Driver's License",
     "no driver's license":        "No Driver's License",
+    "walang lisensya":            "No Driver's License",
+    "walang license":             "No Driver's License",
+    "wala lisensya":              "No Driver's License",
     "expired license":            "Expired License",
+    "expired na lisensya":        "Expired License",
+    # ── Registration ──────────────────────────────────────────────────────────
     "expired registration":       "Expired Registration",
     "no registration":            "No Registration",
+    "walang rehistro":            "No Registration",
+    "wala rehistro":              "No Registration",
+    "expired rehistro":           "Expired Registration",
+    # ── Reckless Driving ──────────────────────────────────────────────────────
     "reckless driving":           "Reckless Driving",
+    "pabaya na pagmamaneho":      "Reckless Driving",
+    "pabaya sa pagmamaneho":      "Reckless Driving",
+    # ── Counterflow ───────────────────────────────────────────────────────────
     "counterflow":                "Counterflow",
     "counter flow":               "Counterflow",
+    "kontra-agos":                "Counterflow",
+    "kontra agos":                "Counterflow",
+    # ── Obstruction ───────────────────────────────────────────────────────────
     "obstruction":                "Obstruction",
+    "obstruksyon":                "Obstruction",
+    "harang":                     "Obstruction",
+    # ── Loading/Unloading ─────────────────────────────────────────────────────
     "loading":                    "Illegal Loading/Unloading",
     "unloading":                  "Illegal Loading/Unloading",
+    "illegal loading":            "Illegal Loading/Unloading",
+    "bawal na loading":           "Illegal Loading/Unloading",
+    # ── OR / CR ───────────────────────────────────────────────────────────────
     "no or":                      "No Official Receipt",
+    "walang or":                  "No Official Receipt",
     "no cr":                      "No Certificate of Registration",
+    "walang cr":                  "No Certificate of Registration",
+    # ── Smoke Belching ────────────────────────────────────────────────────────
     "smoke belching":             "Smoke Belching",
+    "smok belching":              "Smoke Belching",
+    # ── Colorum / Franchise ───────────────────────────────────────────────────
     "colorum":                    "Colorum",
     "no franchise":               "No Franchise",
+    "walang pranchays":           "No Franchise",
+    "walang pransays":            "No Franchise",
+    # ── Filipino-accent phonetic variants ─────────────────────────────────────
+    "bayolayshon":                "Violation (General)",
+    "bayolasyon":                 "Violation (General)",
+    "baiolasyon":                 "Violation (General)",
+    "biyolasyon":                 "Violation (General)",
 }
+
+# Tagalog violation intro phrases — used for Pass 2 extraction
+_TAGALOG_VIOLATION_INTROS = [
+    r"ang\s+paglabag\s+(?:ng|niya|nila)\s+(?:ay\s+)?(.+?)(?:\.|,|$)",
+    r"(?:nahuling|nahuli)\s+(?:siya\s+)?(?:sa|dahil\s+sa)\s+(.+?)(?:\.|,|$)",
+    r"violation\s+(?:nya|niya|nila)?\s*(?:ay|:)?\s*(.+?)(?:\.|,|$)",
+    r"(?:ang\s+)?(?:bayolayshon|bayolasyon|biyolasyon)\s*(?:nya|niya)?\s*(?:ay|:)?\s*(.+?)(?:\.|,|$)",
+]
 
 
 def _extract_violations(text: str) -> list:
+    """
+    Two-pass violation extraction from Taglish / Filipino-accented speech.
+
+    Pass 1 — keyword scan against _VIOLATION_KEYWORDS.
+              The dict is seeded from hardcoded defaults and enriched at
+              service startup with names from the Supabase violations table.
+    Pass 2 — Tagalog intro-phrase regex ("ang paglabag ng …", "nahuling sa …")
+              so violations buried in Tagalog sentence structure are also caught.
+    """
     found = []
     lower = text.lower()
+
+    # Pass 1: direct keyword scan
     for keyword, label in _VIOLATION_KEYWORDS.items():
         if keyword in lower and label not in found:
             found.append(label)
+
+    # Pass 2: Tagalog intro-phrase scan
+    for pat in _TAGALOG_VIOLATION_INTROS:
+        for m in _re.finditer(pat, lower):
+            tail = m.group(1).strip()
+            for keyword, label in _VIOLATION_KEYWORDS.items():
+                if keyword in tail and label not in found:
+                    found.append(label)
+
     return found
 
 
@@ -451,17 +577,106 @@ def _has_internet(host="8.8.8.8", port=53, timeout=3) -> bool:
         return False
 
 
+# ── SUPABASE VIOLATIONS SYNC ──────────────────────────────────────────────────
+# At service startup (and again just before each online transcription), the
+# daemon fetches the 'violations' table from Supabase and merges the names
+# into _VIOLATION_KEYWORDS so admin-managed violations are picked up without
+# redeploying the service.
+#
+# Merge strategy:
+#   • Each Supabase violation name is inserted as key=name.lower(), value=name.
+#     This means the transcript is scanned for the exact canonical name
+#     (case-insensitive substring match), which is the simplest reliable match.
+#   • Hardcoded entries are NEVER removed — they cover Tagalog synonyms and
+#     Filipino-accent phonetics that the database won't know about.
+#   • On any failure (offline, bad credentials, empty table) the code logs a
+#     warning and continues with the hardcoded-only set.
+
+_supabase_violations_loaded = False   # rate-limit logging to once per run
+
+
+def _fetch_violations_from_supabase() -> bool:
+    """
+    Query the Supabase violations table via the REST API and merge names into
+    _VIOLATION_KEYWORDS.  No extra Python packages needed — uses python3-requests
+    which is already installed as a system dependency.
+
+    Returns True if at least one violation was successfully loaded.
+    """
+    global _VIOLATION_KEYWORDS, _supabase_violations_loaded
+    import requests as _req
+
+    url  = _os.environ.get("SUPABASE_URL",      "").rstrip("/")
+    anon = _os.environ.get("SUPABASE_ANON_KEY", "").strip()
+
+    if not url or not anon:
+        print("[VIOLATIONS] SUPABASE_URL / SUPABASE_ANON_KEY not set — using hardcoded list only")
+        return False
+
+    try:
+        resp = _req.get(
+            f"{url}/rest/v1/violations",
+            headers={
+                "apikey":        anon,
+                "Authorization": f"Bearer {anon}",
+                "Accept":        "application/json",
+            },
+            params={"select": "name", "order": "created_at.asc"},
+            timeout=10,
+        )
+
+        if resp.status_code != 200:
+            print(f"[VIOLATIONS] Supabase returned {resp.status_code} — using hardcoded list")
+            return False
+
+        rows = resp.json()
+        if not isinstance(rows, list) or not rows:
+            print("[VIOLATIONS] violations table is empty — using hardcoded list")
+            return False
+
+        added = 0
+        for row in rows:
+            name = (row.get("name") or "").strip()
+            if not name:
+                continue
+            key = name.lower()
+            # Always update so renames in Supabase take effect on next restart
+            if key not in _VIOLATION_KEYWORDS:
+                added += 1
+            _VIOLATION_KEYWORDS[key] = name   # key=lowercase, value=canonical label
+
+        if not _supabase_violations_loaded:
+            print(f"[VIOLATIONS] ✓ Synced {len(rows)} violation(s) from Supabase ({added} new keywords added)")
+            _supabase_violations_loaded = True
+        return True
+
+    except Exception as e:
+        print(f"[VIOLATIONS] Fetch failed ({e}) — using hardcoded list")
+        return False
+
+
+def _sync_violations_if_online() -> None:
+    """
+    Only fetch violations when internet is available.
+    Called once at startup and again before each Groq transcription so freshly
+    added violations are picked up without restarting the daemon.
+    """
+    if _has_internet():
+        _fetch_violations_from_supabase()
+    else:
+        print("[VIOLATIONS] Offline — using hardcoded violations list only")
+
+
 def _transcribe_groq_online(audio_path: Path) -> dict:
     """
-    Transcribe using Groq's free Whisper API (whisper-large-v3-turbo).
+    Transcribe using Groq's free Whisper API — multilingual (English + Filipino/Tagalog).
 
-    Why Groq?
-      • 100% free tier — ~7,200 audio-minutes/month, no credit card required.
-      • Runs whisper-large-v3-turbo server-side — far more accurate than tiny.en.
-      • From the Pi's perspective it is just one HTTPS POST with the WAV file.
-        No new packages needed beyond python3-requests (already installed).
-      • Sign up and get a free API key at: https://console.groq.com
-        Add it to /etc/evvos/config.env as:  GROQ_API_KEY=gsk_...
+    Why multilingual?
+      • Philippine traffic enforcers speak Taglish (mixed Tagalog-English).
+        Locking to "language: en" causes the model to mangle Tagalog words.
+      • whisper-large-v3-turbo handles Taglish natively when no language is forced.
+      • A prompt primes the model with Filipino-accented terms so it transcribes
+        them correctly instead of hallucinating English equivalents.
 
     Returns the same dict shape as _transcribe_whisper_offline so callers are
     interchangeable, or None if the call fails (triggers offline fallback).
@@ -477,7 +692,30 @@ def _transcribe_groq_online(audio_path: Path) -> dict:
         print("[GROQ] Audio file missing or too small")
         return None
 
-    print(f"[GROQ] Uploading {audio_path.name} ({audio_path.stat().st_size / 1024:.0f} KB) to Groq Whisper API...")
+    # ── Sync violations from Supabase before extraction ───────────────────────
+    # We're already confirmed online (caller checked _has_internet).
+    # This refreshes the keyword dict so any violations the admin added since
+    # the last restart are included in this transcription's extraction pass.
+    _fetch_violations_from_supabase()
+
+    # ── Build a dynamic Taglish prompt from current violation names ────────────
+    # Include the first 10 canonical names so Whisper's vocabulary is primed.
+    # This significantly reduces hallucination of Filipino-accented English terms.
+    violation_names_sample = ", ".join(list(_VIOLATION_KEYWORDS.values())[:10])
+    TAGLISH_PROMPT = (
+        "Philippine traffic enforcer field report. "
+        "Mixed Tagalog and English (Taglish). "
+        "Common phrases: 'Ang nagmamaneho ay si', 'Ang plate number nya ay', "
+        "'Ang paglabag ng', 'walang lisensya', 'walang helmet', 'kontraflow', "
+        "'colorum', 'overspeeding', 'no seatbelt', 'walang seatbelt', "
+        "'beating the red light', 'reckless driving', 'walang rehistro'. "
+        "Filipino-accented English terms: violation, driver, plate number, "
+        f"registration, license, seatbelt, helmet, counterflow. "
+        f"Known violations: {violation_names_sample}."
+    )
+
+    print(f"[GROQ] Uploading {audio_path.name} ({audio_path.stat().st_size / 1024:.0f} KB) "
+          f"to Groq Whisper API (multilingual EN+Filipino)...")
 
     try:
         with open(audio_path, "rb") as fh:
@@ -488,9 +726,12 @@ def _transcribe_groq_online(audio_path: Path) -> dict:
                 data={
                     "model":           "whisper-large-v3-turbo",
                     "response_format": "text",
-                    "language":        "en",
+                    # NO "language" key — auto-detect handles Taglish best.
+                    # Forcing "en" breaks Tagalog words; forcing "tl" breaks
+                    # the English parts. Auto-detect + prompt is most accurate.
+                    "prompt":          TAGLISH_PROMPT,
                 },
-                timeout=60,  # 60 s should be more than enough for any field recording
+                timeout=60,
             )
 
         if resp.status_code != 200:
@@ -514,7 +755,7 @@ def _transcribe_groq_online(audio_path: Path) -> dict:
             "driver_name":  driver_name,
             "plate_number": plate_number,
             "violations":   violations,
-            "engine":       "groq-whisper-large-v3-turbo",
+            "engine":       "groq-whisper-large-v3-turbo-multilingual",
         }
 
     except Exception as e:
@@ -623,17 +864,27 @@ def transcribe_best(audio_path: Path) -> dict:
     print(f"[TRANSCRIBE] Internet connectivity: {'✓ online' if internet else '✗ offline'}")
 
     if internet:
+        # _transcribe_groq_online internally calls _fetch_violations_from_supabase()
+        # so the keyword dict is refreshed before extraction runs.
         result = _transcribe_groq_online(audio_path)
         if result:
-            print("[TRANSCRIBE] ✓ Used Groq online STT (whisper-large-v3-turbo)")
+            print("[TRANSCRIBE] ✓ Used Groq online STT (whisper-large-v3-turbo, multilingual EN+Filipino)")
             return result
         print("[TRANSCRIBE] Groq failed or not configured — falling back to local Whisper")
+    else:
+        # Offline path: violations already synced at startup; use hardcoded list.
+        print("[TRANSCRIBE] Offline — extraction uses hardcoded + last-synced violations")
 
     result = _transcribe_whisper_offline(audio_path)
     print("[TRANSCRIBE] ✓ Used local whisper.cpp (tiny.en, offline)")
     return result
 
 # ── COMMAND HANDLERS ──────────────────────────────────────────────────────────
+# Sync violations from Supabase once at service startup.
+# This ensures even the first recording of the day uses the latest admin list.
+# The sync is non-blocking if offline — it logs and returns immediately.
+_sync_violations_if_online()
+
 
 def start_recording_handler():
     global recording, current_session_id, current_video_path, current_audio_path, audio_process, recording_start_time
