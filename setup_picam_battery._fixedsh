@@ -43,9 +43,9 @@ from pathlib import Path
 script = Path("/usr/local/bin/evvos-picam-tcp.py")
 src = script.read_text(encoding="utf-8")
 
-# ── Per-patch guards (idempotent) ─────────────────────────────────────────────
+# ── Per-patch guards ──────────────────────────────────────────────────────────
 p1_done = "get_battery_level" in src
-p2_done = '"battery":' in src and "get_battery_level()" in src
+p2_done = "get_battery_level()" in src and '"battery":' in src
 p3_done = "_start_heartbeat_thread" in src
 
 if p1_done and p2_done and p3_done:
@@ -159,34 +159,31 @@ else:
 # ─────────────────────────────────────────────────────────────────────────────
 # PATCH 2 — Add "battery" field to get_status_handler's return dict
 #
-# Uses regex to locate the closing brace of get_status_handler's return dict
-# regardless of indentation style or whether elapsed is inlined or a variable.
+# Strategy: find the closing } of the return dict inside get_status_handler
+# by locating the first line that is ONLY whitespace + "}" after the function
+# definition. Insert the battery line just before it.
+# This is robust to any number of fields already in the dict.
 # ─────────────────────────────────────────────────────────────────────────────
 if not p2_done:
-    # Find get_status_handler in src, then find its return dict's closing brace
     func_start = src.find("def get_status_handler():")
-    assert func_start != -1, "get_status_handler not found in file"
+    assert func_start != -1, "get_status_handler not found"
 
-    # Search only within get_status_handler's body (next 800 chars is plenty)
-    window = src[func_start: func_start + 800]
+    # Work on just the function body (1200 chars covers any realistic variant)
+    window_end = func_start + 1200
+    window = src[func_start:window_end]
 
-    # Match the last "elapsed_seconds" line + the closing brace that follows it
-    m = re.search(
-        r'("elapsed_seconds"[^\n]+\n)(\s+\})',
-        window
-    )
-    assert m, (
-        "Patch 2: could not locate closing brace after 'elapsed_seconds' in "
-        "get_status_handler.\nWindow content:\n" + window
-    )
+    # Find the closing brace of the return dict.
+    # It's a line containing only whitespace + "}" with no trailing comma.
+    # We match it as: newline, spaces, "}", newline (not "},")
+    m = re.search(r'\n( +)\}\n', window)
+    assert m, "Patch 2: could not find closing brace of return dict in get_status_handler"
 
-    indent     = m.group(2)[:-1]   # whitespace before }  e.g. "            "
-    old_frag   = m.group(0)        # the matched text inside the window
-    new_frag   = m.group(1) + indent + '"battery":         get_battery_level(),\n' + m.group(2)
+    indent    = m.group(1)          # the spaces before }
+    close_str = m.group(0)          # "\n        }\n"
+    new_close = f'\n{indent}"battery":         get_battery_level(),\n{indent}}}\n'
 
-    # Replace only within get_status_handler's window to avoid touching other dicts
-    new_window = window.replace(old_frag, new_frag, 1)
-    src = src[:func_start] + new_window + src[func_start + 800:]
+    new_window = window.replace(close_str, new_close, 1)
+    src = src[:func_start] + new_window + src[window_end:]
     print("Patch 2 applied.")
 else:
     print("Patch 2 already present — skipping.")
