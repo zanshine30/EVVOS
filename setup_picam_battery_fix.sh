@@ -201,7 +201,7 @@ src = src.replace(old, battery_code + old, 1)
 # PATCH 2 — Include battery in GET_STATUS response
 # ─────────────────────────────────────────────────────────────────────────────
 old = (
-    '            "elapsed_seconds\": elapsed,\n'
+    '            "elapsed_seconds": elapsed,\n'
     '        }'
 )
 new = (
@@ -215,19 +215,14 @@ src = src.replace(old, new, 1)
 # ─────────────────────────────────────────────────────────────────────────────
 # PATCH 3 — Start the heartbeat thread in main() just before the server loop
 # ─────────────────────────────────────────────────────────────────────────────
-old = (
-    'if __name__ == "__main__":\n'
-    '    print(f"[EVVOS] Service starting — IP: {get_pi_ip()}")\n'
-    '    if setup_camera():'
-)
-new = (
-    'if __name__ == "__main__":\n'
-    '    print(f"[EVVOS] Service starting — IP: {get_pi_ip()}")\n'
-    '    _start_heartbeat_thread()\n'
-    '    if setup_camera():'
-)
+old = 'if __name__ == "__main__":\n    print(f"[EVVOS] Service starting'
 assert old in src, "Anchor not found (patch 3)"
-src = src.replace(old, new, 1)
+idx = src.index(old)
+src = src[:idx] + src[idx:].replace(
+    'if __name__ == "__main__":',
+    'if __name__ == "__main__":\n    _start_heartbeat_thread()',
+    1
+)
 
 script.write_text(src, encoding="utf-8")
 print("All 3 patches applied successfully.")
