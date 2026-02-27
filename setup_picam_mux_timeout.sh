@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# EVVOS Pi Camera — Dynamic Mux Timeout Patch
+# EVVOS Pi Camera — Dynamic Mux Timeout Patch  (v2 — extended)
 #
 # Problem:
 #   Emergency recordings bypass the normal 2-minute cap. The resulting H264
@@ -14,25 +14,32 @@
 #   The chunk splitter (setup_picam_emergency_chunks.sh) never gets a chance
 #   to run because the MP4 is never produced in the first place.
 #
-# Fix:
-#   Replace the hardcoded timeout=120 with a dynamic value:
+# Fix (v2 — extended):
+#   Replace the hardcoded timeout=120 (or any prior mux_timeout formula)
+#   with a much more generous dynamic value:
 #
-#     mux_timeout = max(180, int(raw_h264_size_bytes / (200 * 1024)))
+#     mux_timeout = max(600, int(raw_h264_size_bytes / (50 * 1024)))
 #
 #   Rationale:
-#     • 200 KB/s is a conservative lower-bound encode rate on Pi Zero 2 W
-#       with -preset ultrafast -crf 23.
-#     • This gives ~1 second of timeout per ~200 KB of raw H264.
-#     • A 3m 24s recording at ~24 FPS / 1080p produces ~40–80 MB of raw
-#       H264 → timeout of 200–400 s, safely above the actual mux time.
-#     • The 180 s floor ensures even tiny files always get a generous window.
-#     • Normal 2-minute recordings produce ~20–30 MB → timeout of 100–150 s,
-#       so the 180 s floor also protects them.
+#     • 50 KB/s is a very conservative encode rate — ~4× slower than the
+#       Pi Zero 2 W actually achieves. This gives a large safety margin for
+#       thermal throttling, SD-card slowdowns, or CPU contention.
+#     • 600 s (10 min) floor means even a tiny file always has 10 minutes.
+#     • A 3m 24s recording (~50–80 MB H264) → 1000–1600 s timeout.
+#     • A 10-minute emergency (~200 MB H264) → ~4000 s timeout.
+#     • ffmpeg on Pi Zero 2 W with -preset ultrafast typically completes
+#       a 3-minute mux in 60–120 s — this gives it 10–25× headroom.
+#
+# v2 changes vs v1:
+#   • Floor raised:  180 s  → 600 s  (10 minutes)
+#   • Rate lowered:  200 KB/s → 50 KB/s  (4× more conservative scaling)
+#   • Guard updated: also replaces an already-applied v1 patch
 #
 # Run on the Raspberry Pi as root AFTER setup_picam.sh:
 #   sudo bash setup_picam_mux_timeout.sh
 #
-# Safe to re-run — a guard prevents double-patching.
+# Safe to re-run — replaces both unpatched (timeout=120) and v1-patched
+# (mux_timeout = max(180, ...)) scripts.
 # Creates a timestamped backup before patching.
 # ============================================================================
 
@@ -67,7 +74,7 @@ if ! grep -q "stop_recording_handler" "$CAMERA_SCRIPT"; then
     exit 1
 fi
 
-log_section "Patching stop_recording_handler — Dynamic Mux Timeout"
+log_section "Patching stop_recording_handler — Extended Dynamic Mux Timeout (v2)"
 
 cp "$CAMERA_SCRIPT" "${CAMERA_SCRIPT}.bak.$(date +%Y%m%d_%H%M%S)"
 log_success "Backup created"
@@ -78,27 +85,34 @@ from pathlib import Path
 script = Path("/usr/local/bin/evvos-picam-tcp.py")
 src = script.read_text(encoding="utf-8")
 
-# ── GUARD ─────────────────────────────────────────────────────────────────────
-if "mux_timeout" in src:
-    print("Already patched — skipping.")
+# ── GUARD: already on v2 ──────────────────────────────────────────────────────
+if "mux_timeout = max(600" in src:
+    print("Already on v2 — skipping.")
     raise SystemExit(0)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Replace the hardcoded timeout=120 with a dynamic value computed from
-# the raw H264 file size on disk.
+# There are two possible states of the script:
+#   A) Unpatched: contains the original hardcoded timeout=120 line
+#   B) v1-patched: contains mux_timeout = max(180, ...) from the first patch
 #
-# Old:
-#     res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-#
-# New:
-#     # Dynamic timeout: 1 second per ~200 KB of raw H264, minimum 180 s.
-#     # Emergency recordings can be 3-5+ minutes; the mux scales with duration.
-#     mux_timeout = max(180, int(raw_size / (200 * 1024)))
-#     print(f"[FFMPEG] Mux timeout: {mux_timeout}s (raw H264: {raw_size / 1024 / 1024:.1f} MB)")
-#     res = subprocess.run(cmd, capture_output=True, text=True, timeout=mux_timeout)
+# We handle both by trying each anchor in order.
 # ─────────────────────────────────────────────────────────────────────────────
-old = "            res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)"
-new = (
+
+NEW_LINES = (
+    "            # Dynamic mux timeout (v2 — extended) — scales with raw H264 size.\n"
+    "            # Floor of 600 s (10 min) + 1 s per 50 KB gives ample headroom even\n"
+    "            # under thermal throttling or SD-card slowdowns on Pi Zero 2 W.\n"
+    "            # A 3-min emergency recording (~50-80 MB) -> 1000-1600 s timeout.\n"
+    "            mux_timeout = max(600, int(raw_size / (50 * 1024)))\n"
+    "            print(f\"[FFMPEG] Mux timeout: {mux_timeout}s (raw H264: {raw_size / 1024 / 1024:.1f} MB)\")\n"
+    "            res = subprocess.run(cmd, capture_output=True, text=True, timeout=mux_timeout)"
+)
+
+# Case A: original unpatched script
+OLD_A = "            res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)"
+
+# Case B: v1 dynamic timeout block
+OLD_B = (
     "            # Dynamic mux timeout — scales with raw H264 size so that\n"
     "            # long emergency recordings don't time out before muxing completes.\n"
     "            # 200 KB/s is a conservative encode rate on Pi Zero 2 W (-preset ultrafast).\n"
@@ -108,11 +122,18 @@ new = (
     "            res = subprocess.run(cmd, capture_output=True, text=True, timeout=mux_timeout)"
 )
 
-assert old in src, (
-    "Anchor not found — the subprocess.run(cmd, ..., timeout=120) line may have changed.\n"
-    "Check stop_recording_handler() in evvos-picam-tcp.py."
-)
-src = src.replace(old, new, 1)
+if OLD_A in src:
+    src = src.replace(OLD_A, NEW_LINES, 1)
+    print("Case A: replaced hardcoded timeout=120 with v2 dynamic timeout.")
+elif OLD_B in src:
+    src = src.replace(OLD_B, NEW_LINES, 1)
+    print("Case B: upgraded v1 dynamic timeout to v2 (600 s floor, 50 KB/s rate).")
+else:
+    raise AssertionError(
+        "Could not find a patchable timeout line in stop_recording_handler().\n"
+        "Neither 'timeout=120' nor the v1 mux_timeout block were found.\n"
+        "Check the script manually: /usr/local/bin/evvos-picam-tcp.py"
+    )
 
 script.write_text(src, encoding="utf-8")
 print("Patch applied successfully.")
@@ -132,9 +153,11 @@ log_section "Verifying patch"
 python3 -c "
 src = open('/usr/local/bin/evvos-picam-tcp.py').read()
 checks = [
-    ('mux_timeout variable',  'mux_timeout = max(180'),
+    ('v2 floor (600 s)',       'mux_timeout = max(600'),
+    ('v2 rate  (50 KB/s)',     '/ (50 * 1024)'),
     ('dynamic timeout in run', 'timeout=mux_timeout'),
     ('old hardcoded 120 gone', 'timeout=120' not in src),
+    ('old v1 floor gone',      'max(180,' not in src),
 ]
 all_ok = True
 for label, check in checks:
@@ -157,19 +180,20 @@ else
 fi
 
 echo ""
-echo -e "${CYAN}  Dynamic Mux Timeout patch ready${NC}"
+echo -e "${CYAN}  Dynamic Mux Timeout v2 ready${NC}"
 echo -e "${CYAN}  ════════════════════════════════════════════════════${NC}"
-echo -e "${CYAN}  Old:  timeout=120 (hardcoded — always 2 minutes)${NC}"
-echo -e "${CYAN}  New:  timeout=max(180, raw_h264_bytes / (200*1024))${NC}"
+echo -e "${CYAN}  Formula:  timeout = max(600, raw_h264_bytes / (50*1024))${NC}"
+echo -e "${CYAN}  Floor:    600 s (10 minutes — regardless of file size)${NC}"
+echo -e "${CYAN}  Scaling:  +1 s per 50 KB of raw H264 (4x more conservative)${NC}"
 echo ""
 echo -e "${CYAN}  Examples:${NC}"
-echo -e "${CYAN}    20 MB H264 (2 min recording)  → 180 s timeout (floor)${NC}"
-echo -e "${CYAN}    50 MB H264 (3-4 min emergency) → ~256 s timeout${NC}"
-echo -e "${CYAN}    80 MB H264 (5+ min emergency)  → ~410 s timeout${NC}"
+echo -e "${CYAN}    20 MB H264  (2 min recording)    →  600 s timeout (floor)${NC}"
+echo -e "${CYAN}    50 MB H264  (3 min emergency)    → 1024 s timeout${NC}"
+echo -e "${CYAN}    80 MB H264  (4-5 min emergency)  → 1638 s timeout${NC}"
+echo -e "${CYAN}    200 MB H264 (10 min emergency)   → 4096 s timeout${NC}"
 echo ""
-echo -e "${YELLOW}  NOTE: The mux itself on Pi Zero 2 W typically takes 30–90 s${NC}"
-echo -e "${YELLOW}        for a 3-minute recording. This patch gives it ample headroom.${NC}"
-echo -e "${YELLOW}        After muxing succeeds, setup_picam_emergency_chunks.sh will${NC}"
-echo -e "${YELLOW}        then correctly split the MP4 into ≤20 MB chunks.${NC}"
+echo -e "${YELLOW}  Actual mux time on Pi Zero 2 W (-preset ultrafast):${NC}"
+echo -e "${YELLOW}    ~60-120 s for a 3-minute recording (10-25x headroom)${NC}"
+echo -e "${YELLOW}  After mux succeeds, the chunk splitter splits into <=20 MB parts.${NC}"
 echo ""
 log_success "Done."
