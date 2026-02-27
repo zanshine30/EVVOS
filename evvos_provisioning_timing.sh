@@ -116,23 +116,27 @@ check_absent() {
   fi
 }
 
-# Script checks — single-line patterns only
-check_absent  "killall cooldown: no longer sleep(2)"     "$SCRIPT" "killall", "-9", "hostapd"], capture_output=True, timeout=5)
-            time.sleep(2)"
-check_present "killall cooldown: sleep(1) present"       "$SCRIPT" "time.sleep(1)"
-check_absent  "interface up: no longer sleep(3)"         "$SCRIPT" "time.sleep(3)"
-check_present "interface up: sleep(2) present"           "$SCRIPT" "time.sleep(2)"
-check_absent  "post-hostapd: no longer asyncio.sleep(4)" "$SCRIPT" "await asyncio.sleep(4)"
-check_present "post-hostapd: asyncio.sleep(2) present"  "$SCRIPT" "await asyncio.sleep(2)"
-check_absent  "post-dnsmasq: no longer asyncio.sleep(2)" "$SCRIPT" "await asyncio.sleep(2)
-            # Wait"
+# Script checks — strictly single-line patterns (grep -F is line-by-line only)
+check_absent  "interface up: sleep(3) removed"          "$SCRIPT" "time.sleep(3)"
+check_present "interface up: sleep(2) present"          "$SCRIPT" "time.sleep(2)"
+check_absent  "post-hostapd: asyncio.sleep(4) removed"  "$SCRIPT" "asyncio.sleep(4)"
+check_present "post-hostapd: asyncio.sleep(2) present"  "$SCRIPT" "asyncio.sleep(2)"
 
-# Simpler: just count how many asyncio.sleep(1) lines exist (should be 2: post-interface + post-dnsmasq)
+# Count asyncio.sleep(1): expect >= 2 (post-interface-setup + post-dnsmasq)
 COUNT=$(grep -c "asyncio.sleep(1)" "$SCRIPT" 2>/dev/null || echo 0)
 if [ "$COUNT" -ge 2 ]; then
-  echo "  ✓ asyncio.sleep(1) appears $COUNT time(s) (post-interface + post-dnsmasq)"
+  echo "  ✓ asyncio.sleep(1) present ${COUNT} time(s)"
 else
-  echo "  ❌ asyncio.sleep(1) only appears $COUNT time(s) — expected at least 2"
+  echo "  ❌ asyncio.sleep(1) only ${COUNT} time(s) — expected at least 2"
+  ERRORS=$((ERRORS + 1))
+fi
+
+# Count time.sleep(1): expect >= 2 (killall cooldown + dnsmasq cooldown)
+COUNT2=$(grep -c "time.sleep(1)" "$SCRIPT" 2>/dev/null || echo 0)
+if [ "$COUNT2" -ge 2 ]; then
+  echo "  ✓ time.sleep(1) present ${COUNT2} time(s)"
+else
+  echo "  ❌ time.sleep(1) only ${COUNT2} time(s) — expected at least 2"
   ERRORS=$((ERRORS + 1))
 fi
 
