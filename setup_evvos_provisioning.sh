@@ -968,12 +968,12 @@ class EVVOSWiFiProvisioner:
             # Aggressively kill any lingering processes
             subprocess.run(["killall", "-9", "dnsmasq"], capture_output=True, timeout=5)
             subprocess.run(["killall", "-9", "hostapd"], capture_output=True, timeout=5)
-            time.sleep(2)
+            time.sleep(1)
             
             # Stop system services
             subprocess.run(["systemctl", "stop", "hostapd"], capture_output=True, timeout=5)
             subprocess.run(["systemctl", "stop", "dnsmasq"], capture_output=True, timeout=5)
-            time.sleep(2)
+            time.sleep(1)
             
             # Reset interface
             subprocess.run(
@@ -1003,7 +1003,7 @@ class EVVOSWiFiProvisioner:
             )
             
             # Wait for interface to come up and socket to be released
-            time.sleep(3)
+            time.sleep(2)
             
             # Verify interface has IP
             result = subprocess.run(
@@ -1587,18 +1587,18 @@ cache-size=1000
             if not self._setup_hotspot_interface():
                 return False
             
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
             
             if not self._start_hostapd():
                 return False
             
-            await asyncio.sleep(4)
+            await asyncio.sleep(2)
             
             if not self._start_dnsmasq():
                 await self._stop_hotspot()
                 return False
             
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             
             logger.info("Starting HTTP credential server...")
             self.web_task = asyncio.create_task(self._start_http_server())            
@@ -2032,10 +2032,10 @@ Type=simple
 User=root
 WorkingDirectory=/opt/evvos
 # Small extra delay so NM finishes connecting before our script runs.
-ExecStartPre=/bin/sleep 5
+ExecStartPre=/bin/sleep 2
 ExecStart=/opt/evvos/venv/bin/python3 /usr/local/bin/evvos-provisioning
 Restart=always
-RestartSec=15
+RestartSec=5
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=evvos-provisioning
@@ -2048,7 +2048,7 @@ SERVICE_FILE
 chmod 644 /etc/systemd/system/evvos-provisioning.service
 echo "✓ Systemd service created"
 
-echo ""
+echo "" 
 echo "🔧 Step 6: Enable and Start Service"
 echo "===================================="
 # Enable NetworkManager-wait-online so our service can depend on network-online.target
