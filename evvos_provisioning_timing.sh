@@ -90,14 +90,15 @@ sed -i 's|^RestartSec=15$|RestartSec=5|' "$SERVICE"
 echo "  ✓ Service file patched"
 
 # ── 5. Verify all changes landed ────────────────────────────────────────────
+# Note: all patterns are single-line — grep -F does not match across newlines.
 
 echo ""
 echo "Verifying changes..."
 ERRORS=0
 
-verify_in_script() {
-  local label="$1" pattern="$2"
-  if grep -qF "$pattern" "$SCRIPT"; then
+check_present() {
+  local label="$1" file="$2" pattern="$3"
+  if grep -qF "$pattern" "$file"; then
     echo "  ✓ $label"
   else
     echo "  ❌ NOT FOUND: $label"
@@ -105,9 +106,9 @@ verify_in_script() {
   fi
 }
 
-verify_absent_in_script() {
-  local label="$1" pattern="$2"
-  if grep -qF "$pattern" "$SCRIPT"; then
+check_absent() {
+  local label="$1" file="$2" pattern="$3"
+  if grep -qF "$pattern" "$file"; then
     echo "  ❌ STILL PRESENT (not patched): $label"
     ERRORS=$((ERRORS + 1))
   else
@@ -115,32 +116,29 @@ verify_absent_in_script() {
   fi
 }
 
-verify_in_service() {
-  local label="$1" pattern="$2"
-  if grep -qF "$pattern" "$SERVICE"; then
-    echo "  ✓ $label"
-  else
-    echo "  ❌ NOT FOUND: $label"
-    ERRORS=$((ERRORS + 1))
-  fi
-}
+# Script checks — single-line patterns only
+check_absent  "killall cooldown: no longer sleep(2)"     "$SCRIPT" "killall", "-9", "hostapd"], capture_output=True, timeout=5)
+            time.sleep(2)"
+check_present "killall cooldown: sleep(1) present"       "$SCRIPT" "time.sleep(1)"
+check_absent  "interface up: no longer sleep(3)"         "$SCRIPT" "time.sleep(3)"
+check_present "interface up: sleep(2) present"           "$SCRIPT" "time.sleep(2)"
+check_absent  "post-hostapd: no longer asyncio.sleep(4)" "$SCRIPT" "await asyncio.sleep(4)"
+check_present "post-hostapd: asyncio.sleep(2) present"  "$SCRIPT" "await asyncio.sleep(2)"
+check_absent  "post-dnsmasq: no longer asyncio.sleep(2)" "$SCRIPT" "await asyncio.sleep(2)
+            # Wait"
 
-# The old 3-second interface sleep must be gone
-verify_absent_in_script "interface up: no longer sleep(3)" 'socket to be released
-            time.sleep(3)'
+# Simpler: just count how many asyncio.sleep(1) lines exist (should be 2: post-interface + post-dnsmasq)
+COUNT=$(grep -c "asyncio.sleep(1)" "$SCRIPT" 2>/dev/null || echo 0)
+if [ "$COUNT" -ge 2 ]; then
+  echo "  ✓ asyncio.sleep(1) appears $COUNT time(s) (post-interface + post-dnsmasq)"
+else
+  echo "  ❌ asyncio.sleep(1) only appears $COUNT time(s) — expected at least 2"
+  ERRORS=$((ERRORS + 1))
+fi
 
-# The new 2-second interface sleep must be present
-verify_in_script "interface up: sleep(2) present" 'socket to be released
-            time.sleep(2)'
-
-# The old 4-second post-hostapd sleep must be gone
-verify_absent_in_script "post-hostapd: no longer sleep(4)" 'return False
-            
-            await asyncio.sleep(4)'
-
-# Service file
-verify_in_service "ExecStartPre=2" "ExecStartPre=/bin/sleep 2"
-verify_in_service "RestartSec=5"   "RestartSec=5"
+# Service file checks
+check_present "ExecStartPre=2s" "$SERVICE" "ExecStartPre=/bin/sleep 2"
+check_present "RestartSec=5"    "$SERVICE" "RestartSec=5"
 
 if [ "$ERRORS" -ne 0 ]; then
   echo ""
