@@ -117,7 +117,19 @@ check_absent() {
 }
 
 # Script checks — strictly single-line patterns (grep -F is line-by-line only)
-check_absent  "interface up: sleep(3) removed"          "$SCRIPT" "time.sleep(3)"
+# Check that the interface-up sleep(3) was replaced — use surrounding comment as context
+# because a separate dnsmasq sleep(3) legitimately still exists in the file
+if python3 -c "
+import sys, re
+src = open(sys.argv[1]).read()
+m = re.search(r'socket to be released\\s+time\.sleep\\((\\d+)\\)', src)
+sys.exit(0 if (m and m.group(1) != '3') else 1)
+" "$SCRIPT"; then
+  echo "  ✓ interface up: sleep(3) replaced"
+else
+  echo "  ❌ STILL PRESENT (not patched): interface up: sleep(3) not replaced"
+  ERRORS=$((ERRORS + 1))
+fi
 check_present "interface up: sleep(2) present"          "$SCRIPT" "time.sleep(2)"
 check_absent  "post-hostapd: asyncio.sleep(4) removed"  "$SCRIPT" "asyncio.sleep(4)"
 check_present "post-hostapd: asyncio.sleep(2) present"  "$SCRIPT" "asyncio.sleep(2)"
