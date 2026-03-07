@@ -79,10 +79,19 @@ if "hflip=True, vflip=True" in src:
 # Transform comes from libcamera (bundled with picamera2) — it must be
 # imported separately from the main Picamera2 class.
 # ─────────────────────────────────────────────────────────────────────────────
-old_import = "from picamera2 import Picamera2"
+# Transform must go at top-level AFTER the try/except block — not inside it.
+old_import = (
+    "    print(\"[CAMERA] ERROR: picamera2 not installed\", file=sys.stderr)\n"
+    "    sys.exit(1)"
+)
 new_import = (
-    "from picamera2 import Picamera2\n"
-    "from libcamera import Transform   # used for 180° rotation (hflip + vflip)"
+    "    print(\"[CAMERA] ERROR: picamera2 not installed\", file=sys.stderr)\n"
+    "    sys.exit(1)\n"
+    "\n"
+    "try:\n"
+    "    from libcamera import Transform\n"
+    "except ImportError:\n"
+    "    Transform = None"
 )
 assert old_import in src, f"Anchor not found: {old_import!r}"
 src = src.replace(old_import, new_import, 1)
@@ -91,19 +100,32 @@ src = src.replace(old_import, new_import, 1)
 # PATCH 2: Add transform=Transform(hflip=True, vflip=True) to
 #          create_video_configuration()
 #
-# Anchors on the controls line + closing paren — stable regardless of what
-# comment lines appear above it (comments may vary across setup script versions).
+# Target:
+#   config = camera.create_video_configuration(
+#       main={"size": CAMERA_RES, "format": "RGB888"},
+#       encode="main",
+#       controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (41666, 41666)}
+#   )
+#
+# Result:
+#   config = camera.create_video_configuration(
+#       main={"size": CAMERA_RES, "format": "RGB888"},
+#       encode="main",
+#       controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (41666, 41666)},
+#       transform=Transform(hflip=True, vflip=True)   # 180° — camera mounted upside-down
+#   )
 # ─────────────────────────────────────────────────────────────────────────────
+# Anchor on just the controls+closing-paren lines — stable regardless of comments above.
 old_config = (
     '            controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (33333, 66666)}\n'
     '        )'
 )
 new_config = (
     '            controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (33333, 66666)},\n'
-    '            transform=Transform(hflip=True, vflip=True)   # 180 degrees — camera mounted upside-down\n'
+    '            transform=Transform(hflip=True, vflip=True),  # 180 degrees, camera mounted upside-down\n'
     '        )'
 )
-assert old_config in src, "Anchor not found (patch 2) — controls/FrameDurationLimits line missing"
+assert old_config in src, "Anchor not found (patch 2) — FrameDurationLimits line missing. Run setup_picam_fix.sh first."
 src = src.replace(old_config, new_config, 1)
 
 script.write_text(src, encoding="utf-8")
