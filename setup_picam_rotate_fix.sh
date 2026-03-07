@@ -91,43 +91,19 @@ src = src.replace(old_import, new_import, 1)
 # PATCH 2: Add transform=Transform(hflip=True, vflip=True) to
 #          create_video_configuration()
 #
-# Target:
-#   config = camera.create_video_configuration(
-#       main={"size": CAMERA_RES, "format": "RGB888"},
-#       encode="main",
-#       controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (41666, 41666)}
-#   )
-#
-# Result:
-#   config = camera.create_video_configuration(
-#       main={"size": CAMERA_RES, "format": "RGB888"},
-#       encode="main",
-#       controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (41666, 41666)},
-#       transform=Transform(hflip=True, vflip=True)   # 180° — camera mounted upside-down
-#   )
+# Anchors on the controls line + closing paren — stable regardless of what
+# comment lines appear above it (comments may vary across setup script versions).
 # ─────────────────────────────────────────────────────────────────────────────
 old_config = (
-    '        config = camera.create_video_configuration(\n'
-    '            main={"size": CAMERA_RES, "format": "YUV420"},\n'
-    '            encode="main",\n'
-    '            # Use a relaxed FrameDurationLimits range rather than a fixed value.\n'
-    '            # Pinning min==max==41666 causes a dequeue timeout on OV5647 sensors\n'
-    '            # because the sensor cannot guarantee exactly 24.000 fps.\n'
     '            controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (33333, 66666)}\n'
     '        )'
 )
 new_config = (
-    '        config = camera.create_video_configuration(\n'
-    '            main={"size": CAMERA_RES, "format": "YUV420"},\n'
-    '            encode="main",\n'
-    '            # Use a relaxed FrameDurationLimits range rather than a fixed value.\n'
-    '            # Pinning min==max==41666 causes a dequeue timeout on OV5647 sensors\n'
-    '            # because the sensor cannot guarantee exactly 24.000 fps.\n'
     '            controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (33333, 66666)},\n'
-    '            transform=Transform(hflip=True, vflip=True)   # 180° — camera mounted upside-down\n'
+    '            transform=Transform(hflip=True, vflip=True)   # 180 degrees — camera mounted upside-down\n'
     '        )'
 )
-assert old_config in src, "Anchor not found (patch 2) — create_video_configuration block"
+assert old_config in src, "Anchor not found (patch 2) — controls/FrameDurationLimits line missing"
 src = src.replace(old_config, new_config, 1)
 
 script.write_text(src, encoding="utf-8")
