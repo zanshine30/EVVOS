@@ -120,7 +120,7 @@ log_success "Provisioning script patched"
 log_section "Verifying"
 
 log_info "Checking rpi-lgpio is available in venv..."
-"$VENV/bin/python3" -c "import lgpio; print('  lgpio version:', lgpio.__version__)" \
+"$VENV/bin/python3" -c "import lgpio; print('  lgpio imported OK')" \
     && log_success "lgpio importable in venv" \
     || { log_error "lgpio not importable in venv"; exit 1; }
 
