@@ -325,10 +325,6 @@ current_audio_path   = None
 audio_process        = None
 recording_start_time = None
 
-# Background transcription results keyed by session_id.
-# Populated by _bg_transcribe() thread; read by GET_TRANSCRIPT intent.
-_transcript_state = {}  # { session_id: {"status": "pending"|"complete", ...fields} }
-
 # ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def get_pi_ip():
@@ -662,7 +658,7 @@ def start_recording_handler():
             recording_start_time = time.time()
 
             print(f"[CAMERA] Starting: {current_session_id}")
-            encoder = H264Encoder(bitrate=1_500_000, framerate=CAMERA_FPS)
+            encoder = H264Encoder(bitrate=2500000, framerate=CAMERA_FPS)
             camera.start_recording(encoder, str(current_video_path))
 
             # Record audio via PulseAudio — allows concurrent access with PicoVoice.
@@ -696,20 +692,6 @@ def start_recording_handler():
         except Exception as e:
             print(f"[CAMERA] Start Error: {e}")
             return {"status": "error", "message": str(e)}
-
-
-def get_transcript_handler(session_id):
-    """
-    Return the transcription result for a given session_id.
-    Called by the phone after STOP_RECORDING returns "transcription_status": "pending".
-    The phone should poll every 5 s until status is "complete".
-    """
-    if not session_id:
-        return {"status": "error", "message": "session_id required"}
-    state = _transcript_state.get(session_id)
-    if state is None:
-        return {"status": "not_found", "session_id": session_id}
-    return {"status": "transcript_result", **state}
 
 
 def get_status_handler():
@@ -752,30 +734,29 @@ def stop_recording_handler():
             raw_size = current_video_path.stat().st_size if current_video_path.exists() else 0
             print(f"[CAMERA] Raw H264 size: {raw_size / 1024 / 1024:.2f} MB")
 
-            # ── STREAM-COPY MUX (no re-encode — 3–8 s vs 30–90 s) ────────────────
-            # The raw H.264 from picamera2 is already H.264 — we only need to
-            # wrap it in an MP4 container and mux in the WAV audio.
-            # Passing -framerate 24 before -i fixes the PTS/speed issue without
-            # the setpts filter (which forced a full decode+encode cycle).
-            print("[FFMPEG] Stream-copy mux (no re-encode)...")
+            # ── SPEED FIX & AUDIO MUXING ──────────────────
+            print("[FFMPEG] Muxing audio & fixing speed (Constant 24 FPS)...")
             has_audio = current_audio_path and current_audio_path.exists() and current_audio_path.stat().st_size > 1000
-
+            
             cmd = [
                 "ffmpeg", "-y",
-                "-framerate", "24",          # fix PTS without setpts
-                "-i", str(current_video_path),
+                "-r", "24", "-i", str(current_video_path)
             ]
-
+            
             if has_audio:
                 cmd.extend(["-i", str(current_audio_path)])
-
-            cmd.extend(["-c:v", "copy"])     # stream copy — no decode/encode
-
+                
+            cmd.extend([
+                "-vf", "setpts=N/(24*TB)",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-r", "24", "-fps_mode", "cfr"
+            ])
+            
             if has_audio:
-                cmd.extend(["-c:a", "aac", "-b:a", "64k"])   # 64k is plenty for field voice
+                cmd.extend(["-c:a", "aac", "-b:a", "128k"])
             else:
                 cmd.extend(["-an"])
-
+                
             cmd.extend([
                 "-movflags", "+faststart", "-loglevel", "error",
                 str(mp4_path)
@@ -792,54 +773,36 @@ def stop_recording_handler():
                 print(f"[FFMPEG] Error: {res.stderr}")
                 size_mb = mp4_path.stat().st_size / 1024 / 1024 if mp4_path.exists() else 0
 
-            # ── ASYNC TRANSCRIPTION ────────────────────────────────────────────
-            # Kick off transcription in a background thread so the TCP response
-            # returns immediately (~5–9 s total) rather than blocking for up to
-            # 120 s (offline whisper) or 20 s (Groq).
-            # The phone polls GET_TRANSCRIPT, or receives the JSON sidecar via
-            # TRANSFER_FILES once the background thread writes it to disk.
-            _sess = current_session_id
-            _wav  = current_audio_path
-
-            def _bg_transcribe(session_id, wav_path):
-                _transcript_state[session_id] = {"status": "pending"}
-                result = transcribe_best(wav_path) if (wav_path and wav_path.exists()) else \
-                    {"transcript": "", "driver_name": "", "plate_number": "", "violations": [], "engine": "none"}
-                result["status"] = "complete"
-                _transcript_state[session_id] = result
-                # Write JSON sidecar so TRANSFER_FILES can bundle it with the video
-                sidecar = RECORDINGS_DIR / f"transcript_{session_id}.json"
+            # ── TRANSCRIPTION (online → offline fallback) ──────────────────
+            # Run AFTER ffmpeg so audio is no longer being written to disk.
+            # transcribe_best() checks internet first:
+            #   • Online  → Groq Whisper large-v3-turbo (accurate, free API)
+            #   • Offline → local whisper.cpp tiny.en (always available)
+            # The raw WAV is kept until transcription finishes, then deleted.
+            transcription = {"transcript": "", "driver_name": "", "plate_number": "", "violations": [], "engine": "none"}
+            if current_audio_path and current_audio_path.exists():
+                transcription = transcribe_best(current_audio_path)
                 try:
-                    sidecar.write_text(json.dumps(result), encoding="utf-8")
-                    print(f"[TRANSCRIBE] Sidecar written: {sidecar.name}")
+                    current_audio_path.unlink(missing_ok=True)
                 except Exception as _e:
-                    print(f"[TRANSCRIBE] Could not write sidecar: {_e}")
-                try:
-                    if wav_path:
-                        wav_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
-            threading.Thread(target=_bg_transcribe, args=(_sess, _wav), daemon=True).start()
-            # ──────────────────────────────────────────────────────────────────────
+                    print(f"[CAMERA] Could not delete audio file: {_e}")
+            # ──────────────────────────────────────────────────────────────────
 
             return {
-                "status":               "recording_stopped",
-                "session_id":           current_session_id,
-                "video_filename":       mp4_path.name,
-                "video_path":           str(mp4_path),
-                "video_size_mb":        round(size_mb, 2),
-                "video_url":            f"http://{get_pi_ip()}:{HTTP_PORT}/{mp4_path.name}",
-                "pi_ip":                get_pi_ip(),
-                "http_port":            HTTP_PORT,
-                # Transcription runs in background — phone polls GET_TRANSCRIPT
-                # or receives the .json sidecar bundled in TRANSFER_FILES.
-                "transcription_status": "pending",
-                "transcript":           "",
-                "driver_name":          "",
-                "plate_number":         "",
-                "violations":           [],
-                "transcription_engine": "pending",
+                "status":         "recording_stopped",
+                "session_id":     current_session_id,
+                "video_filename": mp4_path.name,
+                "video_path":     str(mp4_path),
+                "video_size_mb":  round(size_mb, 2),
+                "video_url":      f"http://{get_pi_ip()}:{HTTP_PORT}/{mp4_path.name}",
+                "pi_ip":          get_pi_ip(),
+                "http_port":      HTTP_PORT,
+                # ── Transcription fields (pre-fill IncidentSummaryScreen) ────
+                "transcript":         transcription["transcript"],
+                "driver_name":        transcription["driver_name"],
+                "plate_number":       transcription["plate_number"],
+                "violations":         transcription["violations"],
+                "transcription_engine": transcription.get("engine", "none"),
             }
         except Exception as e:
             print(f"[CAMERA] Stop Error: {e}")
@@ -940,8 +903,6 @@ def handle_client(conn, addr):
                         res = start_recording_handler()
                     elif intent == "STOP_RECORDING":
                         res = stop_recording_handler()
-                    elif intent == "GET_TRANSCRIPT":
-                        res = get_transcript_handler(payload.get("session_id"))
                     elif intent == "UPLOAD_TO_SUPABASE":
                         res = upload_to_supabase_handler(
                             payload.get("incident_id"),
