@@ -831,7 +831,7 @@ CHECKS=(
     "TAKE_SNAPSHOT"
     "GET_TRANSCRIPT"
     "TCP_NODELAY"
-    "256 \* 1024"
+    "256 * 1024"
     "res is not None"
 )
 all_ok=1
