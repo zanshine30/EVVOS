@@ -836,7 +836,7 @@ CHECKS=(
 )
 all_ok=1
 for check in "${CHECKS[@]}"; do
-    if grep -q "$check" "$CAMERA_SCRIPT"; then
+    if grep -qF "$check" "$CAMERA_SCRIPT"; then
         echo -e "  ${GREEN}✓${NC}  $check"
     else
         echo -e "  ${RED}✗${NC}  $check — MISSING"
