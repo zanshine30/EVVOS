@@ -80,6 +80,7 @@ from pathlib import Path
 try:
     from picamera2 import Picamera2
     from picamera2.encoders import H264Encoder
+    from picamera2.outputs import FileOutput
 except ImportError:
     print("[CAMERA] ERROR: picamera2 not installed", file=sys.stderr)
     sys.exit(1)
@@ -363,7 +364,7 @@ def start_recording_handler():
 
             print(f"[CAMERA] Starting: {current_session_id}")
             encoder = H264Encoder(bitrate=2500000, framerate=CAMERA_FPS)
-            camera.start_recording(encoder, str(current_video_path))
+            camera.start_recording(encoder, FileOutput(str(current_video_path)))
 
             audio_process = subprocess.Popen(
                 ["arecord", "-D", "pulse", "-f", "S16_LE", "-r", "16000", "-c", "1", str(current_audio_path)],
@@ -400,7 +401,7 @@ def stop_recording_handler():
         try:
             print("[CAMERA] Stopping...")
             camera.stop_recording()
-            camera.stop()
+            # stop_recording() already stops the camera — do not call camera.stop() again
 
             if audio_process:
                 audio_process.terminate()
@@ -823,6 +824,7 @@ fi
 CHECKS=(
     "libx264"
     "setpts=N/(24*TB)"
+    "FileOutput"
     "_bg_transcribe"
     "transfer_files_handler"
     "take_snapshot_handler"
