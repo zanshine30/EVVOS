@@ -125,12 +125,16 @@ def setup_camera():
     try:
         camera = Picamera2()
         config = camera.create_video_configuration(
-            main={"size": CAMERA_RES, "format": "RGB888"},
+            main={"size": CAMERA_RES, "format": "YUV420"},
             encode="main",
-            controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (41666, 41666)}
+            # Use a relaxed FrameDurationLimits range rather than a fixed value.
+            # Pinning min==max==41666 causes a dequeue timeout on OV5647 sensors
+            # because the sensor cannot guarantee exactly 24.000 fps — it stalls
+            # and produces 0-byte output files. Allow up to ~67ms as the upper
+            # bound so the sensor can breathe while still targeting 24fps.
+            controls={"FrameRate": CAMERA_FPS, "FrameDurationLimits": (33333, 66666)}
         )
         camera.configure(config)
-        camera.set_controls({"FrameDurationLimits": (41666, 41666)})
         print(f"[CAMERA] ✓ Ready at {CAMERA_RES} @ {CAMERA_FPS} FPS")
         return True
     except Exception as e:
@@ -825,6 +829,8 @@ CHECKS=(
     "libx264"
     "setpts=N/(24*TB)"
     "FileOutput"
+    "YUV420"
+    "33333, 66666"
     "_bg_transcribe"
     "transfer_files_handler"
     "take_snapshot_handler"
