@@ -74,7 +74,7 @@ if "transfer_files_handler" in src:
 transfer_handler_code = '''
 def transfer_files_handler(conn):
     """
-    Send .mp4, .jpg, and transcript .json files to the mobile app over the existing TCP connection.
+    Send .mp4 and .jpg files to the mobile app over the existing TCP connection.
 
     Protocol:
       1. JSON header (newline-terminated):
@@ -92,23 +92,13 @@ def transfer_files_handler(conn):
     """
     import struct
     import json as _json
-    import socket as _socket
-
-    # ── Socket tuning ──────────────────────────────────────────────────────────
-    # TCP_NODELAY: flush JSON header/footer immediately (no Nagle batching delay)
-    # SO_SNDBUF 2 MB: larger kernel send buffer reduces syscall overhead per MB
-    try:
-        conn.setsockopt(_socket.IPPROTO_TCP, _socket.TCP_NODELAY, 1)
-        conn.setsockopt(_socket.SOL_SOCKET, _socket.SO_SNDBUF, 2 * 1024 * 1024)
-    except Exception as _sock_err:
-        print(f"[TRANSFER] Socket tuning warning: {_sock_err}")
 
     print("[TRANSFER] Building file list...")
 
     # ── Collect files to send ──────────────────────────────────────────────────
     files_to_send = []
 
-    # 1. MP4 video (most recent)
+    # 1. MP4 video
     all_mp4 = sorted(RECORDINGS_DIR.glob("*.mp4"), key=lambda f: f.stat().st_mtime, reverse=True)
     if all_mp4:
         mp4 = all_mp4[0]
@@ -122,15 +112,6 @@ def transfer_files_handler(conn):
     if all_jpg:
         print(f"[TRANSFER] Snapshots: {len(all_jpg)} JPEG file(s)")
 
-    # 3. Transcript JSON sidecar — written by background transcription thread.
-    # Include whichever sidecar files exist at this moment; if transcription is
-    # still running the phone will fall back to polling GET_TRANSCRIPT.
-    all_json = sorted(RECORDINGS_DIR.glob("transcript_*.json"))
-    for j in all_json:
-        files_to_send.append(j)
-    if all_json:
-        print(f"[TRANSFER] Transcript sidecars: {len(all_json)} JSON file(s)")
-
     if not files_to_send:
         err = _json.dumps({"status": "error", "message": "No files found to transfer"}) + "\\n"
         conn.sendall(err.encode("utf-8"))
@@ -143,7 +124,7 @@ def transfer_files_handler(conn):
     print(f"[TRANSFER] Header sent: {len(files_to_send)} file(s)")
 
     # ── Send each file ─────────────────────────────────────────────────────────
-    CHUNK = 256 * 1024  # 256 KB — reduces syscall overhead vs 64 KB on local WiFi
+    CHUNK = 65536   # 64 KB chunks
     transferred = []
 
     for fp in files_to_send:
@@ -242,15 +223,9 @@ echo -e "${CYAN}  Architecture change:${NC}"
 echo -e "${CYAN}    OLD: Pi → Supabase (internet required at stop time)${NC}"
 echo -e "${CYAN}    NEW: Pi → Mobile (local WiFi only) → Supabase (on COMPLETE)${NC}"
 echo ""
-echo -e "${CYAN}  Optimisations applied in this patch:${NC}"
-echo -e "${CYAN}    • TCP_NODELAY  — JSON header/footer flushed immediately${NC}"
-echo -e "${CYAN}    • SO_SNDBUF 2MB — larger kernel send buffer${NC}"
-echo -e "${CYAN}    • 256 KB chunks — reduced syscall overhead vs 64 KB${NC}"
-echo -e "${CYAN}    • Transcript JSON sidecar included in transfer if ready${NC}"
-echo ""
 echo -e "${CYAN}  What the Pi now does on TRANSFER_FILES:${NC}"
 echo -e "${CYAN}    1. Sends JSON header with file list${NC}"
-echo -e "${CYAN}    2. Sends .mp4 + .jpg + transcript .json as binary (4-byte size + data)${NC}"
+echo -e "${CYAN}    2. Sends each .mp4 + .jpg as binary (4-byte size + data)${NC}"
 echo -e "${CYAN}    3. Sends JSON footer${NC}"
 echo -e "${CYAN}    4. Deletes local copies (files are now on the phone)${NC}"
 echo ""
