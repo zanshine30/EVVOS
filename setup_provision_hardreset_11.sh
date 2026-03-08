@@ -1,22 +1,29 @@
 #!/bin/bash
 # ============================================================================
-# EVVOS Provisioning — Patch P11: Release-based hold time detection
+# EVVOS Provisioning — Patch P12: Clean dual hold-time button logic
 #
 # Run on the Raspberry Pi as root:
-#   sudo bash setup_provision_complete_18.sh
+#   sudo bash setup_provision_complete_19.sh
 #
 # Safe to re-run — skips if already applied.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 # BEHAVIOUR (action decided on release):
 #   Release before 5s   → nothing
-#   Release at 5–19s    → provisioning reset only
-#   Release at 20s+     → provisioning reset THEN hard reset + reboot
-#
-# HOW IT WORKS
-#   when_pressed  → record press timestamp (time.monotonic)
-#   when_released → calculate hold duration, run action in daemon thread
-#   Single Button object — no gpiozero pin conflict
+#   Release at 5s-19s   → provisioning reset:
+#                           sudo rm -f /etc/evvos/device_credentials.json
+#                                      /tmp/evvos_ble_state.json
+#                           && sudo systemctl restart evvos-provisioning
+#   Release at 20s+     → hard reset:
+#                           1. restart evvos-pico-voice
+#                           2. restart evvos-picam-tcp
+#                           3. rm recordings/*.h264 *.wav *.mp4
+#                           4. truncate provisioning log
+#                           5. rm WiFi fail counter
+#                           6. sudo rm -f credentials + state files
+#                           7. sync
+#                           8. sudo systemctl restart evvos-provisioning
+#                              (then reboot)
 # ============================================================================
 
 set -e
@@ -44,7 +51,7 @@ if [ ! -f "$SCRIPT" ]; then
     exit 1
 fi
 
-log_section "EVVOS Provisioning — Patch P11: Release-based hold detection"
+log_section "EVVOS Provisioning — Patch P12: Clean dual hold-time button logic"
 
 cp "$SCRIPT" "${SCRIPT}.bak.$(date +%Y%m%d_%H%M%S)"
 log_success "Backup created"
@@ -55,31 +62,29 @@ from pathlib import Path
 script = Path("/usr/local/bin/evvos-provisioning")
 src = script.read_text(encoding="utf-8")
 
-MARKER = "# FIX-P11:"
+MARKER = "# FIX-P12:"
 if MARKER in src:
-    print("P11 already applied — nothing to do.")
+    print("P12 already applied — nothing to do.")
     raise SystemExit(0)
 
-# ── Step 1: ensure threading is imported ─────────────────────────────────────
+# ── ensure threading is imported ─────────────────────────────────────────────
 if "import threading" not in src:
     src = src.replace(
         "import time\nimport uuid",
         "import threading\nimport time\nimport uuid",
         1
     )
-    print("Step 1: threading import added")
-else:
-    print("Step 1: threading already imported")
+    print("threading import added")
 
-# ── Step 2: replace _setup_button_handler ────────────────────────────────────
+# ── new _setup_button_handler ─────────────────────────────────────────────────
 new_setup = (
     "    def _setup_button_handler(self) -> None:\n"
     "        \"\"\"\n"
     "        Setup ReSpeaker HAT physical button handler (GPIO 17).\n"
-    "        Action is decided on RELEASE based on how long the button was held:\n"
+    "        Action decided on RELEASE:\n"
     "          Release before 5s   → nothing\n"
     "          Release at 5s-19s   → provisioning reset\n"
-    "          Release at 20s+     → provisioning reset + hard reset + reboot\n"
+    "          Release at 20s+     → hard reset (includes provisioning reset at end)\n"
     "        \"\"\"\n"
     "        if Button is None:\n"
     "            logger.warning(\"gpiozero not available - button handler disabled\")\n"
@@ -96,41 +101,32 @@ new_setup = (
     "            logger.debug(\"[BUTTON] sysfs unexport skipped: %s\", _e)\n"
     "\n"
     "        try:\n"
-    "            # FIX-P11: single Button object, action decided on release.\n"
+    "            # FIX-P12: single Button, action decided on release.\n"
     "            self._press_time = None\n"
-    "\n"
     "            self.button = Button(17, pull_up=True)\n"
     "            self.button.when_pressed  = self._on_button_pressed\n"
     "            self.button.when_released = self._on_button_released\n"
-    "\n"
     "            logger.info(\"\u2713 Button handler initialized (GPIO 17)\")\n"
     "            logger.info(\"  Release at  5-19s \u2192 provisioning reset\")\n"
-    "            logger.info(\"  Release at   20s+ \u2192 provisioning reset + hard reset\")\n"
+    "            logger.info(\"  Release at   20s+ \u2192 hard reset\")\n"
     "        except Exception as e:\n"
     "            logger.warning(f\"Failed to initialize button handler: {e}\")\n"
     "            logger.warning(\"Physical button reset feature disabled, but provisioning will continue\")"
 )
 
-m_start = src.find("    def _setup_button_handler(self) -> None:")
-assert m_start != -1, "_setup_button_handler not found"
-m_end = src.find("\n    def ", m_start + 1)
-src = src[:m_start] + new_setup + src[m_end:]
-print("Step 2: _setup_button_handler replaced")
-
-# ── Step 3: replace all button handlers ──────────────────────────────────────
+# ── new button handlers ───────────────────────────────────────────────────────
 new_handlers = (
     "    def _on_button_pressed(self) -> None:\n"
     "        \"\"\"Record the moment the button was pressed.\"\"\"\n"
     "        self._press_time = time.monotonic()\n"
-    "        logger.info(\"[BUTTON] Pressed — hold then release: 5s=prov reset, 20s=+hard reset\")\n"
+    "        logger.info(\"[BUTTON] Pressed — release at 5s for prov reset, 20s for hard reset\")\n"
     "\n"
     "    def _on_button_released(self) -> None:\n"
     "        \"\"\"\n"
-    "        Calculate hold duration on release and dispatch the right action\n"
-    "        in a daemon thread so gpiozero's event loop is not blocked.\n"
+    "        Decide action on release.\n"
     "          < 5s  → nothing\n"
     "          5-19s → provisioning reset\n"
-    "          20s+  → provisioning reset + hard reset + reboot\n"
+    "          20s+  → hard reset\n"
     "        \"\"\"\n"
     "        if self._press_time is None:\n"
     "            return\n"
@@ -139,44 +135,11 @@ new_handlers = (
     "        logger.info(\"[BUTTON] Released after %.1fs\", held)\n"
     "\n"
     "        if held >= 20:\n"
-    "            threading.Thread(\n"
-    "                target=self._run_provisioning_then_hard_reset,\n"
-    "                daemon=True\n"
-    "            ).start()\n"
+    "            threading.Thread(target=self._on_button_hard_reset, daemon=True).start()\n"
     "        elif held >= 5:\n"
-    "            threading.Thread(\n"
-    "                target=self._on_button_held,\n"
-    "                daemon=True\n"
-    "            ).start()\n"
+    "            threading.Thread(target=self._on_button_held, daemon=True).start()\n"
     "        else:\n"
     "            logger.info(\"[BUTTON] Held %.1fs — too short, ignoring\", held)\n"
-    "\n"
-    "    def _do_provisioning_reset(self) -> None:\n"
-    "        \"\"\"Run the provisioning reset command. Called by both hold handlers.\"\"\"\n"
-    "        reset_cmd = (\n"
-    "            \"sudo rm -f /etc/evvos/device_credentials.json /tmp/evvos_ble_state.json\"\n"
-    "            \" && sudo systemctl restart evvos-provisioning\"\n"
-    "        )\n"
-    "        logger.warning(\"[BUTTON] Running: %s\", reset_cmd)\n"
-    "        try:\n"
-    "            result = subprocess.run(\n"
-    "                reset_cmd,\n"
-    "                shell=True,\n"
-    "                timeout=20,\n"
-    "                capture_output=True,\n"
-    "                text=True,\n"
-    "            )\n"
-    "            if result.returncode == 0:\n"
-    "                logger.warning(\"[BUTTON] \u2713 Provisioning reset succeeded\")\n"
-    "            else:\n"
-    "                logger.error(\n"
-    "                    \"[BUTTON] \u274c Reset command exited %s \u2014 stderr: %s\",\n"
-    "                    result.returncode, result.stderr.strip()\n"
-    "                )\n"
-    "        except subprocess.TimeoutExpired:\n"
-    "            logger.error(\"[BUTTON] \u274c Reset command timed out\")\n"
-    "        except Exception as e:\n"
-    "            logger.error(\"[BUTTON] \u274c Unexpected error: %s\", e)\n"
     "\n"
     "    def _on_button_held(self) -> None:\n"
     "        \"\"\"\n"
@@ -185,85 +148,99 @@ new_handlers = (
     "        logger.warning(\"=\" * 70)\n"
     "        logger.warning(\"\U0001f7e8 BUTTON RELEASED AFTER 5s - INITIATING PROVISIONING RESET\")\n"
     "        logger.warning(\"=\" * 70)\n"
-    "        self._do_provisioning_reset()\n"
-    "        logger.warning(\"=\" * 70)\n"
-    "        logger.warning(\"[BUTTON] Provisioning reset complete\")\n"
-    "        logger.warning(\"=\" * 70)\n"
-    "\n"
-    "    def _run_provisioning_then_hard_reset(self) -> None:\n"
-    "        \"\"\"\n"
-    "        Released after 20s+ — run provisioning reset first, then hard reset.\n"
-    "        \"\"\"\n"
-    "        logger.warning(\"=\" * 70)\n"
-    "        logger.warning(\"\U0001f534 BUTTON RELEASED AFTER 20s - PROVISIONING RESET + HARD RESET\")\n"
-    "        logger.warning(\"=\" * 70)\n"
-    "\n"
-    "        logger.warning(\"[BUTTON] Step 1/2: Provisioning reset...\")\n"
-    "        self._do_provisioning_reset()\n"
-    "\n"
-    "        logger.warning(\"[BUTTON] Step 2/2: Hard reset...\")\n"
-    "        self._on_button_hard_reset()\n"
+    "        cmd = (\n"
+    "            \"sudo rm -f /etc/evvos/device_credentials.json /tmp/evvos_ble_state.json\"\n"
+    "            \" && sudo systemctl restart evvos-provisioning\"\n"
+    "        )\n"
+    "        logger.warning(\"[BUTTON] Running: %s\", cmd)\n"
+    "        try:\n"
+    "            result = subprocess.run(cmd, shell=True, timeout=20,\n"
+    "                                    capture_output=True, text=True)\n"
+    "            if result.returncode == 0:\n"
+    "                logger.warning(\"[BUTTON] \u2713 Provisioning reset succeeded\")\n"
+    "            else:\n"
+    "                logger.error(\"[BUTTON] \u274c exited %s \u2014 %s\",\n"
+    "                             result.returncode, result.stderr.strip())\n"
+    "        except subprocess.TimeoutExpired:\n"
+    "            logger.error(\"[BUTTON] \u274c Timed out\")\n"
+    "        except Exception as e:\n"
+    "            logger.error(\"[BUTTON] \u274c Error: %s\", e)\n"
     "\n"
     "    def _on_button_hard_reset(self) -> None:\n"
     "        \"\"\"\n"
-    "        Hard reset steps:\n"
-    "          1. Restart evvos-pico-voice\n"
-    "          2. Restart evvos-picam-tcp\n"
-    "          3. Clear recording files (.h264 / .wav / .mp4)\n"
-    "          4. Truncate provisioning log\n"
-    "          5. Delete provisioning state files\n"
-    "          6. Reset WiFi fail counter\n"
-    "          7. Sync + reboot\n"
+    "        Hard reset — released after 20s+.\n"
+    "        Runs all cleanup steps, then wipes provisioning files and restarts\n"
+    "        the service (same command as provisioning reset) before rebooting.\n"
     "        \"\"\"\n"
+    "        logger.warning(\"=\" * 70)\n"
+    "        logger.warning(\"\U0001f534 BUTTON RELEASED AFTER 20s - INITIATING HARD RESET\")\n"
+    "        logger.warning(\"=\" * 70)\n"
+    "\n"
     "        def _run(cmd, label, timeout=15):\n"
     "            logger.warning(\"[HARD RESET] %s\", label)\n"
     "            try:\n"
-    "                result = subprocess.run(\n"
-    "                    cmd, shell=True, timeout=timeout,\n"
-    "                    capture_output=True, text=True,\n"
-    "                )\n"
+    "                result = subprocess.run(cmd, shell=True, timeout=timeout,\n"
+    "                                        capture_output=True, text=True)\n"
     "                if result.returncode == 0:\n"
     "                    logger.warning(\"[HARD RESET] \u2713 %s\", label)\n"
     "                else:\n"
-    "                    logger.error(\n"
-    "                        \"[HARD RESET] \u274c %s (exit %s) \u2014 %s\",\n"
-    "                        label, result.returncode, result.stderr.strip()\n"
-    "                    )\n"
+    "                    logger.error(\"[HARD RESET] \u274c %s (exit %s) \u2014 %s\",\n"
+    "                                 label, result.returncode, result.stderr.strip())\n"
     "            except subprocess.TimeoutExpired:\n"
     "                logger.error(\"[HARD RESET] \u274c %s timed out\", label)\n"
     "            except Exception as _e:\n"
     "                logger.error(\"[HARD RESET] \u274c %s error: %s\", label, _e)\n"
     "\n"
     "        _run(\"sudo systemctl restart evvos-pico-voice\",\n"
-    "             \"Restart evvos-pico-voice (voice recognition)\")\n"
+    "             \"Restart evvos-pico-voice\")\n"
     "        _run(\"sudo systemctl restart evvos-picam-tcp\",\n"
-    "             \"Restart evvos-picam-tcp (camera)\")\n"
+    "             \"Restart evvos-picam-tcp\")\n"
     "        _run(\"rm -f /home/pi/recordings/*.h264 \"\n"
     "             \"/home/pi/recordings/*.wav \"\n"
     "             \"/home/pi/recordings/*.mp4\",\n"
-    "             \"Clear recording files (.h264 / .wav / .mp4)\", timeout=10)\n"
+    "             \"Clear recording files\", timeout=10)\n"
     "        _run(\"truncate -s 0 /var/log/evvos/evvos_provisioning.log 2>/dev/null || true\",\n"
     "             \"Truncate provisioning log\")\n"
-    "        _run(\"sudo rm -f /etc/evvos/device_credentials.json \"\n"
-    "             \"/tmp/evvos_ble_state.json\",\n"
-    "             \"Delete provisioning state files\")\n"
     "        _run(\"sudo rm -f /etc/evvos/.wifi_fail_count\",\n"
     "             \"Reset WiFi fail counter\")\n"
     "\n"
-    "        logger.warning(\"[HARD RESET] Syncing filesystem before reboot...\")\n"
+    "        # Wipe credentials + state files then restart service — same as\n"
+    "        # provisioning reset, so the device comes up fresh after reboot.\n"
+    "        _run(\n"
+    "            \"sudo rm -f /etc/evvos/device_credentials.json /tmp/evvos_ble_state.json\"\n"
+    "            \" && sudo systemctl restart evvos-provisioning\",\n"
+    "            \"Wipe provisioning files + restart service\",\n"
+    "            timeout=20,\n"
+    "        )\n"
+    "\n"
+    "        logger.warning(\"[HARD RESET] Syncing filesystem...\")\n"
     "        try:\n"
     "            subprocess.run(\"sync\", shell=True, timeout=10)\n"
     "        except Exception:\n"
     "            pass\n"
     "\n"
     "        logger.warning(\"=\" * 70)\n"
-    "        logger.warning(\"[HARD RESET] All steps complete \u2014 rebooting now\")\n"
+    "        logger.warning(\"[HARD RESET] All steps complete \u2014 rebooting\")\n"
     "        logger.warning(\"=\" * 70)\n"
-    "\n"
     "        _run(\"sudo reboot\", \"Reboot\", timeout=30)"
 )
 
-# Find the start of the first button handler (any version previously patched)
+# replace _setup_button_handler
+m_start = src.find("    def _setup_button_handler(self) -> None:")
+assert m_start != -1, "_setup_button_handler not found"
+m_end = src.find("\n    def ", m_start + 1)
+src = src[:m_start] + new_setup + src[m_end:]
+
+# replace all existing button handlers
+BUTTON_METHODS = (
+    "_on_button_pressed",
+    "_on_button_released",
+    "_on_button_held",
+    "_on_button_hard_reset",
+    "_run_provisioning_then_hard_reset",
+    "_do_provisioning_reset",
+    "_delete_provisioning_files",
+)
 h_start = None
 for candidate in (
     "    def _on_button_pressed(self) -> None:",
@@ -273,33 +250,20 @@ for candidate in (
     if idx != -1:
         h_start = idx
         break
-assert h_start is not None, "no button handler found to replace"
+assert h_start is not None, "no button handler found"
 
-# Walk forward past all consecutive button-related methods
-BUTTON_METHODS = (
-    "_on_button_pressed",
-    "_on_button_released",
-    "_on_button_held",
-    "_on_button_hard_reset",
-    "_run_provisioning_then_hard_reset",
-    "_do_provisioning_reset",
-)
 h_end = src.find("\n    def ", h_start + 1)
 while h_end != -1:
-    snippet = src[h_end + 1: h_end + 80]
-    if any(name in snippet for name in BUTTON_METHODS):
+    if any(n in src[h_end+1:h_end+80] for n in BUTTON_METHODS):
         h_end = src.find("\n    def ", h_end + 1)
     else:
         break
 assert h_end != -1, "could not find end of button handler block"
 
 src = src[:h_start] + new_handlers + src[h_end:]
-print("Step 3: all button handlers replaced")
 
 script.write_text(src, encoding="utf-8")
-print("\nP11 complete.")
-print("  Release at  5-19s → provisioning reset")
-print("  Release at   20s+ → provisioning reset + hard reset + reboot")
+print("P12 applied.")
 PATCHER_EOF
 
 log_success "Python patcher completed"
@@ -307,26 +271,24 @@ log_success "Python patcher completed"
 # ─────────────────────────────────────────────────────────────────────────────
 # Verification
 # ─────────────────────────────────────────────────────────────────────────────
-log_section "Verifying patch P11"
+log_section "Verifying patch P12"
 python3 << 'VERIFY_EOF'
 src = open('/usr/local/bin/evvos-provisioning', encoding='utf-8').read()
 checks = [
-    ('# FIX-P11:',                              'P11 — patch marker'),
-    ('Button(17, pull_up=True)',                 'P11 — single Button'),
-    ('self.button.when_pressed',                 'P11 — when_pressed wired'),
-    ('self.button.when_released',                'P11 — when_released wired'),
-    ('def _on_button_pressed',                   'P11 — pressed handler'),
-    ('def _on_button_released',                  'P11 — released handler'),
-    ('def _do_provisioning_reset',               'P11 — shared reset helper'),
-    ('def _on_button_held',                      'P11 — 5s handler'),
-    ('def _run_provisioning_then_hard_reset',    'P11 — 20s combined handler'),
-    ('def _on_button_hard_reset',                'P11 — hard reset steps'),
-    ('time.monotonic()',                         'P11 — monotonic timer'),
-    ('held >= 20',                               'P11 — 20s threshold'),
-    ('held >= 5',                                'P11 — 5s threshold'),
-    ('evvos-pico-voice',                         'P11 — voice service restart'),
-    ('evvos-picam-tcp',                          'P11 — camera service restart'),
-    ('sudo reboot',                              'P11 — reboot'),
+    ('# FIX-P12:',                           'P12 — patch marker'),
+    ('Button(17, pull_up=True)',              'P12 — single Button'),
+    ('when_pressed',                          'P12 — when_pressed'),
+    ('when_released',                         'P12 — when_released'),
+    ('time.monotonic()',                      'P12 — monotonic timer'),
+    ('held >= 20',                            'P12 — 20s threshold'),
+    ('held >= 5',                             'P12 — 5s threshold'),
+    ('def _on_button_held',                   'P12 — provisioning reset handler'),
+    ('def _on_button_hard_reset',             'P12 — hard reset handler'),
+    ('evvos-pico-voice',                      'P12 — voice restart'),
+    ('evvos-picam-tcp',                       'P12 — camera restart'),
+    ('/home/pi/recordings',                   'P12 — recordings cleanup'),
+    ('Wipe provisioning files + restart',     'P12 — rm+restart in hard reset'),
+    ('sudo reboot',                           'P12 — reboot'),
 ]
 all_ok = True
 for token, label in checks:
@@ -354,24 +316,22 @@ else
 fi
 
 echo ""
-echo -e "${CYAN}  Patch P11 applied${NC}"
+echo -e "${CYAN}  Patch P12 applied${NC}"
 echo -e "${CYAN}  ════════════════════════════════════════════════════${NC}"
-echo -e "${CYAN}  GPIO 17 button — action decided on RELEASE:${NC}"
-echo -e "${CYAN}    Release before 5s  → nothing${NC}"
-echo -e "${CYAN}    Release at  5-19s  → provisioning reset${NC}"
-echo -e "${CYAN}    Release at   20s+  → provisioning reset + hard reset${NC}"
+echo -e "${CYAN}  Release before 5s  → nothing${NC}"
+echo -e "${CYAN}  Release at  5-19s  → provisioning reset:${NC}"
+echo -e "${CYAN}    rm credentials + state files${NC}"
+echo -e "${CYAN}    systemctl restart evvos-provisioning${NC}"
+echo -e "${CYAN}  Release at   20s+  → hard reset:${NC}"
+echo -e "${CYAN}    1. restart evvos-pico-voice${NC}"
+echo -e "${CYAN}    2. restart evvos-picam-tcp${NC}"
+echo -e "${CYAN}    3. rm recordings/*.h264 *.wav *.mp4${NC}"
+echo -e "${CYAN}    4. truncate provisioning log${NC}"
+echo -e "${CYAN}    5. rm WiFi fail counter${NC}"
+echo -e "${CYAN}    6. rm credentials + state files${NC}"
+echo -e "${CYAN}       && systemctl restart evvos-provisioning${NC}"
+echo -e "${CYAN}    7. sync + reboot${NC}"
 echo -e "${CYAN}  ════════════════════════════════════════════════════${NC}"
-echo ""
-echo -e "${YELLOW}  Expected in logs (5s release example):${NC}"
-echo -e "${YELLOW}  INFO    - [BUTTON] Pressed — hold then release: 5s=prov reset, 20s=+hard reset${NC}"
-echo -e "${YELLOW}  INFO    - [BUTTON] Released after 7.3s${NC}"
-echo -e "${YELLOW}  WARNING - 🔘 BUTTON RELEASED AFTER 5s - INITIATING PROVISIONING RESET${NC}"
-echo ""
-echo -e "${YELLOW}  Expected in logs (20s release example):${NC}"
-echo -e "${YELLOW}  INFO    - [BUTTON] Released after 21.1s${NC}"
-echo -e "${YELLOW}  WARNING - 🔴 BUTTON RELEASED AFTER 20s - PROVISIONING RESET + HARD RESET${NC}"
-echo -e "${YELLOW}  WARNING - [BUTTON] Step 1/2: Provisioning reset...${NC}"
-echo -e "${YELLOW}  WARNING - [BUTTON] Step 2/2: Hard reset...${NC}"
 echo ""
 echo -e "${YELLOW}  Verify: journalctl -u evvos-provisioning -f${NC}"
 echo ""
