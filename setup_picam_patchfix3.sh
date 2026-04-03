@@ -108,14 +108,19 @@ if "# FIX-P14: reset transcription state so no previous session" in src:
 # unique, and immediately follows the "not already recording" guard.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# The anchor is the first assignment to current_session_id inside the handler.
-# In every known version of evvos-picam-tcp.py this looks like:
+# The anchor is the `ts = datetime.now()...` line that opens the session
+# variable block inside start_recording_handler()'s try: branch.
+# In evvos-picam-tcp.py this looks exactly like:
 #
-#     current_session_id = datetime.now().strftime(...)
+#             ts                   = datetime.now().strftime("%Y%m%d_%H%M%S")
+#             current_session_id   = f"session_{ts}"
 #
-# We insert the reset block on the lines immediately preceding it.
+# We insert the reset block immediately before `ts = ...`.
 
-ANCHOR = '            current_session_id = datetime.now().strftime('
+ANCHOR = (
+    '            ts                   = datetime.now().strftime("%Y%m%d_%H%M%S")\n'
+    '            current_session_id   = f"session_{ts}"'
+)
 
 RESET_BLOCK = (
     '            # FIX-P14: reset transcription state so no previous session\'s data bleeds\n'
@@ -138,12 +143,14 @@ RESET_BLOCK = (
 )
 
 assert ANCHOR in src, (
-    "Anchor not found — the current_session_id assignment line may have been "
-    "modified or is indented differently.\n"
-    "Check start_recording_handler() in evvos-picam-tcp.py and update ANCHOR."
+    "Anchor not found — the try block in start_recording_handler() may have been modified.\n"
+    "Expected these two lines (exact spacing):\n"
+    "    ts                   = datetime.now().strftime(\"%Y%m%d_%H%M%S\")\n"
+    "    current_session_id   = f\"session_{ts}\"\n"
+    "Check start_recording_handler() in evvos-picam-tcp.py."
 )
 
-# Insert the reset block immediately before the anchor line.
+# Insert the reset block immediately before the anchor lines.
 src = src.replace(ANCHOR, RESET_BLOCK + ANCHOR, 1)
 script.write_text(src, encoding="utf-8")
 print("Patch applied: transcription state is now reset at the start of every new recording session.")
