@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# EVVOS Pi Camera — Occlusion Array Dimension Fix (Patch 14)
+# EVVOS Pi Camera — Occlusion Array Dimension Fix (Patch 14 rev2)
 #
 # Run on the Raspberry Pi as root:
 #   sudo bash setup_picam_occlusion_fix_14.sh
@@ -12,28 +12,16 @@
 #   "too many indices for array: array is 2-dimensional, but 3 were indexed"
 #
 # Root cause:
-#   camera_status_handler() calls make_array("main") and then indexes the
-#   result as a 3D array (H, W, C) — e.g. frame[:, :, 0] or frame.mean(axis=2).
-#
-#   During an active H264 recording the main stream is being consumed by the
-#   encoder. make_array("main") in this state returns a 2D luma-only array
-#   (H, W) with NO channel axis. Any 3-index operation on it raises:
-#
-#     IndexError: too many indices for array:
-#     array is 2-dimensional, but 3 were indexed
-#
-#   This explains why the error fires on STOP_RECORDING (camera still encoding
-#   when the status check runs) AND on consecutive TAKE_SNAPSHOT calls.
+#   camera_status_handler() calls make_array("main") and indexes the result
+#   as a 3D array (H, W, C). During an active H264 recording the encoder
+#   consumes the main stream so make_array() returns a 2D luma-only array
+#   (H, W) with no channel axis — any 3-index operation crashes.
 #
 # Fix:
-#   Replace the hardcoded 3D brightness calculation with a dimension-aware
-#   one that works on both 2D (luma) and 3D (RGB/YUV) frames:
-#
-#     brightness = float(frame.mean())
-#
-#   np.ndarray.mean() with no arguments averages all elements regardless of
-#   shape — a 2D luma frame and a 3D RGB frame both produce a valid 0-255
-#   brightness value. The occlusion threshold logic is unchanged.
+#   Replace the brightness calculation with frame.mean() which works on
+#   both 2D and 3D arrays regardless of how many channels are present.
+#   Indentation is detected dynamically from the original source line so
+#   the replacement always matches the surrounding block.
 #
 # Safe to re-run — a guard prevents double-patching.
 # Creates a timestamped backup before patching.
@@ -70,7 +58,7 @@ if ! grep -q "camera_status_handler" "$CAMERA_SCRIPT"; then
     exit 1
 fi
 
-log_section "EVVOS Pi Camera — Occlusion Array Dimension Fix (Patch 14)"
+log_section "EVVOS Pi Camera — Occlusion Array Dimension Fix (Patch 14 rev2)"
 
 cp "$CAMERA_SCRIPT" "${CAMERA_SCRIPT}.bak.$(date +%Y%m%d_%H%M%S)"
 log_success "Backup created"
@@ -88,61 +76,44 @@ if "# FIX-P14: dimension-aware brightness" in src:
     raise SystemExit(0)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PATCH — Replace any 3D-assuming brightness calculation inside
-#         camera_status_handler() with frame.mean().
+# Find the brightness assignment line, capture its leading whitespace,
+# then replace it with an indentation-matched fixed version.
 #
-# Common patterns written by earlier patches:
-#   A)  brightness = frame.mean(axis=2).mean()
-#   B)  brightness = frame[:, :, 0].mean()
-#   C)  brightness = float(frame[:, :, :3].mean())
-#   D)  brightness = np.mean(frame)          ← already safe, but guard anyway
-#
-# We do a targeted replacement inside the function body only, so we don't
-# accidentally change anything else in the file.
+# This approach is safe regardless of whether the surrounding code uses
+# 8, 12, 16, or 20 spaces — the indent is read from the file itself.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Patterns to replace → all become: float(frame.mean())
-PATTERNS = [
-    r'brightness\s*=\s*frame\.mean\(axis=2\)\.mean\(\)',
-    r'brightness\s*=\s*frame\[:, :, 0\]\.mean\(\)',
-    r'brightness\s*=\s*float\(frame\[:, :, :3\]\.mean\(\)\)',
-    r'brightness\s*=\s*float\(frame\.mean\(axis=2\)\.mean\(\)\)',
-    r'brightness\s*=\s*np\.mean\(frame\)',
-    r'brightness\s*=\s*float\(np\.mean\(frame\)\)',
-]
-
-REPLACEMENT = (
-    "# FIX-P14: dimension-aware brightness — works for both 2D (luma, during\n"
-    "            # H264 recording) and 3D (RGB/YUV, when camera is idle). Any\n"
-    "            # 3D-specific indexing raises IndexError when the encoder is\n"
-    "            # consuming the main stream and make_array() returns 2D.\n"
-    "            brightness = float(frame.mean())"
+PATTERN = re.compile(
+    r'^(?P<indent>[ \t]*)(?P<expr>brightness\s*=\s*(?:float\()?(?:np\.mean\(frame\)|frame[\[\.][^\n]+))$',
+    re.MULTILINE
 )
 
-patched = 0
-for pattern in PATTERNS:
-    new_src, count = re.subn(pattern, REPLACEMENT, src)
-    if count:
-        src = new_src
-        patched += count
-        print(f"Replaced pattern: {pattern}")
+match = PATTERN.search(src)
+if not match:
+    print("ERROR: Could not find a brightness assignment to patch.")
+    print("       Check camera_status_handler() in evvos-picam-tcp.py.")
+    print("")
+    print("       Printing all lines containing 'brightness' for diagnosis:")
+    for i, line in enumerate(src.splitlines(), 1):
+        if 'brightness' in line:
+            print(f"       L{i}: {line!r}")
+    raise SystemExit(1)
 
-if patched == 0:
-    # Last-resort: find any line assigning to `brightness` that contains
-    # a bracket-index on `frame` and replace it.
-    fallback_pattern = r'brightness\s*=\s*[^\n]*frame\[[^\n]+'
-    new_src, count = re.subn(fallback_pattern, REPLACEMENT, src)
-    if count:
-        src = new_src
-        patched += count
-        print(f"Fallback replacement applied ({count} occurrence(s)).")
-    else:
-        print("ERROR: Could not find a brightness assignment to patch.")
-        print("       Manually check camera_status_handler() in evvos-picam-tcp.py.")
-        raise SystemExit(1)
+indent = match.group("indent")
+old_line = match.group(0)
 
+print(f"Found brightness line (indent={len(indent)} spaces): {old_line.strip()!r}")
+
+new_lines = (
+    f"{indent}# FIX-P14: dimension-aware brightness -- works for both 2D (luma, during\n"
+    f"{indent}# H264 recording) and 3D (RGB, when camera is idle). Any 3D-specific\n"
+    f"{indent}# indexing raises IndexError when make_array() returns 2D.\n"
+    f"{indent}brightness = float(frame.mean())"
+)
+
+src = src.replace(old_line, new_lines, 1)
 script.write_text(src, encoding="utf-8")
-print(f"Done — {patched} brightness expression(s) patched.")
+print("Done -- brightness expression patched with correct indentation.")
 PATCHER_EOF
 
 log_success "Python patcher completed"
@@ -159,10 +130,10 @@ log_section "Verifying patch"
 python3 -c "
 src = open('/usr/local/bin/evvos-picam-tcp.py').read()
 checks = [
-    ('FIX-P14 patch marker present',      '# FIX-P14: dimension-aware brightness' in src),
-    ('frame.mean() used for brightness',  'brightness = float(frame.mean())'      in src),
-    ('no 3D axis=2 indexing',             'frame.mean(axis=2)' not in src),
-    ('no 3D channel-0 indexing',          'frame[:, :, 0]'     not in src),
+    ('FIX-P14 patch marker present',    '# FIX-P14: dimension-aware brightness' in src),
+    ('frame.mean() used',               'brightness = float(frame.mean())'       in src),
+    ('no axis=2 indexing remaining',    'frame.mean(axis=2)'                not in src),
+    ('no channel-0 indexing remaining', 'frame[:, :, 0]'                    not in src),
 ]
 ok = True
 for label, result in checks:
